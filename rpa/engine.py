@@ -5,12 +5,15 @@
 """
 from __future__ import annotations
 
+import csv
 import os
 import random
 import re
+import subprocess
 import sys
 import time
 import threading
+from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
@@ -40,7 +43,7 @@ STEP_TYPES = {
     "click":   ("左键单击", "图片文件名，如 按钮.png", True,  "点击次数"),
     "dblclick": ("左键双击", "图片文件名，如 按钮.png", True,  "双击次数"),
     "rightclick": ("右键单击", "图片文件名，如 菜单.png", True, "点击次数"),
-    "input":   ("输入文本", "要粘贴的文字（会占用剪贴板）", False, ""),
+    "input":   ("输入文本", "要输入的文字（默认粘贴，可在高级里改逐字）", False, ""),
     "wait":    ("等待",     "等待秒数，如 1.5", False, ""),
     "scroll":  ("滚轮",     "滚动距离，正数向上 / 负数向下，如 -200", False, ""),
     "hotkey":  ("热键组合", "用英文逗号分隔，如 ctrl,s 或 win,r", True, "重复次数（-1 无限）"),
@@ -52,6 +55,14 @@ STEP_TYPES = {
     "window":  ("窗口操作", "activate:标题 / wait:标题|秒 / close:标题", False, ""),
     "click_xy": ("坐标点击", "x,y，如 500,300；可加 ,right 表示右键", True, "点击次数"),
     "move_xy": ("移动鼠标", "x,y，如 500,300", False, ""),
+    # ---- 条件与变量 ----
+    "if_not_image": ("条件：没出现图片则执行", "图片名|组名", True, "执行次数"),
+    "if_else": ("条件：二选一", "图片名|出现执行|没出现执行", True, "执行次数"),
+    "if_window": ("条件：窗口存在则执行", "窗口标题|组名", True, "执行次数"),
+    "set": ("设置变量", "变量名=值，如 次数={index}", False, ""),
+    "copy": ("复制选中文字到变量", "变量名，如 订单号", False, ""),
+    # ---- 鼠标 ----
+    "drag": ("拖拽", "起点图|终点图；也可写 x1,y1|x2,y2", False, ""),
 }
 
 # Excel 中第 1 列使用的数字编号（1-9 与旧版 cmd.xls 完全兼容）
@@ -70,21 +81,178 @@ TYPE_TO_CODE = {
     "window": 12.0,
     "click_xy": 13.0,
     "move_xy": 14.0,
+    "if_not_image": 15.0,
+    "if_else": 16.0,
+    "if_window": 17.0,
+    "set": 18.0,
+    "copy": 19.0,
+    "drag": 20.0,
 }
 CODE_TO_TYPE = {v: k for k, v in TYPE_TO_CODE.items()}
 
 IMAGE_TYPES = {"click", "dblclick", "rightclick"}
 REPEAT_TYPES = {"click", "dblclick", "rightclick", "hotkey", "call",
-                "if_image", "click_xy"}
+                "if_image", "if_not_image", "if_else", "if_window",
+                "click_xy"}
+# 界面上「截图替换」等图片相关操作适用的步骤类型
+IMAGE_STEP_TYPES = IMAGE_TYPES | {"if_image", "if_not_image", "if_else",
+                                  "drag"}
+
+
+Point = namedtuple("Point", "x y")
+
+# 条件类步骤（内容里的 | 后面是执行组）
+CONDITION_TYPES = {"if_image", "if_not_image", "if_else", "if_window"}
+
+_OFFSET_RE = re.compile(r"\+\s*(-?\d+)\s*,\s*(-?\d+)\s*$")
+_NTH_RE = re.compile(r"#\s*(\d+)\s*$")
+_REGION_RE = re.compile(
+    r"@\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$")
+
+
+@dataclass
+class ImageTarget:
+    """一条图片写法解析后的结果。
+
+    写法（顺序固定，都可省略）：
+        按钮.png                  普通图片
+        按钮.png;备用.png         任一命中即可
+        按钮.png@100,200,600,400  只在区域内找
+        按钮.png#2                命中第 2 个（从上到下、从左到右）
+        按钮.png+12,-8            命中点再偏移一点
+    """
+
+    name: str = ""
+    region: Optional[tuple[int, int, int, int]] = None
+    nth: Optional[int] = None          # None = 用步骤上的设置；0 = 第一个
+    offset: tuple[int, int] = (0, 0)
+
+
+def _split_image_suffix(part: str) -> ImageTarget:
+    """拆出单个图片写法里的 @区域 / #第几个 / +偏移。"""
+    name = (part or "").strip()
+    offset = (0, 0)
+    nth: Optional[int] = None
+    region = None
+
+    match = _OFFSET_RE.search(name)
+    if match:
+        offset = (int(match.group(1)), int(match.group(2)))
+        name = name[:match.start()].strip()
+
+    match = _NTH_RE.search(name)
+    if match:
+        nth = max(0, int(match.group(1)) - 1)   # 用户写 #1 = 第一个
+        name = name[:match.start()].strip()
+
+    match = _REGION_RE.search(name)
+    if match:
+        region = (int(match.group(1)), int(match.group(2)),
+                  int(match.group(3)), int(match.group(4)))
+        name = name[:match.start()].strip()
+
+    return ImageTarget(name, region, nth, offset)
+
+
+def parse_image_targets(text: str) -> list[ImageTarget]:
+    """把内容解析成候选图列表（; 分隔，每个可带自己的后缀）。"""
+    targets = []
+    for part in str(text or "").split(";"):
+        target = _split_image_suffix(part)
+        if target.name:
+            targets.append(target)
+    return targets
+
+
+def parse_image_target(text: str) -> ImageTarget:
+    """只取第一条候选（给只需要单个图片的调用方用）。"""
+    targets = parse_image_targets(text)
+    return targets[0] if targets else ImageTarget()
+
+
+def image_names(text: str) -> list[str]:
+    """内容里引用的图片文件名（去掉 @区域 / #序号 / +偏移 等后缀）。"""
+    return [target.name for target in parse_image_targets(text)]
+
+
+def _parse_region(text: str) -> Optional[tuple[int, int, int, int]]:
+    """把 "x,y,宽,高" 解析成整数四元组；格式不对返回 None。"""
+    if not text:
+        return None
+    parts = [p.strip() for p in str(text).split(",")]
+    if len(parts) != 4:
+        return None
+    try:
+        x, y, width, height = (int(float(p)) for p in parts)
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return x, y, width, height
+
+
+def parse_region(text: str) -> Optional[tuple[int, int, int, int]]:
+    """公开的「x,y,宽,高」解析（界面的识别范围输入框用）。"""
+    return _parse_region(text)
+
+
+def target_groups(step: "Step") -> list[str]:
+    """这一步会调用哪些执行组（调用 / 条件满足或不满足时）。"""
+    text = (step.content or "").strip()
+    if step.type == "call":
+        return [text] if text else []
+    if step.type in ("if_image", "if_not_image", "if_window"):
+        parts = [p.strip() for p in text.split("|")]
+        return [parts[1]] if len(parts) > 1 and parts[1] else []
+    if step.type == "if_else":
+        parts = [p.strip() for p in text.split("|")]
+        return [p for p in parts[1:3] if p]
+    return []
 
 # 图片步骤超时后的处理方式（timeout > 0 时生效）
 FAIL_ACTIONS = ("skip", "stop")
+# 文本输入方式：paste = 剪贴板粘贴（快，支持中文）；type = 逐字输入（兼容个别应用）
+INPUT_MODES = ("paste", "type")
 
 DEFAULT_CONFIDENCE = 0.9
 POLL_INTERVAL = 0.1
 MAX_CALL_DEPTH = 20
 HEADERS = ["指令类型", "内容", "重复次数(-1无限)", "备注"]
 GENERIC_SHEET_NAMES = {"sheet1", "sheet", "工作表1", "sheet2"}
+
+
+def find_images(text: str, base_dir: str = "",
+                confidence: float = DEFAULT_CONFIDENCE,
+                region: Optional[tuple[int, int, int, int]] = None,
+                grayscale: bool = False) -> list[dict]:
+    """在屏幕上找内容里写的图片（界面「检测图片」用，不点击）。
+
+    返回每个候选图的命中情况：name / missing / points。points 是匹配框
+    的中心点，按从上到下、从左到右排序。
+    """
+    import pyautogui
+
+    result = []
+    for target in parse_image_targets(text):
+        path = assets.resolve_image(target.name, base_dir or None)
+        item = {"name": target.name, "missing": False, "points": []}
+        if not os.path.exists(path):
+            item["missing"] = True
+            result.append(item)
+            continue
+        kwargs = {"confidence": confidence, "grayscale": grayscale}
+        use_region = target.region or region
+        if use_region:
+            kwargs["region"] = use_region
+        try:
+            boxes = list(pyautogui.locateAllOnScreen(path, **kwargs))
+        except Exception:  # noqa: BLE001 - 找不到/环境不支持都按「没命中」
+            boxes = []
+        boxes.sort(key=lambda box: (box.top, box.left))
+        item["points"] = [(box.left + box.width / 2,
+                           box.top + box.height / 2) for box in boxes]
+        result.append(item)
+    return result
 
 
 class StepError(ValueError):
@@ -118,13 +286,20 @@ def _parse_xy(text: str) -> tuple[float, float, str]:
 class Step:
     """一条指令。
 
-    timeout / on_fail 只对图片类步骤有意义：
+    timeout / on_fail 对图片 / 拖拽 / 条件步骤有效：
       timeout = 0   一直等图片出现（旧版行为，默认）
       timeout > 0   最多等这么久；到时按 on_fail 处理
       on_fail = skip  跳过这步继续往下（默认）
       on_fail = stop  中止整个执行
     Excel 只有 4 列，没有这两项的列——导入的旧文件一律按默认值
-    （一直等）处理，与旧版完全一致。
+    （一直等）处理，与旧版完全一致。条件步骤超时按「条件不满足」处理。
+
+    region / nth / grayscale 是可选的识别微调（界面上放在「高级选项」）：
+      region     "x,y,宽,高"，只在屏幕这块区域里找
+      nth        命中第几个（0 = 最左上那个）
+      grayscale  灰度匹配，抗颜色抖动
+    retry / retry_delay：这一步没成功时重试几次、每次间隔多少秒。
+    input_mode：input 步骤用 paste（默认）还是 type（逐字，仅英文数字）。
     """
 
     type: str = "click"
@@ -133,6 +308,12 @@ class Step:
     note: str = ""
     timeout: float = 0
     on_fail: str = "skip"
+    region: str = ""
+    nth: int = 0
+    grayscale: bool = False
+    retry: int = 0
+    retry_delay: float = 0.5
+    input_mode: str = "paste"
 
     def label(self) -> str:
         return STEP_TYPES.get(self.type, (self.type,))[0]
@@ -149,7 +330,8 @@ class Step:
         if self.type in IMAGE_TYPES:
             if not text:
                 errors.append(f"{where}：需要填写图片文件名")
-        elif self.type in ("input", "hotkey", "time", "cmd", "call"):
+        elif self.type in ("input", "hotkey", "time", "cmd", "call", "copy",
+                           "set"):
             if not text:
                 errors.append(f"{where}：内容不能为空")
         elif self.type == "wait":
@@ -173,8 +355,9 @@ class Step:
             if any(k.isdigit() for k in keys):
                 errors.append(f"{where}：单个数字键无法识别，请改用 num0 这类写法")
 
-        # 图片类与拖拽（两端可能是图片）都支持等待超时
-        if (self.type in IMAGE_TYPES or self.type == "drag") and self.timeout:
+        # 图片类、拖拽、条件都可以「最多等 N 秒」
+        if (self.type in IMAGE_TYPES or self.type == "drag"
+                or self.type in CONDITION_TYPES) and self.timeout:
             try:
                 if float(self.timeout) < 0:
                     errors.append(f"{where}：等待超时不能为负数")
@@ -223,9 +406,12 @@ class Step:
             if not _valid_xy(text):
                 errors.append(f"{where}：坐标要写成 x,y，如 500,300")
 
-        if self.region and self.type in IMAGE_TYPES:
+        if self.region and self.type in IMAGE_STEP_TYPES:
             if _parse_region(self.region) is None:
                 errors.append(f"{where}：识别范围要写成 x,y,宽,高")
+
+        if self.input_mode not in INPUT_MODES:
+            errors.append(f"{where}：输入方式只能是 paste 或 type")
 
         if self.type in REPEAT_TYPES:
             try:
@@ -277,7 +463,8 @@ class Step:
     def copy(self) -> "Step":
         return Step(self.type, self.content, self.repeat, self.note,
                     self.timeout, self.on_fail, self.region, self.nth,
-                    self.grayscale, self.retry, self.retry_delay)
+                    self.grayscale, self.retry, self.retry_delay,
+                    self.input_mode)
 
     def to_dict(self) -> dict:
         return {"type": self.type, "content": self.content,
@@ -285,7 +472,8 @@ class Step:
                 "timeout": self.timeout, "on_fail": self.on_fail,
                 "region": self.region, "nth": self.nth,
                 "grayscale": self.grayscale, "retry": self.retry,
-                "retry_delay": self.retry_delay}
+                "retry_delay": self.retry_delay,
+                "input_mode": self.input_mode}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Step":
@@ -299,7 +487,11 @@ class Step:
                    nth=int(data.get("nth", 0) or 0),
                    grayscale=bool(data.get("grayscale", False)),
                    retry=int(data.get("retry", 0) or 0),
-                   retry_delay=float(data.get("retry_delay", 0.5) or 0.5))
+                   retry_delay=float(
+                       data.get("retry_delay", 0.5)
+                       if data.get("retry_delay") not in (None, "") else 0.5),
+                   input_mode=str(data.get("input_mode", "paste")
+                                 or "paste"))
 
 
 @dataclass
@@ -617,6 +809,97 @@ def load_data(path: str) -> list[dict]:
     return data
 
 
+RESULT_SUFFIX = ".result.csv"
+
+
+def result_path(data_path: str) -> str:
+    """数据文件对应的结果文件：同目录下 <文件名>.result.csv。"""
+    stem, _ = os.path.splitext(os.path.abspath(data_path))
+    return stem + RESULT_SUFFIX
+
+
+def read_results(path: str) -> list[dict]:
+    """读回结果文件（断点续跑 / 合并用）；不存在返回空列表。"""
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def write_results(data: list[dict], results: list[dict], path: str,
+                  merge: bool = True) -> str:
+    """把每行结果写成 CSV（带 BOM，Excel 直接打开）。
+
+    data     原始数据行（用来补齐数据列）
+    results  Executor.row_results：{row, ok, failed_step, vars}
+    merge    文件已存在时按 __行号 合并，断点续跑不会丢旧行
+    """
+    previous = read_results(path) if merge else []
+    merged: dict[int, dict] = {}
+    for old in previous:
+        try:
+            key = int(float(old.get("__行号", "")))
+        except (TypeError, ValueError):
+            continue
+        merged[key] = old
+
+    columns: list[str] = []
+    for row in data:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+
+    extra: list[str] = []
+    for item in results:
+        for key in (item.get("vars") or {}):
+            if key not in columns and key not in extra:
+                extra.append(key)
+    reserved = {"__行号", "__结果", "__失败步骤"}
+    var_columns = []
+    for key in extra:
+        name = (key if key not in columns and key not in reserved
+                else f"结果_{key}")
+        while name in columns or name in reserved:
+            name = f"结果_{name}"
+        var_columns.append((key, name))
+
+    fieldnames = list(columns) + ["__行号", "__结果", "__失败步骤"]
+    fieldnames += [name for _key, name in var_columns]
+
+    for item in results:
+        row_no = int(item["row"])
+        source = data[row_no - 1] if 0 < row_no <= len(data) else {}
+        record = {key: source.get(key, "") for key in columns}
+        record["__行号"] = row_no
+        record["__结果"] = "成功" if item.get("ok") else "失败"
+        record["__失败步骤"] = item.get("failed_step", "")
+        values = item.get("vars") or {}
+        for key, name in var_columns:
+            record[name] = values.get(key, "")
+        merged[row_no] = record
+
+    # 旧文件里可能有这次没再出现的变量列，原样保留
+    for old in previous:
+        for key in old:
+            if key and key not in fieldnames:
+                fieldnames.append(key)
+    for record in merged.values():
+        for name in fieldnames:
+            record.setdefault(name, "")
+
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames,
+                                extrasaction="ignore")
+        writer.writeheader()
+        for row_no in sorted(merged):
+            writer.writerow(merged[row_no])
+    os.replace(tmp, path)
+    return path
+
+
 def save_steps(path: str, steps: Iterable[Step]) -> None:
     export_excel(path, [Group("Sheet1", list(steps))], single=True)
 
@@ -832,8 +1115,16 @@ class Executor:
     data: list[dict] = field(default_factory=list)
     stats: list[dict] = field(default_factory=list)
     vars: dict[str, str] = field(default_factory=dict)
+    # 失败截图目录（空 = 不截图）；由界面 / 命令行按需设置
+    shot_dir: str = ""
+    # 数据驱动从第几行之后继续（0 = 从头）；由「断点续跑」设置
+    row_offset: int = 0
+    # 每行跑完后的一行结果：{row, ok, failed_step, vars}
+    row_results: list[dict] = field(default_factory=list)
     _progress_done: int = 0
     _progress_total: int = 0
+    # 当前数据行里写过的变量名（结果回写只带本行产生/更新的列）
+    _row_var_keys: set[str] = field(default_factory=set)
 
     # -- 生命周期 ---------------------------------------------------------
     def reset(self) -> None:
@@ -845,6 +1136,8 @@ class Executor:
         self._step_ok = True
         self.stats = []
         self.vars = {}
+        self.row_results = []
+        self._row_var_keys = set()
         self._progress_done = 0
 
     def stop(self) -> None:
@@ -883,17 +1176,58 @@ class Executor:
         return not self.stop_event.is_set()
 
     # -- 单步动作 ---------------------------------------------------------
-    def _locate(self, image: str):
-        import pyautogui
+    def _locate(self, image: str, step: Optional[Step] = None):
+        """找图片，返回 Point；找不到返回 None。
 
-        path = assets.resolve_image(image, self.base_dir or None)
-        if not os.path.exists(path):
+        支持候选图（; 分隔）、区域（@x,y,w,h 或 step.region）、第 N 个
+        （#n 或 step.nth）、灰度（step.grayscale）和命中点偏移（+dx,dy）。
+        """
+        targets = parse_image_targets(image)
+        if not targets:
+            raise StepError("图片名不能为空")
+
+        missing = []
+        for target in targets:
+            path = assets.resolve_image(target.name, self.base_dir or None)
+            if not os.path.exists(path):
+                missing.append(target.name)
+                continue
+            region = target.region or _parse_region(
+                getattr(step, "region", "") if step else "")
+            nth = (target.nth if target.nth is not None
+                   else int(getattr(step, "nth", 0) or 0))
+            grayscale = bool(getattr(step, "grayscale", False))
+            point = self._locate_one(path, region, nth, grayscale)
+            if point is not None:
+                dx, dy = target.offset
+                return Point(point.x + dx, point.y + dy)
+
+        if missing and len(missing) == len(targets):
             # 文件缺失是配置错误（预检本该拦住）：明确中止，而不是让
             # OpenCV 抛一句看不懂的 imread 失败、更不是永远等下去
-            raise StepError(f"找不到图片文件：{image}（{path}）")
+            raise StepError("找不到图片文件：" + "、".join(missing))
+        return None
+
+    def _locate_one(self, path: str,
+                    region: Optional[tuple[int, int, int, int]],
+                    nth: int, grayscale: bool):
+        """在单张图上找第 nth 个（0 = 第一个）。"""
+        import pyautogui
+
+        kwargs = {"confidence": self.confidence, "grayscale": grayscale}
+        if region:
+            kwargs["region"] = region
         try:
-            return pyautogui.locateCenterOnScreen(path,
-                                                  confidence=self.confidence)
+            if nth and nth > 0:
+                boxes = list(pyautogui.locateAllOnScreen(path, **kwargs))
+                # 统一成「从上到下、从左到右」，用户写 #2 才有稳定含义
+                boxes.sort(key=lambda box: (box.top, box.left))
+                if nth >= len(boxes):
+                    return None
+                box = boxes[nth]
+                return Point(box.left + box.width / 2,
+                             box.top + box.height / 2)
+            return pyautogui.locateCenterOnScreen(path, **kwargs)
         except pyautogui.ImageNotFoundException:
             # pyautogui 默认「找不到就抛异常」，但引擎的语义是「返回 None，
             # 由调用方的等待/重试/超时逻辑决定怎么办」——这里必须接住，
@@ -901,7 +1235,8 @@ class Executor:
             return None
 
     def _click(self, image: str, clicks: int, button: str, repeat: float,
-               timeout: float = 0, on_fail: str = "skip") -> bool:
+               timeout: float = 0, on_fail: str = "skip",
+               step: Optional[Step] = None) -> bool:
         """点击图片。返回 False 表示这步没做成（超时跳过或被停止）。
 
         timeout = 0 时一直重试直到找到——与旧版行为完全一致。
@@ -915,7 +1250,7 @@ class Executor:
         while done < times:
             if not self._wait_ready():
                 return False
-            location = self._locate(image)
+            location = self._locate(image, step)
             if location is not None:
                 pyautogui.click(location.x, location.y, clicks=clicks,
                                 interval=0.2, duration=0.2, button=button)
@@ -963,18 +1298,15 @@ class Executor:
                               self._row_no, self.vars)
         if step.type == "click":
             self._click(text, 1, "left", step.repeat, step.timeout,
-                        step.on_fail)
+                        step.on_fail, step=step)
         elif step.type == "dblclick":
             self._click(text, 2, "left", step.repeat, step.timeout,
-                        step.on_fail)
+                        step.on_fail, step=step)
         elif step.type == "rightclick":
             self._click(text, 1, "right", step.repeat, step.timeout,
-                        step.on_fail)
+                        step.on_fail, step=step)
         elif step.type == "input":
-            pyperclip.copy(text)
-            pyautogui.hotkey("ctrl", "v")
-            self._emit("info", f"输入：{text}")
-            self._sleep(0.5)
+            self._input_text(text, step.input_mode)
         elif step.type == "wait":
             seconds = float(text)
             self._emit("info", f"等待 {seconds:g} 秒")
@@ -994,14 +1326,10 @@ class Executor:
             self._hotkey(text, step.repeat)
         elif step.type == "time":
             now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            pyperclip.copy(now)
-            pyautogui.hotkey("ctrl", "v")
+            self._input_text(now)
             self._emit("info", f"粘贴时间：{now}")
-            self._sleep(0.5)
         elif step.type == "cmd":
-            self._emit("info", f"执行命令：{text}")
-            os.system(text)
-            self._sleep(0.5)
+            self._run_cmd(text)
         elif step.type == "if_image":
             self._run_if_image(text, step, depth)
         elif step.type == "if_not_image":
@@ -1037,13 +1365,94 @@ class Executor:
         else:
             raise StepError(f"未知指令类型：{step.type}")
 
+    def _input_text(self, text: str, mode: str = "paste") -> None:
+        """输入文本：默认剪贴板粘贴；type 模式逐字输入（仅英文数字）。
+
+        粘贴后会等目标应用读完剪贴板，再把用户原来的剪贴板内容还回去；
+        如果这期间剪贴板已经被别的程序改了，就不动它。
+        """
+        import pyautogui
+        import pyperclip
+
+        if mode == "type":
+            if all(ord(ch) < 128 for ch in text):
+                pyautogui.write(text, interval=0.02)
+                self._emit("info", f"逐字输入：{text}")
+                self._sleep(0.2)
+                return
+            self._emit("warn", "逐字输入不支持中文，已改用剪贴板粘贴")
+
+        try:
+            previous = pyperclip.paste()
+        except Exception:      # noqa: BLE001 - 剪贴板不可用时不影响主流程
+            previous = ""
+        pyperclip.copy(text)
+        pyautogui.hotkey("ctrl", "v")
+        self._emit("info", f"输入：{text}")
+        self._sleep(0.5)
+        try:
+            if pyperclip.paste() == text:      # 没被别人改过才还原
+                pyperclip.copy(previous)
+        except Exception:      # noqa: BLE001
+            pass
+
+    def _run_cmd(self, text: str) -> None:
+        """执行系统命令，并按返回码判断这步是否成功。"""
+        self._emit("info", f"执行命令：{text}")
+        kwargs = {"shell": True, "capture_output": True, "text": True,
+                  "errors": "replace"}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            proc = subprocess.run(text, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            self._step_ok = False
+            self._emit("error", f"命令执行失败：{exc}")
+            return
+        output = (proc.stdout or "").strip()
+        error = (proc.stderr or "").strip()
+        if output:
+            self._emit("info", output[:500])
+        if proc.returncode:
+            self._step_ok = False
+            self._emit("error", f"命令返回 {proc.returncode}："
+                                f"{(error or output)[:300]}")
+        self._sleep(0.2)
+
+    def _wait_image(self, image: str, step: Step, want_present: bool):
+        """按 step.timeout 等图片出现/消失；timeout=0 时只判断一次。"""
+        deadline = (time.time() + step.timeout
+                    if step.timeout and step.timeout > 0 else None)
+        while True:
+            location = self._locate(image, step)
+            if (location is not None) == want_present:
+                return location
+            if deadline is None or time.time() >= deadline:
+                return location
+            if not self._sleep(POLL_INTERVAL):
+                return location
+
+    def _wait_window(self, title: str, timeout: float):
+        """按 timeout 等窗口出现；timeout=0 时只找一次。"""
+        deadline = (time.time() + timeout
+                    if timeout and timeout > 0 else None)
+        while True:
+            window = _find_window(title)
+            if window is not None:
+                return window
+            if deadline is None or time.time() >= deadline:
+                return None
+            if not self._sleep(POLL_INTERVAL):
+                return None
+
     def _run_if_image(self, text: str, step: Step, depth: int = 0) -> None:
         """条件步骤：屏幕上出现指定图片，就调用对应的执行组。"""
         image, _, target = text.partition("|")
         image, target = image.strip(), target.strip()
         if not image or not target:
             raise StepError("条件步骤要写成 图片名|组名")
-        location = self._locate(image)
+        location = self._wait_image(image, step, True)
         if location is None:
             self._emit("info", f"条件不满足：屏幕上没有 {image}，跳过")
             return
@@ -1058,7 +1467,7 @@ class Executor:
         image, target = image.strip(), target.strip()
         if not image or not target:
             raise StepError("条件步骤要写成 图片名|组名")
-        location = self._locate(image)
+        location = self._wait_image(image, step, False)
         if location is not None:
             self._emit("info", f"条件不满足：屏幕上还有 {image}，跳过")
             return
@@ -1073,7 +1482,7 @@ class Executor:
         image, yes, no = image.strip(), yes.strip(), no.strip()
         if not image or not yes:
             raise StepError("二选一要写成 图片名|出现执行|没出现执行")
-        location = self._locate(image)
+        location = self._wait_image(image, step, True)
         if location is not None:
             self._emit("info", f"条件满足：找到 {image}，执行「{yes}」")
             self._call_group(Step("call", yes, step.repeat), depth)
@@ -1091,7 +1500,7 @@ class Executor:
         title, target = title.strip(), target.strip()
         if not title or not target:
             raise StepError("窗口条件要写成 窗口标题|组名")
-        if _find_window(title) is None:
+        if self._wait_window(title, step.timeout) is None:
             self._emit("info", f"条件不满足：找不到窗口「{title}」，跳过")
             return
         self._emit("info", f"条件满足：窗口「{title}」存在，执行「{target}」")
@@ -1106,6 +1515,7 @@ class Executor:
         if not name:
             raise StepError("设置变量要写成 变量名=值")
         self.vars[name] = value.strip()
+        self._row_var_keys.add(name)
         self._emit("info", f"设置变量 {name} = {value.strip()}")
 
     def _copy_to_var(self, text: str) -> None:
@@ -1141,6 +1551,7 @@ class Executor:
             self._emit("warn", f"没复制到文字（变量 {name} 未更新）")
             return
         self.vars[name] = value
+        self._row_var_keys.add(name)
         self._emit("info", f"已复制到变量 {name}：{value[:40]}"
                     + ("…" if len(value) > 40 else ""))
 
@@ -1159,7 +1570,7 @@ class Executor:
         while True:
             if not self._wait_ready():
                 return None
-            location = self._locate(text)
+            location = self._locate(text, step)
             if location is not None:
                 return (location.x, location.y)
             if deadline is not None and time.time() >= deadline:
@@ -1191,13 +1602,16 @@ class Executor:
             return False
         pyautogui.moveTo(start[0], start[1], duration=0.2)
         pyautogui.mouseDown()
-        if not self._sleep(0.1):
-            return False
-        pyautogui.moveTo(end[0], end[1], duration=0.4)
-        pyautogui.mouseUp()
-        self._emit("info", f"拖拽 ({start[0]:g}, {start[1]:g}) → "
-                           f"({end[0]:g}, {end[1]:g})")
-        return True
+        try:
+            if not self._sleep(0.1):
+                return False
+            pyautogui.moveTo(end[0], end[1], duration=0.4)
+            self._emit("info", f"拖拽 ({start[0]:g}, {start[1]:g}) → "
+                               f"({end[0]:g}, {end[1]:g})")
+            return True
+        finally:
+            # 即使中途停止 / 移动失败，也一定把左键松开
+            pyautogui.mouseUp()
 
     # -- 组执行 -----------------------------------------------------------
     def _run_group(self, name: str, depth: int = 0) -> None:
@@ -1227,12 +1641,18 @@ class Executor:
             started = time.time()
             failed = False
             fatal: Optional[StepError] = None
-            self._step_ok = True
-            if step.type == "call":
-                self._call_group(step, depth)
-            else:
+            attempts = 0
+            max_attempts = 1 + max(0, int(step.retry or 0))
+            while True:
+                attempts += 1
+                failed = False
+                fatal = None
+                self._step_ok = True
                 try:
-                    self.run_step(step, depth)
+                    if step.type == "call":
+                        self._call_group(step, depth)
+                    else:
+                        self.run_step(step, depth)
                 except StepError as exc:
                     # 致命错误（如窗口等待超时）：记入统计后再向上抛，
                     # 保证报告里能看到是哪一步失败的
@@ -1241,7 +1661,24 @@ class Executor:
                 except Exception as exc:  # 单步失败不应终止整体
                     failed = True
                     self._emit("error", f"第 {index + 1} 步出错：{exc}")
+
+                ok = not failed and self._step_ok
+                if ok or fatal is not None or attempts >= max_attempts:
+                    break
+                if self.stop_event.is_set() or not self._wait_ready():
+                    break
+                self._emit("warn", f"第 {index + 1} 步失败，"
+                                   f"{step.retry_delay:g} 秒后重试"
+                                   f"（{attempts}/{max_attempts - 1}）")
+                if not self._sleep(step.retry_delay):
+                    break
+
             ok = not failed and self._step_ok
+            shot = ""
+            # 调用组的失败截图由组内那一步负责，避免重复
+            if (not ok and step.type != "call"
+                    and not self.stop_event.is_set() and self.shot_dir):
+                shot = self._capture_failure(name, index, step)
             self.stats.append({
                 "group": name, "index": index + 1, "type": step.type,
                 "content": render_content(step.content, self._row,
@@ -1249,6 +1686,7 @@ class Executor:
                 "note": step.note,
                 "seconds": round(time.time() - started, 2),
                 "ok": ok, "row": self._row_no,
+                "attempts": attempts, "shot": shot,
             })
             self._progress_done += 1
             if self.on_step_done:
@@ -1258,6 +1696,25 @@ class Executor:
                 raise fatal
             if self.stop_event.is_set():
                 return
+
+    def _capture_failure(self, group: str, index: int, step: Step) -> str:
+        """失败时截一张全屏图，返回文件路径；失败返回空串。"""
+        import pyautogui
+
+        try:
+            os.makedirs(self.shot_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            stamp += f"_{int(time.time() * 1000) % 1000:03d}"
+            safe = re.sub(r'[\\/:*?"<>|()\s]+', "_",
+                          f"{group}_{index + 1}")
+            path = os.path.join(self.shot_dir, f"fail_{stamp}_{safe}.png")
+            image = pyautogui.screenshot()
+            image.save(path)
+            self._emit("info", f"已保存失败截图：{path}")
+            return path
+        except Exception as exc:  # noqa: BLE001 - 截图失败不能影响主流程
+            self._emit("warn", f"失败截图保存失败：{exc}")
+            return ""
 
     def _call_group(self, step: Step, depth: int) -> None:
         target = (step.content or "").strip()
@@ -1290,17 +1747,26 @@ class Executor:
             return "error"
 
         rows = self.data or [{}]
+        start_row = max(0, int(self.row_offset or 0))
+        if self.data and start_row:
+            self._emit("info", f"从第 {start_row + 1} 行继续"
+                               f"（跳过前 {start_row} 行）")
         if len(rows) > 1:
             self._emit("info", f"数据驱动：共 {len(rows)} 行，逐行执行")
         self._emit("info", f"开始执行：{'、'.join(names)}" +
                    ("（循环模式）" if loop else ""))
+        stat_start = 0
         try:
             for row_no, row in enumerate(rows, start=1):
+                if row_no <= start_row:
+                    continue
                 if self.stop_event.is_set():
                     self._emit("warn", "已停止")
                     return "stopped"
                 self._row = row or {}
                 self._row_no = row_no
+                self._row_var_keys = set()
+                stat_start = len(self.stats)
                 if len(rows) > 1:
                     self._emit("info", f"—— 第 {row_no}/{len(rows)} 行 ——")
                 round_no = 0
@@ -1321,10 +1787,14 @@ class Executor:
                     if not self._sleep(0.1):
                         self._emit("warn", "已停止")
                         return "stopped"
+                if not loop:
+                    self._record_row(row_no, stat_start)
             self._emit("info", "执行完成")
             return "finished"
         except StepError as exc:
             self._emit("error", str(exc))
+            if not loop:
+                self._record_row(self._row_no, stat_start, force_failed=True)
             return "error"
         except Exception as exc:  # noqa: BLE001
             self._emit("error", f"执行中断：{exc}")
@@ -1332,6 +1802,30 @@ class Executor:
         finally:
             if self.on_finish:
                 self.on_finish("done")
+
+    def _record_row(self, row_no: int, stat_start: int,
+                    force_failed: bool = False) -> None:
+        """把一行数据的结果收进 row_results（给结果回写用）。"""
+        if not self.data or row_no <= 0:
+            return
+        if (self.row_results
+                and self.row_results[-1].get("row") == row_no):
+            return
+        items = self.stats[stat_start:]
+        failed = [item for item in items if not item["ok"]]
+        failed_step = ""
+        if failed:
+            item = failed[0]
+            label = STEP_TYPES.get(item["type"], (item["type"],))[0]
+            failed_step = f"第 {item['index']} 步 {label}"
+        self.row_results.append({
+            "row": row_no,
+            "ok": not failed and not force_failed,
+            "failed_step": failed_step,
+            # 只带本行写过的变量，避免上一行的结果串到下一行
+            "vars": {key: self.vars[key] for key in self._row_var_keys
+                     if key in self.vars},
+        })
 
     def report(self) -> dict:
         """结构化运行报告（每步耗时 / 成败 / 数据行号）。"""
@@ -1345,8 +1839,25 @@ class Executor:
         }
 
 
-def report_markdown(report: dict, result: str) -> str:
-    """把 report() 的结果渲染成 markdown（界面和无头模式共用）。"""
+def report_markdown(report: dict, result: str,
+                    report_dir: Optional[str] = None) -> str:
+    """把 report() 的结果渲染成 markdown（界面和无头模式共用）。
+
+    report_dir 给了时，截图链接会转成相对于报告目录的路径，方便直接点开。
+    """
+    detail = report["detail"]
+    has_shot = any(item.get("shot") for item in detail)
+    has_attempts = any(int(item.get("attempts", 1) or 1) > 1
+                       for item in detail)
+    headers = ["执行组", "行号", "步骤", "类型", "内容", "耗时(秒)", "结果"]
+    aligns = ["---"] * len(headers)
+    if has_attempts:
+        headers.append("重试")
+        aligns.append("---")
+    if has_shot:
+        headers.append("截图")
+        aligns.append("---")
+
     lines = [
         "# 运行报告",
         "",
@@ -1355,13 +1866,148 @@ def report_markdown(report: dict, result: str) -> str:
         f"- 总耗时：{report['seconds']:g} 秒",
         f"- 数据行数：{report['rows']}",
         "",
-        "| 执行组 | 行号 | 步骤 | 类型 | 内容 | 耗时(秒) | 结果 |",
-        "|---|---|---|---|---|---|---|",
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join(aligns) + "|",
     ]
-    for item in report["detail"]:
+    for item in detail:
         content = str(item["content"]).replace("|", "\\|")
-        lines.append(
-            f"| {item['group']} | {item['row']} | {item['index']} "
-            f"| {STEP_TYPES.get(item['type'], (item['type'],))[0]} | {content} "
-            f"| {item['seconds']:g} | {'成功' if item['ok'] else '失败'} |")
+        cells = [
+            str(item["group"]), str(item["row"]), str(item["index"]),
+            STEP_TYPES.get(item["type"], (item["type"],))[0], content,
+            f"{item['seconds']:g}", "成功" if item["ok"] else "失败",
+        ]
+        if has_attempts:
+            cells.append(str(item.get("attempts", 1)))
+        if has_shot:
+            shot = item.get("shot") or ""
+            if shot:
+                if report_dir:
+                    shot = os.path.relpath(shot, report_dir)
+                else:
+                    shot = os.path.basename(shot)
+                cells.append(f"[查看]({shot.replace(os.sep, '/')})")
+            else:
+                cells.append("")
+        lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+def write_report_index(directory: str, keep: int = 100) -> str:
+    """生成 reports/index.html，并只保留最近 keep 份报告。
+
+    返回 index.html 的路径。截图只清理「没有被保留报告引用、且超过 7 天」
+    的文件，避免误删正在用的图。
+    """
+    import html
+
+    os.makedirs(directory, exist_ok=True)
+    names = [name for name in os.listdir(directory)
+             if name.startswith("run_") and name.endswith(".md")]
+    paths = sorted((os.path.join(directory, name) for name in names),
+                   key=os.path.getmtime, reverse=True)
+    for old in paths[keep:]:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    paths = paths[:keep]
+
+    rows = []
+    referenced_shots = set()
+    for path in paths:
+        result = ""
+        steps = failed = seconds = ""
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        referenced_shots.update(re.findall(r"\((shots/[^)]+)\)", text))
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("- 结果："):
+                result = line[len("- 结果："):].strip()
+            elif line.startswith("- 步骤数："):
+                match = re.search(r"步骤数：(\d+)，失败：(\d+)", line)
+                if match:
+                    steps, failed = match.group(1), match.group(2)
+            elif line.startswith("- 总耗时："):
+                seconds = line[len("- 总耗时："):].replace(" 秒", "").strip()
+        label = {"finished": "成功", "error": "失败",
+                 "stopped": "已停止"}.get(result, result or "未知")
+        css = {"finished": "ok", "error": "bad",
+               "stopped": "warn"}.get(result, "")
+        stamp = time.strftime("%Y-%m-%d %H:%M",
+                              time.localtime(os.path.getmtime(path)))
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(stamp)}</td>"
+            f"<td><span class=\"pill {css}\">{html.escape(label)}</span></td>"
+            f"<td>{html.escape(steps)}</td>"
+            f"<td>{html.escape(failed)}</td>"
+            f"<td>{html.escape(seconds)}</td>"
+            f"<td><a href=\"{html.escape(os.path.basename(path))}\">"
+            "查看报告</a></td>"
+            "</tr>")
+
+    # 清理没人引用的旧截图
+    shots_dir = os.path.join(directory, "shots")
+    if os.path.isdir(shots_dir):
+        cutoff = time.time() - 7 * 86400
+        for name in os.listdir(shots_dir):
+            rel = f"shots/{name}"
+            full = os.path.join(shots_dir, name)
+            try:
+                if rel not in referenced_shots and os.path.getmtime(full) < cutoff:
+                    os.remove(full)
+            except OSError:
+                pass
+
+    body = "\n".join(rows) if rows else (
+        "<tr><td colspan=\"6\" class=\"empty\">还没有运行报告</td></tr>")
+    document = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeowGo 运行报告</title>
+<style>
+  body {{ margin: 0; padding: 32px 20px; background: #f4f6fa;
+         color: #22262e; font: 14px/1.6 "Microsoft YaHei UI", system-ui, sans-serif; }}
+  main {{ max-width: 900px; margin: 0 auto; }}
+  h1 {{ margin: 0 0 4px; font-size: 22px; }}
+  p.muted {{ margin: 0 0 20px; color: #7a8290; font-size: 12px; }}
+  table {{ width: 100%; border-collapse: collapse; background: #fff;
+           border: 1px solid #e2e7f0; border-radius: 10px; overflow: hidden; }}
+  th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #eef2f8; }}
+  th {{ background: #eef2f8; color: #66708a; font-weight: 600; font-size: 12px; }}
+  tr:last-child td {{ border-bottom: 0; }}
+  a {{ color: #3b6ff5; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  .pill {{ display: inline-block; padding: 1px 8px; border-radius: 99px;
+           font-size: 12px; background: #eef2f8; }}
+  .pill.ok {{ background: #e7f6ec; color: #2e7d32; }}
+  .pill.bad {{ background: #fdecec; color: #c62828; }}
+  .pill.warn {{ background: #fff4e5; color: #b06a00; }}
+  .empty {{ color: #7a8290; text-align: center; }}
+</style>
+</head>
+<body>
+<main>
+  <h1>MeowGo 运行报告</h1>
+  <p class="muted">最近 {keep} 次运行 · 自动刷新 · 点击「查看报告」打开详情</p>
+  <table>
+    <thead><tr><th>时间</th><th>结果</th><th>步骤</th><th>失败</th>
+    <th>耗时(秒)</th><th>报告</th></tr></thead>
+    <tbody>
+{body}
+    </tbody>
+  </table>
+</main>
+</body>
+</html>
+"""
+    path = os.path.join(directory, "index.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(document)
+    return path

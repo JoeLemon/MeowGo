@@ -16,9 +16,11 @@ from rpa import gui as gui_module  # noqa: E402
 from rpa.engine import (STEP_TYPES, Group, Step, import_excel,  # noqa: E402
                         validate_project)
 
-# 把配置写到临时文件，避免影响用户设置
+# 把配置、报告、失败截图都写到临时目录，避免影响用户数据和仓库里的 reports/
 _TMP = tempfile.mkdtemp(prefix="rpa_gui_test_")
 gui_module.SETTINGS_PATH = os.path.join(_TMP, "settings.json")
+gui_module.REPORTS_DIR = os.path.join(_TMP, "reports")
+gui_module.SHOTS_DIR = os.path.join(gui_module.REPORTS_DIR, "shots")
 gui_module.enable_dpi_awareness()
 
 app = gui_module.App()
@@ -710,8 +712,11 @@ def test_schedule_dialog_and_tick():
                                "content": "1", "note": "", "seconds": 0.1,
                                "ok": True, "row": 1}]
         app._write_run_report("finished")
-        files = os.listdir(gui_module.REPORTS_DIR)
-        assert files and files[0].endswith(".md"), files
+        files = [name for name in os.listdir(gui_module.REPORTS_DIR)
+                 if name.endswith(".md")]
+        assert files, "应写出一份 markdown 报告"
+        assert os.path.exists(os.path.join(gui_module.REPORTS_DIR,
+                                           "index.html"))
         text = open(os.path.join(gui_module.REPORTS_DIR, files[0]),
                     encoding="utf-8").read()
         assert "结果：finished" in text and "| 甲 | 1 | 1 |" in text
@@ -1237,7 +1242,9 @@ def test_step_dialog_new_types():
         app.update()
         assert dialog.group_entry.winfo_ismapped()
         assert dialog.group2_entry.winfo_ismapped(), "if_else 要有第二个组名框"
-        assert not dialog.spin_timeout.winfo_ismapped(), "条件步骤没有等待超时"
+        dialog._toggle_advanced()
+        app.update()
+        assert dialog.spin_timeout.winfo_ismapped(), "条件步骤应支持最多等几秒"
         dialog.var_content.set("弹窗.png")
         dialog.var_group.set("关弹窗")
         dialog.var_group2.set("等弹窗")
@@ -1272,6 +1279,7 @@ def test_step_dialog_new_types():
         app.update()
         dialog5.var_type.set("拖拽")
         dialog5._sync()
+        dialog5._toggle_advanced()
         app.update()
         assert dialog5.spin_timeout.winfo_ismapped(), "拖拽要能设等待超时"
         assert dialog5.btn_grab_xy._enabled, "拖拽要能拾取坐标"
@@ -1756,6 +1764,176 @@ def test_settings_dialog_mini_bar():
     mark("设置对话框迷你条开关")
 
 
+def test_step_dialog_advanced_roundtrip():
+    """高级选项：默认折叠，展开后能回显并保存范围/第几个/灰度/重试。"""
+    fake = gui_module.StepDialog
+    gui_module.StepDialog = _RealStepDialog
+    try:
+        step = Step("click", "a.png", region="10,20,30,40", nth=1,
+                    grayscale=True, retry=2, retry_delay=0.25, timeout=5)
+        dialog = _RealStepDialog(app, app.project, step)
+        app.update()
+        assert not dialog.advanced.winfo_ismapped(), "高级选项默认折叠"
+        assert dialog.var_region.get() == "10,20,30,40"
+        assert dialog.var_nth.get() == "2"
+        assert dialog.var_gray.get() is True
+        assert dialog.var_retry.get() == "2"
+        dialog._toggle_advanced()
+        app.update()
+        assert dialog.advanced.winfo_ismapped()
+        assert dialog.spin_timeout.winfo_ismapped()
+
+        dialog.var_region.set("1,2,300,400")
+        dialog.var_nth.set("3")
+        dialog.var_gray.set(False)
+        dialog.var_retry.set("1")
+        dialog.var_retry_delay.set("0.5")
+        dialog.ok()
+        result = dialog.result
+        assert result.region == "1,2,300,400"
+        assert result.nth == 2
+        assert result.grayscale is False
+        assert result.retry == 1 and result.retry_delay == 0.5
+
+        d2 = _RealStepDialog(app, app.project,
+                             Step("input", "abc", input_mode="type"))
+        app.update()
+        d2._toggle_advanced()
+        app.update()
+        assert "逐字" in d2.var_input_mode.get()
+        d2.ok()
+        assert d2.result.input_mode == "type"
+    finally:
+        gui_module.StepDialog = fake
+    mark("高级选项回显与保存")
+
+
+def test_settings_dialog_result_flags():
+    """设置里可以关掉失败截图 / 结果回写，且不冲掉其它键。"""
+    dialog = _RealSettingsDialog(
+        app, {"shot_on_fail": False, "schedule": {"enabled": True}},
+        app.image_dir)
+    app.update()
+    assert dialog.var_shot.get() is False
+    assert dialog.var_results.get() is True
+    dialog.var_shot.set(True)
+    dialog.var_results.set(False)
+    dialog.ok()
+    assert dialog.result["shot_on_fail"] is True
+    assert dialog.result["save_results"] is False
+    assert dialog.result["schedule"] == {"enabled": True}, "定时配置应保留"
+    mark("截图/结果开关")
+
+
+def test_schedule_task_command():
+    """计划任务：时间、组名、命令行参数正确（不真的调用 schtasks）。"""
+    from rpa.gui import ScheduleDialog
+
+    group = app.project.names()[0]
+    dialog = ScheduleDialog(app, {}, app.project.names())
+    dialog.var_group.set(group)
+    dialog.var_hour.set("7")
+    dialog.var_minute.set("5")
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    original_save = app._save_state
+    app._save_state = lambda: None
+    dialog._schtasks = lambda args: (calls.append(args) or _Proc())
+    try:
+        dialog._create_task()
+    finally:
+        app._save_state = original_save
+    assert calls, "应调用 schtasks"
+    args = calls[0]
+    assert args[:2] == ["/Create", "/SC"]
+    assert args[args.index("/ST") + 1] == "07:05"
+    name = args[args.index("/TN") + 1]
+    assert name.startswith("MeowGo_") and group in name
+    command = args[args.index("/TR") + 1]
+    assert "--run" in command and group in command
+    assert "已创建" in dialog.lbl_task.cget("text")
+    dialog.destroy()
+    mark("Windows 计划任务命令")
+
+
+def test_result_writeback_from_gui():
+    """数据跑完后从界面收尾逻辑写结果文件。"""
+    from rpa.engine import read_results, result_path
+
+    path = os.path.join(_TMP, "gui_data.csv")
+    app.executor.data = [{"订单": "A"}]
+    app.executor.row_results = [{"row": 1, "ok": True, "failed_step": "",
+                                 "vars": {"金额": "9"}}]
+    app._data_path = path
+    old = app.settings.get("save_results", True)
+    app.settings["save_results"] = True
+    try:
+        app._write_result_file()
+        rows = read_results(result_path(path))
+        assert rows[0]["订单"] == "A"
+        assert rows[0]["__结果"] == "成功"
+        assert rows[0]["金额"] == "9"
+    finally:
+        app.settings["save_results"] = old
+        app._data_path = ""
+        app.executor.row_results = []
+    mark("界面结果回写")
+
+
+def test_resume_retries_failed_tail():
+    """断点续跑：最后一行失败时从失败行继续，而不是跳过它。"""
+    from rpa import engine as engine_module
+
+    saved_open = gui_module.filedialog.askopenfilename
+    saved_load = engine_module.load_data
+    saved_read = engine_module.read_results
+    saved_preview = gui_module.DataPreviewDialog
+    saved_ask = gui_module.messagebox.askyesno
+    saved_start = app._start
+    asked = []
+    started = {}
+
+    class _Preview:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def wait(self):
+            return True
+
+    def fake_start(entry, **kwargs):
+        started.update(kwargs)
+
+    try:
+        gui_module.filedialog.askopenfilename = lambda **kwargs: "data.csv"
+        engine_module.load_data = lambda path: [
+            {"名字": "甲"}, {"名字": "乙"}, {"名字": "丙"}]
+        engine_module.read_results = lambda path: [
+            {"__行号": "1", "__结果": "成功"},
+            {"__行号": "2", "__结果": "失败"},
+        ]
+        gui_module.DataPreviewDialog = _Preview
+        gui_module.messagebox.askyesno = (
+            lambda title, text, **kwargs: (asked.append(text) or True))
+        app._start = fake_start
+        app.run_with_data()
+    finally:
+        gui_module.filedialog.askopenfilename = saved_open
+        engine_module.load_data = saved_load
+        engine_module.read_results = saved_read
+        gui_module.DataPreviewDialog = saved_preview
+        gui_module.messagebox.askyesno = saved_ask
+        app._start = saved_start
+
+    assert started.get("row_offset") == 1, started
+    assert "第 2 行失败" in asked[0], asked
+    mark("断点续跑重试失败行")
+
+
 def finish():
     try:
         checks()
@@ -1785,6 +1963,11 @@ def finish():
         test_debug_step_dialog()
         test_debug_confirm_roundtrip()
         test_settings_dialog_mini_bar()
+        test_step_dialog_advanced_roundtrip()
+        test_settings_dialog_result_flags()
+        test_schedule_task_command()
+        test_result_writeback_from_gui()
+        test_resume_retries_failed_tail()
     except Exception as exc:  # noqa: BLE001 — 任何异常都要退出，避免测试挂住
         print(f"  FAIL  {type(exc).__name__}: {exc}")
         app.destroy()

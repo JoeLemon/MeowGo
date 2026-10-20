@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,6 +21,21 @@ class _Point:
         self.x, self.y = x, y
 
 
+class _Box:
+    def __init__(self, box):
+        self.left, self.top, self.width, self.height = box
+
+
+class _FakeImage:
+    def __init__(self, io):
+        self._io = io
+
+    def save(self, path):
+        self._io.calls.append(("screenshot_save", path))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("fake")
+
+
 class _FakeIO:
     """假的输入输出系统：记录调用 + 一块共享剪贴板。
 
@@ -30,9 +46,12 @@ class _FakeIO:
     def __init__(self, calls, located=(100, 100), selection="选中的文字"):
         self.calls = calls
         self.located = located
+        self.located_all = None      # [(left, top, width, height)]，测第 N 个用
         self.selection = selection
         self.clipboard = "旧的剪贴板内容"
         self.base_dir = ""
+        self.locate_kwargs = {}
+        self.all_kwargs = {}
 
 
 class _FakePyAutoGUI:
@@ -48,11 +67,29 @@ class _FakePyAutoGUI:
         self._io = io
         self.KEYBOARD_KEYS = set()
 
-    def locateCenterOnScreen(self, image, confidence=0.9):
+    def locateCenterOnScreen(self, image, **kwargs):
         self._io.calls.append(("locate", image))
+        self._io.locate_kwargs = kwargs
         if not self._io.located:
             raise self.ImageNotFoundException(image)
         return _Point(*self._io.located)
+
+    def locateAllOnScreen(self, image, **kwargs):
+        self._io.calls.append(("locate_all", image))
+        self._io.all_kwargs = kwargs
+        if self._io.located_all is not None:
+            return [_Box(box) for box in self._io.located_all]
+        if not self._io.located:
+            raise self.ImageNotFoundException(image)
+        x, y = self._io.located
+        return [_Box((x - 5, y - 5, 10, 10))]
+
+    def write(self, text, interval=0):
+        self._io.calls.append(("write", text))
+
+    def screenshot(self):
+        self._io.calls.append(("screenshot",))
+        return _FakeImage(self._io)
 
     def click(self, x, y, **kwargs):
         self._io.calls.append(("click", x, y, kwargs.get("button", "left")))
@@ -181,6 +218,15 @@ def test_project_json_roundtrip():
     again = Project.from_dict(data)
     assert again.names() == ["登录", "主流程"]
     assert again.groups[1].steps[0].type == "call"
+    # 高级选项也要能原样往返（重试间隔 0 不能被默认值 0.5 顶掉）
+    advanced = Step("click", "a.png", timeout=3, on_fail="stop",
+                    region="1,2,300,400", nth=2, grayscale=True,
+                    retry=2, retry_delay=0)
+    back = Step.from_dict(advanced.to_dict())
+    assert back.timeout == 3 and back.on_fail == "stop"
+    assert back.region == "1,2,300,400"
+    assert back.nth == 2 and back.grayscale is True
+    assert back.retry == 2 and back.retry_delay == 0
     # 兼容 v1 旧格式
     legacy = Project.from_dict({"image_dir": "images",
                                 "steps": [{"type": "wait", "content": "1",
@@ -427,7 +473,9 @@ def test_data_driven_run():
         ex.groups = {"主": [Step("input", "你好{名字}"), Step("wait", "0.01")]}
         ex.data = [{"名字": "甲"}, {"名字": "乙"}, {"名字": "丙"}]
         assert ex.run("主") == "finished"
-    pasted = [c[1] for c in calls if c[0] == "copy"]
+    # 输入完会还原原来的剪贴板（"旧的剪贴板内容"），这里只看真正输入的值
+    pasted = [c[1] for c in calls
+              if c[0] == "copy" and c[1] != "旧的剪贴板内容"]
     assert pasted == ["你好甲", "你好乙", "你好丙"], pasted
     text = "\n".join(m for _, m in logs)
     assert "数据驱动：共 3 行" in text and "第 2/3 行" in text
@@ -896,6 +944,257 @@ def test_validate_new_types():
     assert Step("if_window", "记事本|甲").validate() == []
     assert Step("if_else", "a.png|甲|乙").validate() == []
     assert Step("if_else", "a.png|甲").validate(), "二选一要三段"
+
+
+def test_parse_image_targets():
+    """图片写法：候选图、区域、第几个、偏移。"""
+    from rpa.engine import parse_image_targets
+
+    targets = parse_image_targets("a.png;b.png@10,20,30,40#2+5,-6")
+    assert [t.name for t in targets] == ["a.png", "b.png"]
+    assert targets[0].nth is None and targets[0].region is None
+    assert targets[1].region == (10, 20, 30, 40)
+    assert targets[1].nth == 1          # 用户写 #2 = 下标 1
+    assert targets[1].offset == (5, -6)
+    assert parse_image_targets("") == []
+
+
+def test_locate_region_nth_grayscale_offset():
+    """识别增强：区域 / 灰度 / 第 N 个 / 偏移 / 候选图。"""
+    calls = []
+    with _fake_input_modules(calls, images=("a.png", "good.png")) as io:
+        ex = Executor()
+        ex.base_dir = io.base_dir
+
+        assert ex._locate("a.png", Step("click", "a.png",
+                                        region="10,20,30,40",
+                                        grayscale=True)) is not None
+        assert io.locate_kwargs.get("region") == (10, 20, 30, 40)
+        assert io.locate_kwargs.get("grayscale") is True
+
+        io.located_all = [(0, 0, 10, 10), (100, 50, 10, 10)]
+        point = ex._locate("a.png", Step("click", "a.png", nth=1))
+        assert (point.x, point.y) == (105, 55)
+        assert io.all_kwargs.get("grayscale") is False
+
+        point = ex._locate("a.png+5,-5", Step("click", "a.png"))
+        assert (point.x, point.y) == (105, 95)
+
+        # 候选图：第一张文件缺失，自动用第二张
+        assert ex._locate("missing.png;good.png") is not None
+
+
+def test_condition_wait_and_not_image():
+    """条件步骤支持「最多等 N 秒」，if_not_image 没图时执行分支。"""
+    calls = []
+    with _fake_input_modules(calls, located=None, images=("a.png",)) as io:
+        ex = Executor()
+        ex.base_dir = io.base_dir
+        ex.log = lambda level, msg: None
+        ex.groups = {"主": [Step("if_image", "a.png|子", timeout=0.2)],
+                     "子": [Step("wait", "0")]}
+        started = time.time()
+        assert ex.run("主") == "finished"
+        assert time.time() - started >= 0.15
+
+        ex2 = Executor()
+        ex2.base_dir = io.base_dir
+        ex2.log = lambda level, msg: None
+        ex2.groups = {"主": [Step("if_not_image", "a.png|子")],
+                      "子": [Step("wait", "0")]}
+        assert ex2.run("主") == "finished"
+        assert any(item["type"] == "wait" for item in ex2.stats)
+
+
+def test_retry_step_and_screenshot():
+    """单步重试 + 最终失败截图。"""
+    tmp = tempfile.mkdtemp(prefix="rpa_test_shot_")
+    try:
+        with _fake_input_modules([]):
+            ex = Executor()
+            ex.log = lambda level, msg: None
+            ex.shot_dir = tmp
+            seen = {"n": 0}
+
+            def flaky(step, depth=0):
+                seen["n"] += 1
+                if seen["n"] < 3:
+                    raise RuntimeError("临时失败")
+                ex._step_ok = True
+
+            ex.run_step = flaky
+            ex.groups = {"主": [Step("wait", "0", retry=2,
+                                     retry_delay=0.01)]}
+            assert ex.run("主") == "finished"
+        assert seen["n"] == 3
+        assert ex.stats[0]["ok"] is True
+        assert ex.stats[0]["attempts"] == 3
+
+        with _fake_input_modules([]):
+            ex2 = Executor()
+            ex2.log = lambda level, msg: None
+            ex2.shot_dir = tmp
+
+            def fail(step, depth=0):
+                ex2._step_ok = False
+
+            ex2.run_step = fail
+            ex2.groups = {"主": [Step("wait", "0")]}
+            assert ex2.run("主") == "finished"
+        shot = ex2.stats[0]["shot"]
+        assert shot and os.path.exists(shot)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cmd_exit_code_marks_failure():
+    """系统命令按返回码判断成败（不再一律算成功）。"""
+    from types import SimpleNamespace
+    import rpa.engine as engine
+
+    saved = engine.subprocess.run
+    try:
+        engine.subprocess.run = lambda *a, **k: SimpleNamespace(
+            returncode=1, stdout="", stderr="bad")
+        with _fake_input_modules([]):
+            ex = Executor()
+            ex.log = lambda level, msg: None
+            ex._step_ok = True
+            ex._run_cmd("exit 1")
+            assert ex._step_ok is False
+
+            engine.subprocess.run = lambda *a, **k: SimpleNamespace(
+                returncode=0, stdout="ok", stderr="")
+            ex._step_ok = True
+            ex._run_cmd("echo ok")
+            assert ex._step_ok is True
+    finally:
+        engine.subprocess.run = saved
+
+
+def test_write_results_roundtrip():
+    """结果回写：数据列 + 行号/结果/失败步骤 + 变量；断点合并。"""
+    from rpa.engine import read_results, result_path, write_results
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_result_")
+    try:
+        data = [{"订单": "A"}, {"订单": "B"}]
+        path = result_path(os.path.join(tmp, "data.csv"))
+        write_results(data, [{"row": 1, "ok": True, "failed_step": "",
+                              "vars": {"金额": "10"}}], path)
+        rows = read_results(path)
+        assert rows[0]["订单"] == "A"
+        assert rows[0]["__结果"] == "成功"
+        assert rows[0]["金额"] == "10"
+
+        write_results(data, [{"row": 2, "ok": False,
+                              "failed_step": "第 3 步 左键单击",
+                              "vars": {}}], path)
+        rows = read_results(path)
+        assert len(rows) == 2
+        assert rows[1]["__结果"] == "失败"
+        assert rows[1]["__失败步骤"].startswith("第 3")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_row_offset_and_row_results():
+    """从第 N 行继续，并按行记录结果。"""
+    with _fake_input_modules([]):
+        ex = Executor()
+        ex.log = lambda level, msg: None
+        ex.data = [{"名字": "甲"}, {"名字": "乙"}, {"名字": "丙"}]
+        ex.row_offset = 1
+        ex.groups = {"主": [Step("wait", "0")]}
+        assert ex.run("主") == "finished"
+    assert [item["row"] for item in ex.row_results] == [2, 3]
+
+
+def test_row_results_keep_only_current_row_vars():
+    """每一行的结果只带本行写过的变量，不把上一行的值串下来。"""
+    with _fake_input_modules([]):
+        ex = Executor()
+        ex.log = lambda level, msg: None
+        ex.data = [{"名字": "甲"}, {"名字": "乙"}]
+        ex.groups = {"主": [Step("set", "结果={名字}")]}
+        assert ex.run("主") == "finished"
+    assert [item["vars"] for item in ex.row_results] == [
+        {"结果": "甲"}, {"结果": "乙"}]
+
+
+def test_input_type_mode_falls_back_for_chinese():
+    """逐字输入只用于英文数字；中文自动回退到剪贴板。"""
+    calls = []
+    with _fake_input_modules(calls):
+        ex = Executor()
+        ex.log = lambda level, msg: None
+        ex.groups = {"主": [Step("input", "abc", input_mode="type")]}
+        assert ex.run("主") == "finished"
+    assert ("write", "abc") in calls
+
+    calls2 = []
+    with _fake_input_modules(calls2):
+        ex2 = Executor()
+        ex2.log = lambda level, msg: None
+        ex2.groups = {"主": [Step("input", "中文", input_mode="type")]}
+        assert ex2.run("主") == "finished"
+    assert any(c[0] == "copy" and c[1] == "中文" for c in calls2)
+
+
+def test_report_markdown_with_shot_and_retry():
+    """报告有截图/重试时才加对应列，老报告格式不变。"""
+    from rpa.engine import report_markdown
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_report_")
+    try:
+        shot = os.path.join(tmp, "shots", "x.png")
+        os.makedirs(os.path.dirname(shot), exist_ok=True)
+        open(shot, "w", encoding="utf-8").close()
+        report = {"steps": 1, "failed": 1, "seconds": 1.0, "rows": 1,
+                  "detail": [{"group": "甲", "index": 1, "type": "click",
+                              "content": "a.png", "seconds": 1.0,
+                              "ok": False, "row": 1, "attempts": 2,
+                              "shot": shot}]}
+        text = report_markdown(report, "error", report_dir=tmp)
+        assert "重试" in text and "截图" in text
+        assert "shots/x.png" in text and "[查看]" in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_write_report_index_retention():
+    """报告索引：生成 index.html、保留最近 N 份、清理没人引用的旧截图。"""
+    import time as _time
+
+    from rpa.engine import write_report_index
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_index_")
+    try:
+        for index in range(3):
+            path = os.path.join(tmp, f"run_2024010{index}_120000.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# 运行报告\n\n- 结果：finished\n"
+                         f"- 步骤数：{index + 1}，失败：0\n"
+                         "- 总耗时：1.5 秒\n")
+            os.utime(path, (1000 + index, 1000 + index))
+        shots = os.path.join(tmp, "shots")
+        os.makedirs(shots)
+        old_shot = os.path.join(shots, "old.png")
+        open(old_shot, "w", encoding="utf-8").close()
+        old = _time.time() - 8 * 86400
+        os.utime(old_shot, (old, old))
+
+        page = write_report_index(tmp, keep=2)
+        assert os.path.exists(page)
+        text = open(page, encoding="utf-8").read()
+        assert "MeowGo 运行报告" in text and "成功" in text
+        assert "查看报告" in text
+        names = [name for name in os.listdir(tmp)
+                 if name.startswith("run_")]
+        assert len(names) == 2, names
+        assert not os.path.exists(old_shot), "过期且无引用的截图应清掉"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():

@@ -13,7 +13,7 @@ a = Analysis(
     binaries=[],
     datas=[('main.png', '.')],
     hiddenimports=[
-        'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit',
+        'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.lock',
         'pyautogui', 'pyperclip', 'PIL', 'PIL.ImageGrab', 'PIL.ImageTk',
         'cv2', 'xlrd', 'openpyxl',
     ],

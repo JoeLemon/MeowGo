@@ -7,7 +7,9 @@ import ctypes.wintypes
 import json
 import os
 import queue
+import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -17,9 +19,11 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
 
 from . import assets, uikit
-from .engine import (IMAGE_STEP_TYPES, IMAGE_TYPES, STEP_TYPES, Executor,
-                     Group, Project, Step, estimate_steps, export_excel,
-                     import_excel, validate_project)
+from .engine import (CONDITION_TYPES, IMAGE_STEP_TYPES, IMAGE_TYPES,
+                     STEP_TYPES, Executor, Group, Project, Step,
+                     estimate_steps, export_excel, find_images, import_excel,
+                     parse_region, validate_project)
+from .lock import InstanceLock, make_lock_name
 
 APP_TITLE = "MeowGo"
 
@@ -35,6 +39,7 @@ APP_DIR = _app_dir()
 SETTINGS_PATH = os.path.join(APP_DIR, "rpa_settings.json")
 DEFAULT_IMAGE_DIR = os.path.join(APP_DIR, "images")
 REPORTS_DIR = os.path.join(APP_DIR, "reports")
+SHOTS_DIR = os.path.join(REPORTS_DIR, "shots")
 BACKUPS_DIR = os.path.join(APP_DIR, "backups")
 MAX_CONFIG_BACKUPS = 10
 
@@ -296,6 +301,9 @@ class App(tk.Tk):
         self._step_log_lines: dict[int, tuple[str, int]] = {}
         self._step_marks: dict[str, dict[int, str]] = {}
         self._last_report_path = ""
+        self._last_result_path = ""
+        self._data_path = ""
+        self._run_lock: Optional[InstanceLock] = None
         # 运行进度：estimate_steps 的总步数（-1 表示不可估）、迷你置顶条
         self._progress_total = -1
         self._progress_pulse = False
@@ -507,6 +515,7 @@ class App(tk.Tk):
                f"{len(self.project.groups)} 个组"),
             "-",
             MI("导出运行日志…", "save", self.export_log),
+            MI("打开报告索引", "table", self.open_report_index),
             MI("打开运行报告目录", "folder", self.open_reports_dir),
             "-",
             MI("恢复配置备份…", "open", self.restore_backup),
@@ -2067,6 +2076,14 @@ class App(tk.Tk):
     # --------------------------------------------------------------- 截图
     def capture_region(self, on_done: Optional[Callable[[str], None]] = None) -> None:
         self._capture_callback = on_done
+        self._capture_coords_callback = None
+        self.withdraw()
+        self.after(320, self._open_capture_overlay)
+
+    def pick_region(self, on_done: Callable[[int, int, int, int], None]) -> None:
+        """只框选坐标（不截图），用于步骤的「识别范围」。"""
+        self._capture_callback = None
+        self._capture_coords_callback = on_done
         self.withdraw()
         self.after(320, self._open_capture_overlay)
 
@@ -2095,9 +2112,13 @@ class App(tk.Tk):
         canvas = tk.Canvas(overlay, bg="#000000", highlightthickness=0,
                            cursor="crosshair")
         canvas.pack(fill="both", expand=True)
-        canvas.create_text(width // 2, self.s(60),
-                           text="按住鼠标拖拽框选要识别的区域，Esc 取消",
-                           fill="white", font=("Microsoft YaHei UI", 16, "bold"))
+        coords_cb = getattr(self, "_capture_coords_callback", None)
+        canvas.create_text(
+            width // 2, self.s(60),
+            text=("拖拽框选识别范围（只记坐标，不截图），Esc 取消"
+                  if coords_cb else
+                  "按住鼠标拖拽框选要识别的区域，Esc 取消"),
+            fill="white", font=("Microsoft YaHei UI", 16, "bold"))
         state = {"x": 0, "y": 0, "rect": None}
 
         def on_press(event):
@@ -2118,8 +2139,14 @@ class App(tk.Tk):
             restore_grab()
             self.deiconify()
             self.lift()
+            coords_callback = getattr(self, "_capture_coords_callback", None)
+            self._capture_coords_callback = None
             if abs(x2 - x1) < 8 or abs(y2 - y1) < 8:
-                self._set_status("截图区域太小，已取消")
+                self._set_status("框选区域太小，已取消")
+                return
+            if coords_callback:
+                coords_callback(min(x1, x2), min(y1, y2),
+                                abs(x2 - x1), abs(y2 - y1))
                 return
             path = assets.unique_name(self.image_dir)
             try:
@@ -2134,6 +2161,8 @@ class App(tk.Tk):
                 callback(name)
 
         def on_cancel(_event=None):
+            self._capture_coords_callback = None
+            self._capture_callback = None
             overlay.destroy()
             restore_grab()
             self.deiconify()
@@ -2338,10 +2367,54 @@ class App(tk.Tk):
         preview = DataPreviewDialog(self, path, data)
         if preview.wait() is not True:
             return
-        self._start(self._current_group_name(), data=data)
+
+        # 上次跑过就询问是否接着跑：结果文件里记了每行的 __行号
+        start_row = 0
+        try:
+            from rpa.engine import read_results, result_path
+
+            old_rows = read_results(result_path(path))
+
+            def number(row: dict) -> int:
+                try:
+                    return int(float(row.get("__行号", 0) or 0))
+                except (TypeError, ValueError):
+                    return 0
+
+            numbers = [number(row) for row in old_rows]
+            last = max(numbers, default=0)
+            # 最后一段失败（常见于致命错误中止）时，从最后一个成功行的下一行
+            # 继续，重试失败的那一行，而不是直接跳过它。
+            last_ok = max((n for n, row in zip(numbers, old_rows)
+                           if str(row.get("__结果", "")).strip() == "成功"),
+                          default=0)
+            resume = last_ok if last > last_ok else last
+            if resume and resume < len(data):
+                if last > last_ok:
+                    question = (f"上次在第 {last_ok + 1} 行失败，"
+                                f"是否从第 {resume + 1} 行继续重试？\n\n"
+                                "选「否」则从头开始。")
+                else:
+                    question = (f"上次跑到第 {last} 行，"
+                                f"是否从第 {last + 1} 行继续？\n\n"
+                                "选「否」则从头开始。")
+                if messagebox.askyesno("继续上次？", question, parent=self):
+                    start_row = resume
+            elif last >= len(data) and len(data):
+                if not messagebox.askyesno(
+                        "已经跑完",
+                        f"上次已经跑完全部 {len(data)} 行，是否从头再跑一遍？",
+                        parent=self):
+                    return
+        except Exception:      # noqa: BLE001 - 旧结果文件读不了就从头跑
+            start_row = 0
+        self._start(self._current_group_name(), data=data,
+                    data_path=path, row_offset=start_row)
 
     def _start(self, entry: Optional[str], loop: bool = False,
-               data: Optional[list] = None) -> None:
+               data: Optional[list] = None,
+               data_path: Optional[str] = None,
+               row_offset: int = 0) -> None:
         if self.running:
             messagebox.showinfo("提示", "正在运行中，请先停止", parent=self)
             return
@@ -2359,6 +2432,11 @@ class App(tk.Tk):
         self.executor.confidence = float(self.settings.get("confidence", 0.9))
         # 显式设置（普通运行为 None）：避免上一次带数据运行影响这次
         self.executor.data = data
+        self.executor.row_offset = int(row_offset or 0) if data else 0
+        self._data_path = data_path if data else ""
+        # 失败截图：默认开；设置里可以关掉（截图可能含敏感信息）
+        self.executor.shot_dir = (SHOTS_DIR if self.settings.get(
+            "shot_on_fail", True) else "")
         self.executor.on_step = self._mark_running_step
         self.executor.on_step_done = self._mark_step_done
         self.executor.on_progress = self._on_progress
@@ -2414,6 +2492,16 @@ class App(tk.Tk):
 
     def _launch(self, entry: Optional[str], loop: bool,
                 debug: bool = False) -> None:
+        # 防止界面和计划任务 / 另一个副本同时抢鼠标
+        lock = InstanceLock(make_lock_name(APP_DIR, "RUN"))
+        if not lock.acquire():
+            messagebox.showinfo(
+                "已有运行在进行",
+                "另一个 MeowGo 正在运行（可能是计划任务），\n"
+                "等它结束后再试。", parent=self)
+            self.deiconify()
+            return
+        self._run_lock = lock
         self.running = True
         self.paused = False
         self._debug_once = False        # 一次性开关跑完即弃
@@ -2434,6 +2522,7 @@ class App(tk.Tk):
             self.toggle_log()
         # 估算总步数：循环 / 无限重复时返回 -1，进度条改脉冲模式
         rows = max(1, len(self.executor.data) if self.executor.data else 1)
+        rows = max(1, rows - int(self.executor.row_offset or 0))
         total = estimate_steps(self.executor.groups, self.executor.order, rows)
         self._reset_progress(total, pulse=loop)
         self._show_mini_bar()
@@ -2450,26 +2539,34 @@ class App(tk.Tk):
         self.worker.start()
 
     def _on_run_end(self, result: str) -> None:
-        self.running = False
-        self.paused = False
-        for button in (self.btn_run, self.btn_loop, self.btn_pause):
-            button.set_enabled(True)
-        self.btn_pause.set_text("暂停", "pause")
-        self.btn_stop.set_enabled(False)
-        if self.step_tree.exists("_running"):
-            self.step_tree.delete("_running")
-        self._finish_progress()
-        self._hide_mini_bar()
-        self.deiconify()
-        self.lift()
-        self._refresh_all()
-        self._set_status({"finished": "执行完成", "stopped": "已停止",
-                          "error": "执行出错"}.get(result, result))
-        self._write_run_report(result)
-        self._show_summary(result)
-        if self._failed_step is not None:
-            self.btn_locate.pack(side="right", padx=(0, self.s(6)))
-        self._notify_finish(result)
+        # 先把报告和结果落盘，再放开按钮：否则用户马上再跑会重置 executor，
+        # 正在写的报告 / 结果可能串到下一次运行。
+        try:
+            self._write_run_report(result)
+            self._write_result_file()
+            self._show_summary(result)
+            self._notify_finish(result)
+        finally:
+            self.running = False
+            self.paused = False
+            if self._run_lock is not None:
+                self._run_lock.release()
+                self._run_lock = None
+            for button in (self.btn_run, self.btn_loop, self.btn_pause):
+                button.set_enabled(True)
+            self.btn_pause.set_text("暂停", "pause")
+            self.btn_stop.set_enabled(False)
+            if self.step_tree.exists("_running"):
+                self.step_tree.delete("_running")
+            self._finish_progress()
+            self._hide_mini_bar()
+            self.deiconify()
+            self.lift()
+            self._refresh_all()
+            self._set_status({"finished": "执行完成", "stopped": "已停止",
+                              "error": "执行出错"}.get(result, result))
+            if self._failed_step is not None:
+                self.btn_locate.pack(side="right", padx=(0, self.s(6)))
 
     def _show_summary(self, result: str) -> None:
         """日志顶部摘要条：一次运行的结论 + 打开报告入口。"""
@@ -2639,19 +2736,36 @@ class App(tk.Tk):
 
     # --------------------------------------------------------------- 报告通知
     def _write_run_report(self, result: str) -> None:
-        """把这次运行写成 markdown 报告，放在程序目录 reports/ 下。"""
+        """把这次运行写成 markdown 报告，并刷新 reports/index.html。"""
         try:
-            from rpa.engine import report_markdown
+            from rpa.engine import report_markdown, write_report_index
 
             os.makedirs(REPORTS_DIR, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             path = os.path.join(REPORTS_DIR, f"run_{stamp}.md")
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(report_markdown(self.executor.report(), result))
+                fh.write(report_markdown(self.executor.report(), result,
+                                         report_dir=REPORTS_DIR))
             self._last_report_path = path
+            write_report_index(REPORTS_DIR)
             self._log("info", f"运行报告已保存：{path}")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self._log("warn", f"运行报告保存失败：{exc}")
+
+    def _write_result_file(self) -> None:
+        """数据驱动跑完后，把每行结果写到数据文件旁边（可断点续跑）。"""
+        if (not self._data_path or not self.executor.row_results
+                or not self.settings.get("save_results", True)):
+            return
+        try:
+            from rpa.engine import result_path, write_results
+
+            path = result_path(self._data_path)
+            write_results(self.executor.data, self.executor.row_results, path)
+            self._last_result_path = path
+            self._log("info", f"结果已写入：{path}")
+        except (OSError, ValueError) as exc:
+            self._log("warn", f"结果写入失败：{exc}")
 
     def _open_last_report(self) -> None:
         """打开本次运行的报告文件；没有则退而打开报告目录。"""
@@ -2719,6 +2833,16 @@ class App(tk.Tk):
             os.makedirs(REPORTS_DIR, exist_ok=True)
             os.startfile(REPORTS_DIR)              # noqa: S606 (Windows)
         except (OSError, AttributeError) as exc:
+            messagebox.showerror("打开失败", str(exc), parent=self)
+
+    def open_report_index(self) -> None:
+        """打开/刷新报告索引页（reports/index.html）。"""
+        try:
+            from rpa.engine import write_report_index
+
+            path = write_report_index(REPORTS_DIR)
+            os.startfile(path)                     # noqa: S606 (Windows)
+        except (OSError, AttributeError, ValueError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
     def _check_dpi_setup(self) -> None:
@@ -3673,29 +3797,142 @@ class StepDialog(BaseDialog):
         self.spin.grid(row=3, column=1, sticky="w", padx=(0, parent.s(16)),
                        pady=parent.s(5))
 
-        # 图片步骤的等待策略：默认 0 = 一直等（与旧版一致）
-        self.label("等待超时（秒）", 4)
+        # 高级选项默认折叠：主界面只留类型、内容、重复次数
+        self._advanced_open = False
+        self.btn_advanced = uikit.RoundButton(
+            self, "高级选项", "chevron_right", self._toggle_advanced,
+            kind="ghost", scale=parent.scale, bg=CARD, height=30,
+            pad=parent.s(6), font_size=8,
+            tooltip="识别范围、第几个、灰度、等待、重试、输入方式")
+        self.btn_advanced.grid(row=4, column=0, columnspan=2, sticky="w",
+                               padx=parent.s(10), pady=(parent.s(2), 0))
+
+        self.advanced = tk.Frame(self, bg=CARD)
+        self.advanced.grid(row=5, column=0, columnspan=2, sticky="ew",
+                           padx=parent.s(16), pady=(0, parent.s(2)))
+        self.advanced.columnconfigure(1, weight=1)
+        self.advanced.grid_remove()
+
+        # 等待（图片 / 拖拽 / 条件）
+        self.lbl_timeout = self._adv_label("等待", 0)
+        row_timeout = tk.Frame(self.advanced, bg=CARD)
+        row_timeout.grid(row=0, column=1, sticky="w", pady=parent.s(3))
         self.var_timeout = tk.StringVar(
             value="" if not editing.timeout else f"{editing.timeout:g}")
-        self.spin_timeout = ttk.Spinbox(self, from_=0, to=3600, width=8,
-                                        textvariable=self.var_timeout)
-        self.spin_timeout.grid(row=4, column=1, sticky="w",
-                               padx=(0, parent.s(16)), pady=parent.s(5))
+        self.spin_timeout = ttk.Spinbox(row_timeout, from_=0, to=3600,
+                                        width=8, textvariable=self.var_timeout)
+        self.spin_timeout.grid(row=0, column=0, sticky="w")
         self.hint_timeout = tk.Label(
-            self, text="0 = 一直等图片出现（默认）", bg=CARD, fg=MUTED,
+            row_timeout, text="秒（0 = 一直等）", bg=CARD, fg=MUTED,
             font=("Microsoft YaHei UI", 8))
-        self.hint_timeout.grid(row=4, column=1, sticky="w",
-                               padx=parent.s(70))
-
-        self.label("超时后", 5)
+        self.hint_timeout.grid(row=0, column=1, sticky="w",
+                               padx=(parent.s(4), parent.s(14)))
+        self.lbl_fail = tk.Label(row_timeout, text="超时后", bg=CARD, fg=TEXT,
+                                 font=("Microsoft YaHei UI", 9))
+        self.lbl_fail.grid(row=0, column=2, sticky="w")
         self.var_on_fail = tk.StringVar(
             value="跳过这步" if editing.on_fail != "stop" else "停止执行")
         self.combo_fail = ttk.Combobox(
-            self, textvariable=self.var_on_fail, state="readonly",
-            values=["跳过这步", "停止执行"], width=10,
+            row_timeout, textvariable=self.var_on_fail, state="readonly",
+            values=["跳过这步", "停止执行"], width=9,
             font=("Microsoft YaHei UI", 9))
-        self.combo_fail.grid(row=5, column=1, sticky="w",
-                             padx=(0, parent.s(16)), pady=parent.s(5))
+        self.combo_fail.grid(row=0, column=3, sticky="w",
+                             padx=(parent.s(4), 0))
+
+        # 识别范围 + 框选
+        self.lbl_region = self._adv_label("识别范围", 1)
+        row_region = tk.Frame(self.advanced, bg=CARD)
+        row_region.grid(row=1, column=1, sticky="ew", pady=parent.s(3))
+        row_region.columnconfigure(0, weight=1)
+        self.var_region = tk.StringVar(value=editing.region)
+        self.entry_region = ttk.Entry(row_region, textvariable=self.var_region,
+                                      font=("Microsoft YaHei UI", 9))
+        self.entry_region.grid(row=0, column=0, sticky="ew")
+        self.btn_pick_region = uikit.RoundButton(
+            row_region, "框选", "image", self._pick_region, kind="outline",
+            scale=parent.scale, bg=CARD, height=30, pad=parent.s(8),
+            font_size=8, tooltip="在屏幕上拖拽选择识别区域")
+        self.btn_pick_region.grid(row=0, column=1, padx=(parent.s(4), 0))
+        self.hint_region = tk.Label(
+            row_region, text="留空 = 全屏查找；格式 x,y,宽,高",
+            bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 8))
+        self.hint_region.grid(row=1, column=0, columnspan=2, sticky="w",
+                              pady=(parent.s(2), 0))
+
+        # 第几个 / 灰度 / 失败重试（同一行，省高度）
+        self.lbl_match = self._adv_label("匹配 / 重试", 2)
+        row_match = tk.Frame(self.advanced, bg=CARD)
+        row_match.grid(row=2, column=1, sticky="w", pady=parent.s(3))
+        self.var_nth = tk.StringVar(value=str(int(editing.nth or 0) + 1))
+        self.lbl_nth = tk.Label(row_match, text="第", bg=CARD, fg=TEXT,
+                                font=("Microsoft YaHei UI", 9))
+        self.lbl_nth.grid(row=0, column=0, sticky="w")
+        self.spin_nth = ttk.Spinbox(row_match, from_=1, to=999, width=5,
+                                    textvariable=self.var_nth)
+        self.spin_nth.grid(row=0, column=1, sticky="w", padx=(parent.s(3), 0))
+        self.lbl_nth_suffix = tk.Label(row_match, text="个", bg=CARD, fg=TEXT,
+                                       font=("Microsoft YaHei UI", 9))
+        self.lbl_nth_suffix.grid(row=0, column=2, sticky="w",
+                                 padx=(parent.s(3), parent.s(10)))
+        self.var_gray = tk.BooleanVar(value=editing.grayscale)
+        self.chk_gray = ttk.Checkbutton(
+            row_match, text="灰度", variable=self.var_gray)
+        self.chk_gray.grid(row=0, column=3, sticky="w",
+                           padx=(0, parent.s(10)))
+        self.lbl_retry = tk.Label(row_match, text="失败重试", bg=CARD, fg=TEXT,
+                                  font=("Microsoft YaHei UI", 9))
+        self.lbl_retry.grid(row=0, column=4, sticky="w")
+        self.var_retry = tk.StringVar(value=str(editing.retry or 0))
+        self.spin_retry = ttk.Spinbox(row_match, from_=0, to=9, width=4,
+                                      textvariable=self.var_retry)
+        self.spin_retry.grid(row=0, column=5, sticky="w", padx=(parent.s(3), 0))
+        self.lbl_retry_unit = tk.Label(row_match, text="次，间隔", bg=CARD,
+                                       fg=TEXT,
+                                       font=("Microsoft YaHei UI", 9))
+        self.lbl_retry_unit.grid(row=0, column=6, sticky="w",
+                                 padx=(parent.s(3), 0))
+        self.var_retry_delay = tk.StringVar(
+            value=f"{editing.retry_delay:g}")
+        self.spin_retry_delay = ttk.Spinbox(
+            row_match, from_=0, to=60, increment=0.1, width=5,
+            textvariable=self.var_retry_delay)
+        self.spin_retry_delay.grid(row=0, column=7, sticky="w",
+                                   padx=(parent.s(3), 0))
+        self.lbl_retry_sec = tk.Label(row_match, text="秒", bg=CARD, fg=TEXT,
+                                      font=("Microsoft YaHei UI", 9))
+        self.lbl_retry_sec.grid(row=0, column=8, sticky="w",
+                                padx=(parent.s(2), 0))
+
+        # 输入方式 / 命中检查（同一行，按类型切换）
+        self.lbl_other = self._adv_label("其他", 3)
+        row_other = tk.Frame(self.advanced, bg=CARD)
+        row_other.grid(row=3, column=1, sticky="w", pady=parent.s(3))
+        self.var_input_mode = tk.StringVar(
+            value="逐字输入（英文/数字）" if editing.input_mode == "type"
+            else "粘贴（快，支持中文）")
+        self.combo_input = ttk.Combobox(
+            row_other, textvariable=self.var_input_mode, state="readonly",
+            values=["粘贴（快，支持中文）", "逐字输入（英文/数字）"],
+            width=20, font=("Microsoft YaHei UI", 9))
+        self.combo_input.grid(row=0, column=0, sticky="w")
+        self.btn_check = uikit.RoundButton(
+            row_other, "检测图片", "eye", self._check_image, kind="outline",
+            scale=parent.scale, bg=CARD, height=30, pad=parent.s(8),
+            font_size=8, tooltip="隐藏窗口后检查当前屏幕能否找到图片")
+        self.btn_check.grid(row=0, column=0, sticky="w")
+        self.lbl_check_result = tk.Label(
+            row_other, text="", bg=CARD, fg=MUTED,
+            font=("Microsoft YaHei UI", 8))
+        self.lbl_check_result.grid(row=0, column=1, sticky="w",
+                                   padx=(parent.s(8), 0))
+
+        self._adv_timeout = [self.lbl_timeout, row_timeout]
+        self._adv_fail = [self.lbl_fail, self.combo_fail]
+        self._adv_image = [self.lbl_region, row_region]
+        self._adv_nth = [self.lbl_nth, self.spin_nth,
+                         self.lbl_nth_suffix, self.chk_gray]
+        self._adv_match = [self.lbl_match, row_match]
+        self._adv_other = [self.lbl_other, row_other]
 
         self.label("备注", 6)
         self.var_note = tk.StringVar(value=editing.note)
@@ -3725,6 +3962,103 @@ class StepDialog(BaseDialog):
         self._sync()
         self.entry.focus_set()
         self.center()
+
+    # -- 高级选项 -----------------------------------------------------------
+    def _adv_label(self, text: str, row: int) -> tk.Label:
+        label = tk.Label(self.advanced, text=text, bg=CARD, fg=TEXT,
+                         font=("Microsoft YaHei UI", 9))
+        label.grid(row=row, column=0, sticky="w", pady=self.app.s(3))
+        return label
+
+    def _toggle_advanced(self) -> None:
+        self._advanced_open = not self._advanced_open
+        if self._advanced_open:
+            self.advanced.grid()
+            self.btn_advanced.set_text("高级选项", "chevron_down")
+        else:
+            self.advanced.grid_remove()
+            self.btn_advanced.set_text("高级选项", "chevron_right")
+        self.update_idletasks()
+        self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}")
+
+    def _pick_region(self) -> None:
+        self.app.pick_region(self._set_region)
+
+    def _set_region(self, x: int, y: int, width: int, height: int) -> None:
+        self.var_region.set(f"{x},{y},{width},{height}")
+        self._show_hint(f"识别范围：{x},{y},{width},{height}")
+        self.lift()
+        self.focus_force()
+
+    def _check_image(self) -> None:
+        """隐藏窗口后检查当前屏幕能否找到内容框里的图片（不点击）。"""
+        key = self._type_key()
+        if key not in IMAGE_STEP_TYPES:
+            return
+        content = self.var_content.get().strip().split("|", 1)[0].strip()
+        if not content:
+            self.lbl_check_result.configure(text="先填写图片名",
+                                            fg="#b06a00")
+            return
+        raw_region = self.var_region.get().strip()
+        region = parse_region(raw_region)
+        if raw_region and region is None:
+            self.lbl_check_result.configure(
+                text="识别范围格式不对，要写 x,y,宽,高", fg="#b06a00")
+            return
+        grayscale = bool(self.var_gray.get())
+        confidence = float(self.app.settings.get("confidence", 0.9) or 0.9)
+        self.btn_check.set_enabled(False)
+        self.lbl_check_result.configure(text="检查中…", fg=MUTED)
+        # 对话框和主窗都可能挡住目标，先全部藏起来
+        self.app.withdraw()
+        self.withdraw()
+
+        def run() -> None:
+            if not self.winfo_exists():
+                self.app.deiconify()
+                return
+            message = "检查失败"
+            warn = True
+            try:
+                items = find_images(content, self.app.image_dir, confidence,
+                                    region, grayscale)
+                missing = [item["name"] for item in items
+                           if item["missing"]]
+                points = [point for item in items
+                          for point in item["points"]]
+                if missing and not points:
+                    message = "找不到图片文件：" + "、".join(missing)
+                elif not points:
+                    message = "当前屏幕没找到（确认窗口已打开、缩放一致）"
+                elif len(points) == 1:
+                    message = "命中 1 处 ✓"
+                    warn = False
+                else:
+                    message = (f"命中 {len(points)} 处，可能点错"
+                               "（可用「第几个」或框选范围）")
+                try:
+                    nth = int(self.var_nth.get() or 1)
+                except ValueError:
+                    nth = 1
+                if points and nth > len(points):
+                    message = f"只命中 {len(points)} 处，没有第 {nth} 个"
+                    warn = True
+            except Exception as exc:      # noqa: BLE001
+                message = f"检查失败：{exc}"
+            self.app.deiconify()
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            try:
+                self.grab_set()
+            except tk.TclError:
+                pass
+            self.btn_check.set_enabled(True)
+            self.lbl_check_result.configure(
+                text=message, fg="#b06a00" if warn else "#2e7d32")
+
+        self.after(350, run)
 
     # -- 辅助 -------------------------------------------------------------
     def _type_key(self) -> str:
@@ -3763,8 +4097,14 @@ class StepDialog(BaseDialog):
             text += "\n标题写窗口名的一部分就行，如 activate:记事本"
         if key in ("click_xy", "move_xy"):
             text += "\n也可以把鼠标移到目标处，点「拾取」自动填坐标"
+        if key == "input":
+            text += ("\n默认用剪贴板粘贴（支持中文）；个别应用不认粘贴时，"
+                     "可在「高级选项」改逐字输入")
         if needs_image:
-            text += "\n截图 / 选图后可以点「预览」核对图片内容"
+            text += ("\n截图 / 选图后可以点「预览」核对图片内容；"
+                     "点错了可在「高级选项」里框选范围或指定第几个")
+        elif key in CONDITION_TYPES:
+            text += "\n「高级选项」里可以设置最多等几秒"
         self._show_hint(text)
         is_image = key in IMAGE_TYPES
         is_hotkey = key == "hotkey"
@@ -3797,18 +4137,40 @@ class StepDialog(BaseDialog):
         # 右侧一个按钮都没有时，输入框后的分隔线也收起
         self.sep_entry.grid() if (needs_image or is_hotkey or is_xy) \
             else self.sep_entry.grid_remove()
-        # 等待策略对图片步骤和拖拽（两端可能是图片）有意义
-        has_timeout = is_image or key == "drag"
-        self.spin_timeout.grid() if has_timeout else \
-            self.spin_timeout.grid_remove()
-        self.hint_timeout.grid() if has_timeout else \
-            self.hint_timeout.grid_remove()
+        # 等待策略：图片 / 拖拽 / 条件（最多等几秒）
+        has_timeout = is_image or key == "drag" or key in CONDITION_TYPES
+        for widget in self._adv_timeout:
+            widget.grid() if has_timeout else widget.grid_remove()
         try:
             timeout = float(self.var_timeout.get() or 0)
         except ValueError:
             timeout = 0
-        self.combo_fail.grid() if has_timeout and timeout > 0 else \
-            self.combo_fail.grid_remove()
+        show_fail = (is_image or key == "drag") and timeout > 0
+        for widget in self._adv_fail:
+            widget.grid() if show_fail else widget.grid_remove()
+        # 识别范围 / 第几个 / 灰度只对图片相关类型有意义
+        for widget in self._adv_image:
+            widget.grid() if needs_image else widget.grid_remove()
+        for widget in self._adv_nth:
+            widget.grid() if needs_image else widget.grid_remove()
+        self.lbl_match.configure(text="匹配 / 重试" if needs_image else "重试")
+        for widget in self._adv_match:
+            widget.grid()
+        # 输入方式 / 命中检查共用一行，按类型切换
+        has_other = key == "input" or needs_image
+        for widget in self._adv_other:
+            widget.grid() if has_other else widget.grid_remove()
+        if has_other:
+            if key == "input":
+                self.lbl_other.configure(text="输入方式")
+                self.combo_input.grid()
+                self.btn_check.grid_remove()
+                self.lbl_check_result.grid_remove()
+            else:
+                self.lbl_other.configure(text="命中检查")
+                self.combo_input.grid_remove()
+                self.btn_check.grid()
+                self.lbl_check_result.grid()
         self.spin.configure(state="normal" if need_repeat else "disabled")
         if not self.var_content.get().strip():
             defaults = {"time": "当前时间", "wait": "1", "scroll": "-200",
@@ -3839,9 +4201,17 @@ class StepDialog(BaseDialog):
         self.spin.configure(state="disabled" if active else "normal")
         self.spin_timeout.configure(state="disabled" if active else "normal")
         self.combo_fail.configure(state="disabled" if active else "readonly")
+        for widget in (self.spin_nth, self.spin_retry,
+                       self.spin_retry_delay, self.entry_region):
+            widget.configure(state="disabled" if active else "normal")
+        self.combo_input.configure(
+            state="disabled" if active else "readonly")
+        self.chk_gray.configure(state="disabled" if active else "normal")
         for button in (self.btn_shot, self.btn_pick, self.btn_preview,
                        self.btn_record, self.btn_cancel, self.btn_ok,
-                       self.btn_pick_group, self.btn_grab_xy):
+                       self.btn_pick_group, self.btn_grab_xy,
+                       self.btn_advanced, self.btn_pick_region,
+                       self.btn_check):
             button.set_enabled(not active)
 
     def _record_done(self, text: str) -> None:
@@ -3861,6 +4231,8 @@ class StepDialog(BaseDialog):
             self._fill_drag_part(name)
             return
         self.var_content.set(name)
+        self._show_hint("已填入截图；可点「预览」核对，或到「高级选项」"
+                        "点「检测图片」确认当前屏幕能命中")
         self.lift()
         self.focus_force()
 
@@ -3929,15 +4301,43 @@ class StepDialog(BaseDialog):
             except ValueError:
                 messagebox.showwarning("格式错误", "重复次数必须是数字", parent=self)
                 return
-        if key in IMAGE_TYPES or key == "drag":
+        has_timeout = (key in IMAGE_TYPES or key == "drag"
+                       or key in CONDITION_TYPES)
+        if has_timeout:
             try:
                 step.timeout = float(self.var_timeout.get() or 0)
             except ValueError:
                 messagebox.showwarning("格式错误", "等待超时必须是数字",
                                        parent=self)
                 return
+        if key in IMAGE_TYPES or key == "drag":
             step.on_fail = "stop" if self.var_on_fail.get() == "停止执行" \
                 else "skip"
+        if key in IMAGE_STEP_TYPES:
+            try:
+                nth = int(self.var_nth.get() or 1)
+                if nth < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("格式错误", "「第几个」要是 1 以上的整数",
+                                       parent=self)
+                return
+            step.nth = nth - 1
+            step.region = self.var_region.get().strip()
+            step.grayscale = bool(self.var_gray.get())
+        try:
+            step.retry = max(0, int(self.var_retry.get() or 0))
+        except ValueError:
+            messagebox.showwarning("格式错误", "重试次数必须是整数", parent=self)
+            return
+        try:
+            step.retry_delay = max(0.0, float(self.var_retry_delay.get() or 0))
+        except ValueError:
+            messagebox.showwarning("格式错误", "重试间隔必须是数字", parent=self)
+            return
+        if key == "input":
+            step.input_mode = ("type" if "逐字" in self.var_input_mode.get()
+                               else "paste")
         problems = step.validate()
         if problems:
             messagebox.showwarning("配置有误", "\n".join(problems), parent=self)
@@ -4087,13 +4487,14 @@ class ImagePreviewDialog(BaseDialog):
 class ScheduleDialog(BaseDialog):
     """定时运行 + 结束通知。
 
-    定时到点后自动运行设定的执行组（界面开着才有效；要无人值守
-    关界面跑，请用命令行 start-app.py --run 组名 配合任务计划）。
+    定时到点后自动运行设定的执行组（软件内定时只在界面开着时有效）。
+    底部可以把同样的时间和组交给 Windows 计划任务，实现关界面也能跑的无人值守。
     """
 
     def __init__(self, parent: App, settings: dict, group_names: list[str]):
-        super().__init__(parent, "定时运行与通知", width=450, height=330)
+        super().__init__(parent, "定时运行与通知", width=470, height=475)
         self.columnconfigure(1, weight=1)
+        self._group_names = list(group_names)
         schedule = settings.get("schedule") or {}
         hour, _, minute = str(schedule.get("time", "09:00")).partition(":")
 
@@ -4141,11 +4542,44 @@ class ScheduleDialog(BaseDialog):
         ttk.Entry(self, textvariable=self.var_webhook).grid(
             row=5, column=1, sticky="ew", padx=(0, parent.s(16)),
             pady=parent.s(5))
-        self.label("填企业微信 / 钉钉机器人地址，运行结束自动推送；"
-                   "留空则不推送", 6, muted=True)
+        tk.Label(self, text="填企业微信 / 钉钉机器人地址，运行结束自动推送；"
+                            "留空则不推送",
+                 bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 8),
+                 wraplength=parent.s(400), justify="left", anchor="w").grid(
+            row=6, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(0, parent.s(2)))
+
+        tk.Frame(self, bg=BORDER).grid(row=7, column=0, columnspan=2,
+                                       sticky="ew", pady=parent.s(8))
+        self.label("无人值守（Windows 计划任务）", 8)
+        tk.Label(self, text="由 Windows 负责，关掉界面也会按时跑；"
+                            "不需要管理员权限，创建后可在「任务计划程序」里查看。",
+                 bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 8),
+                 wraplength=parent.s(400), justify="left", anchor="w").grid(
+            row=9, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(0, parent.s(2)))
+        row_task = tk.Frame(self, bg=CARD)
+        row_task.grid(row=10, column=0, columnspan=2, pady=(parent.s(2),
+                                                            parent.s(4)))
+        self.btn_task_create = uikit.RoundButton(
+            row_task, "创建计划任务", "calendar", self._create_task,
+            kind="outline", scale=parent.scale, bg=CARD, height=30,
+            pad=parent.s(10), font_size=8,
+            tooltip="用上面的时间和执行组创建每天运行的计划任务")
+        self.btn_task_create.pack(side="left", padx=parent.s(4))
+        self.btn_task_delete = uikit.RoundButton(
+            row_task, "删除计划任务", "trash", self._delete_task,
+            kind="ghost", scale=parent.scale, bg=CARD, height=30,
+            pad=parent.s(10), font_size=8)
+        self.btn_task_delete.pack(side="left", padx=parent.s(4))
+        self.lbl_task = tk.Label(self, text="", bg=CARD, fg=MUTED,
+                                 font=("Microsoft YaHei UI", 8),
+                                 wraplength=parent.s(400), justify="left")
+        self.lbl_task.grid(row=11, column=0, columnspan=2,
+                           padx=parent.s(16), pady=(0, parent.s(4)))
 
         buttons = tk.Frame(self, bg=CARD)
-        buttons.grid(row=7, column=0, columnspan=2, pady=parent.s(14))
+        buttons.grid(row=12, column=0, columnspan=2, pady=parent.s(14))
         uikit.RoundButton(buttons, "取消", "close", self.cancel, kind="ghost",
                           scale=parent.scale, bg=CARD).pack(
             side="left", padx=parent.s(4))
@@ -4172,6 +4606,104 @@ class ScheduleDialog(BaseDialog):
             "webhook": self.var_webhook.get().strip(),
         }
         self.destroy()
+
+    # -- Windows 计划任务（无人值守） ---------------------------------------
+    def _task_time(self) -> tuple[int, int]:
+        def number(value, default):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+        return (min(23, max(0, number(self.var_hour.get(), 9))),
+                min(59, max(0, number(self.var_minute.get(), 0))))
+
+    def _task_group(self) -> str:
+        group = self.var_group.get()
+        if group == "（当前组）":
+            group = self.app._current_group_name()
+        return (group or "").strip()
+
+    def _task_name(self, group: str) -> str:
+        safe = re.sub(r'[\\/:*?"<>|\s]+', "_", group).strip("_")[:50]
+        return f"MeowGo_{safe or '当前组'}"
+
+    def _task_command(self, group: str) -> str:
+        """计划任务要执行的命令行（无窗口，跑完自动退出）。"""
+        if getattr(sys, "frozen", False):
+            return f'"{sys.executable}" --run "{group}"'
+        python = sys.executable
+        pythonw = os.path.join(os.path.dirname(python), "pythonw.exe")
+        if os.path.exists(pythonw):
+            python = pythonw
+        script = os.path.join(APP_DIR, "start-app.py")
+        return f'"{python}" "{script}" --run "{group}"'
+
+    def _schtasks(self, args: list[str]):
+        kwargs = {"capture_output": True, "text": True, "errors": "replace"}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.run(["schtasks"] + args, **kwargs)
+
+    def _create_task(self) -> None:
+        group = self._task_group()
+        if not group:
+            messagebox.showwarning("还没有执行组",
+                                   "请先新建并保存一个执行组。", parent=self)
+            return
+        if group not in self.app.project.names():
+            messagebox.showwarning(
+                "执行组不存在",
+                f"执行组「{group}」还没保存，请先保存项目。", parent=self)
+            return
+        hour, minute = self._task_time()
+        name = self._task_name(group)
+        command = self._task_command(group)
+        try:
+            # 计划任务启动时读磁盘上的配置，先确保当前项目已保存
+            self.app._save_state()
+            proc = self._schtasks([
+                "/Create", "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
+                "/TN", name, "/TR", command, "/F"])
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror("创建失败", f"调用 schtasks 失败：{exc}",
+                                 parent=self)
+            return
+        if proc.returncode == 0:
+            text = f"已创建：{name}（每天 {hour:02d}:{minute:02d} → {group}）"
+            self.lbl_task.configure(text=text, fg="#2e7d32")
+            self.app._log("info", f"Windows 计划任务已创建：{name}")
+        else:
+            detail = (proc.stderr or proc.stdout or "").strip()[:500]
+            self.lbl_task.configure(text="创建失败：" + detail,
+                                    fg="#c62828")
+            messagebox.showerror("创建失败", detail or "schtasks 返回错误",
+                                 parent=self)
+
+    def _delete_task(self) -> None:
+        group = self._task_group()
+        name = self._task_name(group)
+        if not messagebox.askyesno(
+                "删除计划任务",
+                f"确定删除 Windows 计划任务「{name}」？\n\n"
+                "只删除系统计划任务，不影响软件里的定时设置。",
+                parent=self):
+            return
+        try:
+            proc = self._schtasks(["/Delete", "/TN", name, "/F"])
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror("删除失败", f"调用 schtasks 失败：{exc}",
+                                 parent=self)
+            return
+        if proc.returncode == 0:
+            self.lbl_task.configure(text=f"已删除：{name}", fg="#2e7d32")
+            self.app._log("info", f"Windows 计划任务已删除：{name}")
+        else:
+            detail = (proc.stderr or proc.stdout or "").strip()[:500]
+            self.lbl_task.configure(text="删除失败：" + detail, fg="#c62828")
+            messagebox.showerror("删除失败", detail or "schtasks 返回错误",
+                                 parent=self)
 
 
 class MacroBar(BaseDialog):
@@ -4542,8 +5074,10 @@ class SettingsDialog(BaseDialog):
     """运行设置：倒计时、相似度、图片目录。"""
 
     def __init__(self, parent: App, settings: dict, image_dir: str):
-        super().__init__(parent, "运行设置", width=430, height=285)
+        super().__init__(parent, "运行设置", width=430, height=365)
         self.columnconfigure(1, weight=1)
+        # 用传进来的设置做底稿，保存时只改本对话框的键，别冲掉定时等配置
+        self._base_settings = dict(settings)
 
         self.label("启动倒计时（秒）", 0)
         self.var_delay = tk.StringVar(value=str(settings.get("delay", 3)))
@@ -4577,11 +5111,31 @@ class SettingsDialog(BaseDialog):
             row=3, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
-        self.label("相似度越低越容易识别，也越容易误点。\n"
-                   "运行时会自动最小化窗口，避免遮挡识别区。", 4, muted=True)
+        self.label("失败时保存截图", 4)
+        self.var_shot = tk.BooleanVar(
+            value=bool(settings.get("shot_on_fail", True)))
+        ttk.Checkbutton(self, variable=self.var_shot).grid(
+            row=4, column=1, sticky="w", padx=(0, parent.s(16)),
+            pady=parent.s(5))
+
+        self.label("数据跑完写结果文件", 5)
+        self.var_results = tk.BooleanVar(
+            value=bool(settings.get("save_results", True)))
+        ttk.Checkbutton(self, variable=self.var_results).grid(
+            row=5, column=1, sticky="w", padx=(0, parent.s(16)),
+            pady=parent.s(5))
+
+        # 说明文字横跨两列并自动换行，避免把左侧标签列撑得过宽
+        tk.Label(self, text="相似度越低越容易识别，也越容易误点。"
+                            "失败截图在 reports/shots；数据结果写在数据文件旁边，"
+                            "下次运行同一份数据时可以选择从上次停下的地方继续。",
+                 bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 8),
+                 wraplength=parent.s(390), justify="left", anchor="w").grid(
+            row=6, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(parent.s(2), 0))
 
         buttons = tk.Frame(self, bg=CARD)
-        buttons.grid(row=5, column=0, columnspan=2, pady=parent.s(14))
+        buttons.grid(row=7, column=0, columnspan=2, pady=parent.s(14))
         uikit.RoundButton(buttons, "取消", "close", self.cancel, kind="ghost",
                           scale=parent.scale, bg=CARD).pack(side="left",
                                                             padx=parent.s(4))
@@ -4609,12 +5163,14 @@ class SettingsDialog(BaseDialog):
         except OSError:
             pass
         # 在现有设置上改键，别把定时运行等其它配置冲掉
-        self.result = dict(self.app.settings)
+        self.result = dict(self._base_settings)
         self.result.update({
             "delay": int(number(self.var_delay.get(), 3)),
             "confidence": number(self.var_conf.get(), 0.9),
             "image_dir": directory,
             "show_mini_bar": bool(self.var_mini.get()),
+            "shot_on_fail": bool(self.var_shot.get()),
+            "save_results": bool(self.var_results.get()),
         })
         self.destroy()
 
@@ -4793,7 +5349,22 @@ class ShortcutsDialog(BaseDialog):
 
 
 def main() -> None:
-    App().mainloop()
+    # 同时开两个界面会互相覆盖配置，也没必要
+    lock = InstanceLock(make_lock_name(APP_DIR, "GUI"))
+    if not lock.acquire():
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo("MeowGo 已经在运行",
+                                "MeowGo 已经打开了一个窗口。")
+            root.destroy()
+        except Exception:        # noqa: BLE001
+            print("MeowGo 已经在运行")
+        return
+    try:
+        App().mainloop()
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
