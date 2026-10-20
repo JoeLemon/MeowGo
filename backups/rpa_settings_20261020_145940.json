@@ -1,0 +1,13 @@
+{
+  "confidence": 0.9,
+  "delay": 0,
+  "image_dir": "D:\\Project\\auto-tools\\python_auto\\images",
+  "version": 2,
+  "groups": [
+    {
+      "name": "默认组",
+      "note": "",
+      "steps": []
+    }
+  ]
+}

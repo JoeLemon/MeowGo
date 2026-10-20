@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "image_dir": "D:\\Project\\auto-tools\\python_auto\\images",
+  "groups": [
+    {
+      "name": "登录",
+      "note": "",
+      "steps": [
+        {
+          "type": "wait",
+          "content": "1",
+          "repeat": 0,
+          "note": "",
+          "timeout": 0,
+          "on_fail": "skip"
+        }
+      ]
+    },
+    {
+      "name": "主",
+      "note": "",
+      "steps": [
+        {
+          "type": "call",
+          "content": "登录",
+          "repeat": 0,
+          "note": "",
+          "timeout": 0,
+          "on_fail": "skip"
+        }
+      ]
+    }
+  ]
+}
