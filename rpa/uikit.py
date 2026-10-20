@@ -249,6 +249,51 @@ def _draw(name: str, draw: "_ScaledDraw", color, lw: int) -> None:
             x1, y1 = 12 + 8.6 * math.cos(rad), 12 + 8.6 * math.sin(rad)
             x2, y2 = 12 + 11 * math.cos(rad), 12 + 11 * math.sin(rad)
             _polyline(draw, [(x1, y1), (x2, y2)], c, lw + 1)
+    elif name == "undo":
+        draw.arc([4, 4, 20, 20], start=110, end=350, fill=c, width=lw)
+        _arrow(draw, (4.6, 9.6), "left", 3.4, c)
+    elif name == "redo":
+        draw.arc([4, 4, 20, 20], start=-170, end=70, fill=c, width=lw)
+        _arrow(draw, (19.4, 9.6), "right", 3.4, c)
+    elif name == "search":
+        draw.ellipse([4, 4, 15, 15], outline=c, width=lw)
+        _polyline(draw, [(13.5, 13.5), (19.5, 19.5)], c, lw + 1)
+    elif name == "eye":
+        # 眼睛：上下两段半弧拼出杏仁轮廓，中间瞳孔
+        draw.arc([3, 5.5, 21, 18.5], start=180, end=360, fill=c, width=lw)
+        draw.arc([3, 5.5, 21, 18.5], start=0, end=180, fill=c, width=lw)
+        draw.ellipse([9.6, 9.6, 14.4, 14.4], outline=c,
+                     width=max(1, lw - 1))
+        draw.ellipse([11.1, 11.1, 12.9, 12.9], fill=c)
+    elif name == "moon":
+        draw.pieslice([4, 4, 20, 20], start=60, end=300, fill=c)
+        draw.pieslice([9.5, 1.5, 22.5, 14.5], start=200, end=80, fill=(0, 0, 0, 0))
+    elif name == "sun":
+        draw.ellipse([7.5, 7.5, 16.5, 16.5], outline=c, width=lw)
+        for angle in range(0, 360, 45):
+            import math
+
+            rad = math.radians(angle)
+            _polyline(draw,
+                      [(12 + 6.4 * math.cos(rad), 12 + 6.4 * math.sin(rad)),
+                       (12 + 9.6 * math.cos(rad), 12 + 9.6 * math.sin(rad))],
+                      c, max(1, lw - 1))
+    elif name == "question":
+        draw.ellipse([4, 4, 20, 20], outline=c, width=lw)
+        draw.arc([8.4, 7, 15.6, 14.2], start=-80, end=190, fill=c, width=lw)
+        draw.ellipse([10.9, 14.6, 13.1, 16.8], fill=c)
+    elif name == "target":
+        draw.ellipse([4, 4, 20, 20], outline=c, width=lw)
+        draw.ellipse([9, 9, 15, 15], outline=c, width=max(1, lw - 1))
+        draw.ellipse([10.8, 10.8, 13.2, 13.2], fill=c)
+    elif name == "debug":
+        draw.rounded_rectangle([7, 6, 17, 19], radius=2.5, outline=c, width=lw)
+        _polyline(draw, [(12, 9), (12, 12.5)], c, max(1, lw - 1))
+        draw.ellipse([10.6, 13.4, 13.4, 16.2], fill=c)
+        _polyline(draw, [(7, 8), (4, 6)], c, max(1, lw - 1))
+        _polyline(draw, [(17, 8), (20, 6)], c, max(1, lw - 1))
+        _polyline(draw, [(9, 19), (7, 21)], c, max(1, lw - 1))
+        _polyline(draw, [(15, 19), (17, 21)], c, max(1, lw - 1))
     else:  # 兜底：方块
         draw.rounded_rectangle([6, 6, 18, 18], radius=2, fill=c)
 
@@ -331,6 +376,26 @@ MENU_TEXT = "#22262e"
 MENU_MUTED = "#9aa2b1"
 MENU_DANGER = "#e5484d"
 MENU_ACCENT = "#3b6ff5"
+
+# 暗色模式开关：自绘控件（圆角按钮 / 菜单）的配色随此切换。
+# 菜单是即用即建的，改全局常量即可；按钮要存活过切换，故 _palette 现读现算。
+_DARK_MODE = {"on": False}
+
+
+def set_dark_mode(on: bool) -> None:
+    """切换暗色配色（全局生效；已有控件需各自 refresh 才会重画）。"""
+    dark = bool(on)
+    if dark == _DARK_MODE["on"]:
+        return
+    _DARK_MODE["on"] = dark
+    globals().update(
+        MENU_CARD="#232936" if dark else "#ffffff",
+        MENU_BORDER="#39414f" if dark else "#dbe2ee",
+        MENU_HOVER="#2b3445" if dark else "#eaf1ff",
+        MENU_HOVER_DANGER="#3a2628" if dark else "#fdeceb",
+        MENU_TEXT="#e6eaf2" if dark else "#22262e",
+        MENU_MUTED="#8b95a5" if dark else "#9aa2b1",
+    )
 TRANSPARENT_KEY = "#ff00fe"   # 用于抠掉圆角外的区域
 
 # 多屏坐标：菜单必须落在鼠标所在的那块屏幕里（副屏在主屏左边时是负坐标，
@@ -781,6 +846,7 @@ class RoundButton(tk.Canvas):
     # -- 配色 -------------------------------------------------------------
     def _palette(self) -> tuple[str, str]:
         """返回 (背景色, 前景色)。"""
+        dark = _DARK_MODE["on"]
         if self.kind == "accent":
             base, fg = "#3b6ff5", "#ffffff"
             hover, active = "#2f5fdc", "#2854c4"
@@ -788,17 +854,30 @@ class RoundButton(tk.Canvas):
             base, fg = "#e5484d", "#ffffff"
             hover, active = "#d23c41", "#b83136"
         elif self.kind == "outline":
-            base, fg = "#ffffff", "#33405a"
-            hover, active = "#eef3ff", "#e0e9ff"
+            if dark:
+                base, fg = "#232936", "#c6cddb"
+                hover, active = "#2b3345", "#303948"
+            else:
+                base, fg = "#ffffff", "#33405a"
+                hover, active = "#eef3ff", "#e0e9ff"
         elif self.kind == "ghost":
-            base, fg = self["bg"], "#4a5768"
-            hover, active = "#e8ecf3", "#dde3ec"
+            base = self["bg"]
+            if dark:
+                fg, hover, active = "#aab4c4", "#2a3038", "#323944"
+            else:
+                fg, hover, active = "#4a5768", "#e8ecf3", "#dde3ec"
         else:
-            base, fg = "#e9edf4", "#2b3444"
-            hover, active = "#dfe4ee", "#d3dae7"
+            if dark:
+                base, fg = "#2b3242", "#dde3ec"
+                hover, active = "#323a4b", "#39424f"
+            else:
+                base, fg = "#e9edf4", "#2b3444"
+                hover, active = "#dfe4ee", "#d3dae7"
         if not self._enabled:
             if self.kind in ("accent", "danger"):
                 return "#c9d2e0", "#ffffff"
+            if dark:
+                return "#262b33", "#5c6470"
             return "#f0f1f4", "#b3b8c0"
         if self._pressed:
             return active, fg
@@ -808,8 +887,9 @@ class RoundButton(tk.Canvas):
 
     def _rebuild(self) -> None:
         fill, fg = self._palette()
-        self.itemconfigure(self._shape, fill=fill,
-                           outline="#d8dee9" if (self.kind == "outline" and self._enabled) else "")
+        border = ("#3a4252" if _DARK_MODE["on"] else "#d8dee9") \
+            if (self.kind == "outline" and self._enabled) else ""
+        self.itemconfigure(self._shape, fill=fill, outline=border)
         for item in self._content:
             self.delete(item)
         self._content = []
@@ -898,5 +978,8 @@ class RoundButton(tk.Canvas):
 
     def set_bg(self, color: str) -> None:
         self.configure(bg=color)
-        if self.kind == "ghost":
-            self._rebuild()
+        self._rebuild()
+
+    def refresh(self) -> None:
+        """主题切换后按新配色重画（ ghost 按钮的底色取自父容器）。"""
+        self._rebuild()

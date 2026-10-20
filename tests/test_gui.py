@@ -7,11 +7,14 @@ import os
 import sys
 import tempfile
 import time
+import tkinter as tk
+from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa import gui as gui_module  # noqa: E402
-from rpa.engine import Group, Step, import_excel, validate_project  # noqa: E402
+from rpa.engine import (STEP_TYPES, Group, Step, import_excel,  # noqa: E402
+                        validate_project)
 
 # 把配置写到临时文件，避免影响用户设置
 _TMP = tempfile.mkdtemp(prefix="rpa_gui_test_")
@@ -57,6 +60,10 @@ class FakeSettingsDialog:
         self.result = self._result
         return self.result
 
+
+# 真身存档：个别用例要验证真实对话框，下面的桩只影响其它用例
+_RealStepDialog = gui_module.StepDialog
+_RealSettingsDialog = gui_module.SettingsDialog
 
 gui_module.GroupDialog = FakeGroupDialog
 gui_module.StepDialog = FakeStepDialog
@@ -862,9 +869,23 @@ def test_run_with_data():
         fh.write("名字\n甲\n乙\n")
 
     real_ask = gui_module.filedialog.askopenfilename
+    real_preview = gui_module.DataPreviewDialog
+
+    class _AutoPreview:
+        """测试替身：自动确认预览对话框（交互由专门用例覆盖）。"""
+
+        def __init__(self, parent, path, data):
+            self.data = data
+
+        def wait(self):
+            return True
+
     gui_module.filedialog.askopenfilename = lambda *a, **k: path
+    gui_module.DataPreviewDialog = _AutoPreview
     try:
         app.settings["delay"] = 0
+        # 预热 pyautogui（cv2/numpy，冷导入十几秒）：不让它发生在计时区间里
+        import pyautogui  # noqa: F401
         app.project.groups = [Group("数据组", [
             Step("input", "你好{名字}"), Step("wait", "0.05")])]
         app.group_index = 0
@@ -880,6 +901,7 @@ def test_run_with_data():
             time.sleep(0.05)
     finally:
         gui_module.filedialog.askopenfilename = real_ask
+        gui_module.DataPreviewDialog = real_preview
     text = app.log_text.get("1.0", "end")
     assert "数据驱动：共 2 行" in text, text
     assert "第 2/2 行" in text, text
@@ -935,6 +957,805 @@ def test_macro_wheel_accumulate():
     mark("滚轮增量累加")
 
 
+def test_data_preview_dialog():
+    """数据预览对话框：行数/列名/前 5 行；确定 True、取消 None。"""
+    data = [{"名字": "甲", "城市": "北京"}, {"名字": "乙", "城市": "上海"}]
+
+    def labels(widget):
+        found = []
+
+        def walk(node):
+            for child in node.winfo_children():
+                try:
+                    found.append(str(child.cget("text")))
+                except tk.TclError:
+                    pass
+                walk(child)
+
+        walk(widget)
+        return found
+
+    def trees(widget):
+        found = []
+
+        def walk(node):
+            for child in node.winfo_children():
+                if isinstance(child, ttk.Treeview):
+                    found.append(child)
+                walk(child)
+
+        walk(widget)
+        return found
+
+    dialog = gui_module.DataPreviewDialog(app, "d.csv", data)
+    app.update()
+    assert any("共 2 行数据 · 2 列：名字、城市" in t for t in labels(dialog)), \
+        labels(dialog)
+    grid = trees(dialog)
+    assert grid, "应有数据表格"
+    values = [grid[0].item(i, "values") for i in grid[0].get_children()]
+    assert values == [("甲", "北京"), ("乙", "上海")], values
+    dialog.ok()
+    assert dialog.result is True
+    dialog2 = gui_module.DataPreviewDialog(app, "d.csv", data)
+    dialog2.cancel()
+    assert dialog2.result is None
+    mark("数据预览对话框")
+
+
+def test_undo_redo_button_states():
+    """工具栏撤销/重做按钮的启用态跟随栈深度。"""
+    app._undo_stack.clear()
+    app._redo_stack.clear()
+    app._sync_undo_buttons()
+    assert not app.btn_undo._enabled, "空栈应禁用"
+    assert not app.btn_redo._enabled
+    app._push_undo("测试操作")
+    assert app.btn_undo._enabled and not app.btn_redo._enabled
+    app.undo()
+    assert not app.btn_undo._enabled and app.btn_redo._enabled
+    app.redo()
+    assert app.btn_undo._enabled and not app.btn_redo._enabled
+    mark("撤销重做按钮态")
+
+
+def test_save_indicator_and_ui_state():
+    """保存状态指示 + 界面状态收集与恢复。"""
+    app._mark_dirty()
+    assert app.autosave_label.cget("text") == "未保存…"
+    app._save_state()
+    assert app.autosave_label.cget("text").startswith("已保存"), \
+        app.autosave_label.cget("text")
+    state = app._ui_state()
+    assert isinstance(state["log_visible"], bool)
+    assert "window" in state
+    assert set(state["columns"]) == {"content", "note"}
+    app.settings.update(state)          # 模拟下次启动读到的配置
+    app._restore_ui_state()             # 不应炸
+    mark("保存指示与界面状态")
+
+
+def test_log_link_and_failed_locate():
+    """出错日志行可点击跳转；失败步骤染色 + 状态栏定位。"""
+    app._step_marks = {}
+    app.project.groups = [
+        Group("甲组", [Step("wait", "0.1"), Step("wait", "0.2")]),
+        Group("乙组", [Step("wait", "0.3")])]
+    app.group_index = 0
+    app._refresh_all()
+    app._current_run_step = ("甲组", 1)
+    app._log("error", "第 2 步出错：图片未找到")
+    app._drain_queue()
+    assert app._step_log_lines, "出错日志行应记录步骤映射"
+    line = next(iter(app._step_log_lines))
+    assert app._step_log_lines[line] == ("甲组", 1)
+    app.log_text.see(f"{line}.0")
+    bbox = app.log_text.bbox(f"{line}.0")
+    assert bbox, "日志行应可见"
+
+    class _Event:
+        x, y = bbox[0] + 2, bbox[1] + 2
+
+    app._on_log_link_click(_Event())
+    assert app.group_index == 0
+    assert app.step_tree.selection() == ("1",), app.step_tree.selection()
+    # 单步结果染色（与斑马纹标签共存，done/failed 建在 zebra 之前所以优先级更高）
+    app._apply_step_done("甲组", 0, True)
+    app._apply_step_done("甲组", 1, False)
+    assert "done" in app.step_tree.item("0", "tags")
+    assert "failed" in app.step_tree.item("1", "tags")
+    assert app._failed_step == ("甲组", 1)
+    # 摘要条
+    app._show_summary("finished")
+    app.update()
+    assert app.summary_frame.winfo_ismapped()
+    assert "执行完成" in app.summary_label.cget("text")
+    app._hide_summary()
+    assert not app.summary_frame.winfo_ismapped()
+    # 切组后标记仍在（刷新不丢）
+    app.group_index = 1
+    app._refresh_steps()
+    app.group_index = 0
+    app._refresh_steps()
+    assert "failed" in app.step_tree.item("1", "tags")
+    mark("日志跳转与失败定位")
+
+
+def test_shortcuts_dialog():
+    """快捷键速查卡：内容、确定/取消返回值。"""
+    dialog = gui_module.ShortcutsDialog(app)
+    app.update()
+    texts = []
+
+    def walk(node):
+        for child in node.winfo_children():
+            try:
+                texts.append(str(child.cget("text")))
+            except tk.TclError:
+                pass
+            walk(child)
+
+    walk(dialog)
+    assert any("Ctrl+G" in t for t in texts), texts
+    assert any("F9" in t for t in texts), texts
+    dialog.ok()
+    assert dialog.result is True
+    dialog2 = gui_module.ShortcutsDialog(app)
+    dialog2.cancel()
+    assert dialog2.result is None
+    mark("快捷键速查卡")
+
+
+def test_step_dialog_types():
+    """步骤对话框：类型下拉无旧编号；两段式条件类型有组名框和截图按钮。"""
+    fake = gui_module.StepDialog          # 测试文件全局打了桩，先换回真身
+    gui_module.StepDialog = _RealStepDialog
+    try:
+        dialog = _RealStepDialog(app, app.project, Step("click", "a.png"))
+        app.update()
+        values = dialog.combo.cget("values")
+        assert all("·" not in v for v in values), values
+        assert dialog._type_labels[0] == "左键单击"
+        assert dialog._type_key() == "click"
+        # 切到「条件：出现图片则执行」
+        dialog.var_type.set("条件：出现图片则执行")
+        dialog._sync()
+        app.update()
+        assert dialog.group_entry.winfo_ismapped(), "条件步骤应显示组名输入框"
+        assert dialog.sep_if.winfo_ismapped(), "条件步骤应显示分组分隔线"
+        assert dialog.btn_shot._enabled, "条件步骤应能截图选判断图"
+        dialog.var_content.set("弹窗.png")
+        dialog.var_group.set("关闭弹窗")
+        dialog.ok()
+        assert dialog.result.type == "if_image"
+        assert dialog.result.content == "弹窗.png|关闭弹窗", dialog.result
+        # 「条件：窗口存在则执行」同为两段式
+        dialog2 = _RealStepDialog(app, app.project,
+                                  Step("window", "activate:记事本"))
+        app.update()
+        dialog2.var_type.set("条件：窗口存在则执行")
+        dialog2._sync()
+        app.update()
+        assert dialog2.group_entry.winfo_ismapped()
+        assert not dialog2.btn_shot._enabled, "窗口条件不用图片"
+        dialog2.cancel()
+    finally:
+        gui_module.StepDialog = fake
+    mark("步骤对话框类型")
+
+
+def test_capture_overlay_from_modal_dialog():
+    """模态对话框里点截图：遮罩必须抢走 grab，否则拖拽/Esc 全收不到。
+
+    真实报障：对话框里点「截图」出现遮罩后拖拽没反应、Esc 也取消不了。
+    根因是对话框的 local grab 把整个程序内的鼠标/键盘事件全部截走，
+    遮罩作为另一个 Toplevel 收不到任何输入。遮罩要抢过 grab，截图结束
+    （保存或取消）后再还给对话框，恢复它的模态语义。
+    """
+    fake = gui_module.StepDialog          # 测试文件全局打了桩，先换回真身
+    gui_module.StepDialog = _RealStepDialog
+    saved_image_dir = app.image_dir
+    app.image_dir = _TMP                  # 截图写临时目录，不污染 images/
+    app.project.image_dir = _TMP
+    try:
+        dialog = _RealStepDialog(app, app.project, Step("click", ""))
+        app.update()
+        grab_dialog = app.grab_current()
+        assert grab_dialog is dialog, "对话框应持有模态 grab"
+
+        def start_capture():
+            """点「截图」并泵事件循环，等到遮罩抢到 grab；返回遮罩或 None。"""
+            dialog.btn_shot.command()
+            for _ in range(100):         # after(320) 之后才建遮罩
+                app.update()
+                time.sleep(0.02)
+                overlay = app.grab_current()
+                if overlay is not None and overlay is not grab_dialog:
+                    return overlay
+            return None
+
+        def settle():
+            for _ in range(30):
+                app.update()
+                time.sleep(0.02)
+
+        # --- 拖拽保存 ---
+        overlay = start_capture()
+        assert overlay is not None, "点截图后应出现遮罩并抢到 grab"
+        assert app.winfo_ismapped() == 0, "截图时主窗应隐藏"
+        canvas = [w for w in overlay.winfo_children()
+                  if w.winfo_class() == "Canvas"][0]
+        canvas.event_generate("<ButtonPress-1>", x=100, y=100)
+        canvas.event_generate("<B1-Motion>", x=260, y=180)
+        canvas.event_generate("<ButtonRelease-1>", x=260, y=180)
+        settle()
+        name = dialog.var_content.get()
+        assert name.endswith(".png"), f"拖拽后内容框应填上文件名: {name!r}"
+        assert os.path.exists(os.path.join(_TMP, name)), \
+            f"截图文件应已保存: {name}"
+        assert app.grab_current() is grab_dialog, "结束后 grab 应还给对话框"
+        assert app.winfo_ismapped() == 1, "结束后主窗应恢复"
+
+        # --- Esc 取消 ---
+        overlay2 = start_capture()
+        assert overlay2 is not None, "第二次点截图也应出现遮罩"
+        overlay2.event_generate("<Escape>")
+        settle()
+        assert app.grab_current() is grab_dialog, \
+            "Esc 取消后 grab 应还给对话框"
+        assert app.winfo_ismapped() == 1, "Esc 取消后主窗应恢复"
+        assert dialog.var_content.get() == name, "取消后内容框不应变"
+        dialog.destroy()
+    finally:
+        app.image_dir = saved_image_dir
+        app.project.image_dir = saved_image_dir
+        gui_module.StepDialog = fake
+    mark("对话框截图 grab 抢占与恢复")
+
+
+def test_type_icons_cover_all():
+    """每种指令类型都要有图标和色调，否则列表里会出现兜底方块。"""
+    for key in STEP_TYPES:
+        assert key in gui_module.TYPE_ICONS, key
+        image = gui_module.uikit.icon_image(gui_module.TYPE_ICONS[key], 16,
+                                            "#333333")
+        assert image is not None
+        assert key in gui_module.TYPE_COLORS, f"{key} 缺少图标色调"
+    mark("类型图标覆盖")
+
+
+def test_step_dialog_new_types():
+    """步骤对话框新类型：if_else 双组输入、drag 分段填充与超时、编辑回显。"""
+    fake = gui_module.StepDialog          # 测试文件全局打了桩，先换回真身
+    gui_module.StepDialog = _RealStepDialog
+    try:
+        # if_else：出现/没出现两个组名框，确定后拼成三段
+        dialog = _RealStepDialog(app, app.project, Step("click", "a.png"))
+        app.update()
+        dialog.var_type.set("条件：二选一")
+        dialog._sync()
+        app.update()
+        assert dialog.group_entry.winfo_ismapped()
+        assert dialog.group2_entry.winfo_ismapped(), "if_else 要有第二个组名框"
+        assert not dialog.spin_timeout.winfo_ismapped(), "条件步骤没有等待超时"
+        dialog.var_content.set("弹窗.png")
+        dialog.var_group.set("关弹窗")
+        dialog.var_group2.set("等弹窗")
+        dialog.ok()
+        assert dialog.result.type == "if_else"
+        assert dialog.result.content == "弹窗.png|关弹窗|等弹窗"
+        # 编辑回显：三段拆回三个输入框
+        dialog2 = _RealStepDialog(app, app.project, dialog.result)
+        app.update()
+        assert dialog2.var_content.get() == "弹窗.png"
+        assert dialog2.var_group.get() == "关弹窗"
+        assert dialog2.var_group2.get() == "等弹窗"
+        # 第二组留空也合法（没出现时什么都不做）
+        dialog3 = _RealStepDialog(app, app.project,
+                                  Step("if_else", "a.png|甲|"))
+        app.update()
+        assert dialog3.var_group2.get() == ""
+        dialog3.cancel()
+        # if_else 多出来的一行不能把确定按钮顶出对话框
+        dialog4 = _RealStepDialog(app, app.project, Step("click", "a.png"))
+        app.update()
+        dialog4.var_type.set("条件：二选一")
+        dialog4._sync()
+        app.update()
+        bottom = dialog4.btn_ok.winfo_rooty() + dialog4.btn_ok.winfo_height()
+        assert bottom <= dialog4.winfo_rooty() + dialog4.winfo_height(), \
+            "if_else 的第二行把按钮顶出了对话框"
+        dialog4.cancel()
+
+        # drag：有等待超时（两端可能是图）、拾取坐标可用、分段填充
+        dialog5 = _RealStepDialog(app, app.project, Step("click", "a.png"))
+        app.update()
+        dialog5.var_type.set("拖拽")
+        dialog5._sync()
+        app.update()
+        assert dialog5.spin_timeout.winfo_ismapped(), "拖拽要能设等待超时"
+        assert dialog5.btn_grab_xy._enabled, "拖拽要能拾取坐标"
+        dialog5.var_content.set("")            # 切换类型后清掉旧内容
+        dialog5._fill_drag_part("100,200")
+        assert dialog5.var_content.get() == "100,200|"
+        dialog5._fill_drag_part("300,400")
+        assert dialog5.var_content.get() == "100,200|300,400"
+        dialog5._fill_drag_part("500,600")     # 都满了：替换起点
+        assert dialog5.var_content.get() == "500,600|300,400"
+        dialog5.var_content.set("100,200|300,400")
+        dialog5.ok()
+        assert dialog5.result.type == "drag"
+        assert dialog5.result.timeout == 0 and dialog5.result.on_fail == "skip"
+
+        # set：变量步骤不显示等待超时
+        dialog6 = _RealStepDialog(app, app.project, Step("input", "x"))
+        app.update()
+        dialog6.var_type.set("设置变量")
+        dialog6._sync()
+        app.update()
+        assert not dialog6.spin_timeout.winfo_ismapped()
+        dialog6.var_content.set("订单号=ABC123")
+        dialog6.ok()
+        assert dialog6.result.type == "set"
+        assert dialog6.result.content == "订单号=ABC123"
+    finally:
+        gui_module.StepDialog = fake
+    mark("步骤对话框新类型")
+
+
+def test_image_preview_dialog():
+    """步骤对话框「预览」按钮：弹窗显示内容框里的图片，缺图不弹窗。"""
+    fake = gui_module.StepDialog          # 测试文件全局打了桩，先换回真身
+    gui_module.StepDialog = _RealStepDialog
+    # 造一张真实图片放进临时图片目录（与 image_dir 隔离开）
+    from PIL import Image
+
+    image_dir = os.path.join(_TMP, "preview_dir")
+    os.makedirs(image_dir, exist_ok=True)
+    Image.new("RGB", (240, 160), "#4d8dff").save(
+        os.path.join(image_dir, "preview_demo.png"))
+    saved_image_dir = app.image_dir
+    app.image_dir = image_dir
+    try:
+        dialog = _RealStepDialog(app, app.project, Step("click", ""))
+        app.update()
+        assert dialog.btn_preview.winfo_ismapped(), "图片步骤应有预览按钮"
+        # 内容非图片步骤时收起
+        dialog.var_type.set("输入文本")
+        dialog._sync()
+        app.update()
+        assert not dialog.btn_preview.winfo_ismapped(), "非图片类型应收起预览"
+
+        dialog.var_type.set("左键单击")
+        dialog._sync()
+        app.update()
+        dialog.var_content.set("preview_demo.png")
+        dialog.btn_preview.command()
+        app.update()
+        previews = [w for w in app.winfo_children()
+                    if isinstance(w, gui_module.ImagePreviewDialog)]
+        assert len(previews) == 1, "点预览应弹出预览窗"
+        preview = previews[0]
+        assert preview._photo.width() == 240 and \
+            preview._photo.height() == 160, "预览应显示原尺寸的图"
+        label = [w for w in preview.winfo_children()
+                 if w.winfo_class() == "Label" and w.cget("text")][0]
+        assert label.cget("text") == "preview_demo.png", label.cget("text")
+        # 关掉预览窗后 grab 应还给步骤对话框（否则对话框按钮全点不动）
+        grab_before = app.grab_current()
+        assert grab_before is preview
+        preview.cancel()
+        app.update()
+        assert app.grab_current() is dialog, "预览窗关闭后 grab 应还给对话框"
+
+        # 文件不存在：只在提示区说明，不弹窗也不崩
+        warnings = []
+        real_warning = gui_module.messagebox.showwarning
+        gui_module.messagebox.showwarning = \
+            lambda *a, **k: warnings.append(a)
+        try:
+            dialog.var_content.set("没有这张图.png")
+            dialog.btn_preview.command()
+            app.update()
+        finally:
+            gui_module.messagebox.showwarning = real_warning
+        assert not warnings, "缺图时不应弹 warning 框"
+        assert "找不到图片文件" in dialog.hint.cget("text")
+        dialog.cancel()
+    finally:
+        app.image_dir = saved_image_dir
+        gui_module.StepDialog = fake
+    mark("步骤对话框图片预览")
+
+
+def test_step_search_filter():
+    """步骤搜索：按类型/内容/备注过滤 + 匹配计数 + 过滤中禁拖动。"""
+    app.project.groups = [Group("搜索组", [
+        Step("click", "登录按钮.png", 1, "重要"),
+        Step("input", "admin"),
+        Step("wait", "0.5"),
+        Step("hotkey", "ctrl,s")])]
+    app.group_index = 0
+    app._refresh_all()
+    assert len(app.step_tree.get_children()) == 4
+
+    def search(text):
+        app.step_search.delete(0, "end")
+        app.step_search.insert(0, text)
+        app._apply_step_filter()
+
+    search("登录")                      # 内容列匹配
+    assert app.step_tree.get_children() == ("0",)
+    assert app.search_count.cget("text") == "1/4"
+    search("热键")                      # 类型中文标签匹配
+    assert app.step_tree.get_children() == ("3",)
+    search("重要")                      # 备注匹配
+    assert app.step_tree.get_children() == ("0",)
+    search("ctrl")                      # 类型标识匹配（小写不敏感）
+    assert app.step_tree.get_children() == ("3",)
+    search(gui_module.SEARCH_PLACEHOLDER)   # 占位符不算过滤词
+    assert len(app.step_tree.get_children()) == 4
+    assert app.search_count.cget("text") == ""
+    search("不存在的词")                # 无匹配 → 空状态文案
+    assert app.step_tree.get_children() == ()
+    assert "不存在的词" in app.step_empty.cget("text")
+    app._on_step_drop("0", "1")         # 过滤中禁止拖动排序
+    assert "搜索" in app.status_var.get()
+    app._clear_step_filter()            # 清空恢复
+    assert len(app.step_tree.get_children()) == 4
+    assert app.search_count.cget("text") == ""
+    mark("步骤搜索过滤")
+
+
+def test_progress_and_mini_bar():
+    """运行进度：确定/脉冲两种模式 + 迷你置顶条生命周期。"""
+    app._reset_progress(4, pulse=False)
+    assert str(app.progress.cget("mode")) == "determinate"
+    assert app.progress.cget("maximum") == 4
+    assert app.progress_label.cget("text") == "0/4"
+    app._apply_progress(2, 4)
+    assert app.progress["value"] == 2
+    assert app.progress_label.cget("text") == "2/4"
+    app._reset_progress(-1, pulse=True)     # 循环运行 → 脉冲
+    assert str(app.progress.cget("mode")) == "indeterminate"
+    app._apply_progress(7, -1)
+    assert app.progress_label.cget("text") == "已执行 7 步"
+    app._finish_progress()
+    assert str(app.progress.cget("mode")) == "determinate"
+    # 迷你条：创建 / 更新 / 销毁
+    app.settings["show_mini_bar"] = True
+    app._show_mini_bar()
+    assert app._mini_bar is not None
+    app._mini_bar.set_counts(3, 9)
+    assert app._mini_bar.counts.cget("text") == "3/9 步"
+    app._mini_bar.set_step("1. 左键单击 登录按钮.png")
+    assert "左键单击" in app._mini_bar.text.cget("text")
+    app._mini_bar.set_counts(5, -1)
+    assert app._mini_bar.counts.cget("text") == "已执行 5 步"
+    app._hide_mini_bar()
+    assert app._mini_bar is None
+    # 设置里关掉迷你条 → 不再出现
+    app.settings["show_mini_bar"] = False
+    app._show_mini_bar()
+    assert app._mini_bar is None
+    app.settings["show_mini_bar"] = True
+    mark("运行进度与迷你条")
+
+
+def test_image_preview_pane():
+    """选中图片类步骤→预览窗格显示缩略图与信息；其它步骤收起。"""
+    tmp = tempfile.mkdtemp(prefix="rpa_img_")
+    app.image_dir = tmp
+    try:
+        from PIL import Image
+
+        Image.new("RGB", (160, 90), (200, 60, 60)).save(
+            os.path.join(tmp, "按钮.png"))
+        app.project.groups = [Group("预览组", [
+            Step("click", "按钮.png"), Step("wait", "0.1")])]
+        app.group_index = 0
+        app._refresh_all()
+        app.step_tree.selection_set("0")
+        app._update_preview()
+        app.update()
+        assert app.preview_frame.winfo_ismapped(), "图片步骤应显示预览"
+        assert app.preview_name.cget("text") == "按钮.png"
+        assert "160 × 90" in app.preview_meta.cget("text")
+        app.step_tree.selection_set("1")
+        app._update_preview()
+        app.update()
+        assert not app.preview_frame.winfo_ismapped(), "非图片步骤应收起"
+        # 图片文件不存在 → 同样不显示
+        app.project.groups[0].steps[0] = Step("click", "不存在.png")
+        app._refresh_all()
+        app.step_tree.selection_set("0")
+        app._update_preview()
+        assert not app.preview_frame.winfo_ismapped()
+        # 两段式条件类型取 | 前的图片名
+        app.project.groups[0].steps[0] = Step("if_image", "按钮.png|预览组")
+        app._refresh_all()
+        app.step_tree.selection_set("0")
+        app._update_preview()
+        app.update()
+        assert app.preview_frame.winfo_ismapped()
+    finally:
+        app.image_dir = gui_module.DEFAULT_IMAGE_DIR
+    mark("图片预览窗格")
+
+
+def test_zebra_and_type_colors():
+    """斑马纹：奇偶行交替；运行标记优先级更高（不被斑马纹盖掉）。"""
+    app.project.groups = [Group("斑马组", [
+        Step("click", "a.png"), Step("input", "x"),
+        Step("wait", "0.1"), Step("cmd", "dir")])]
+    app.group_index = 0
+    app._refresh_all()
+    assert app.step_tree.item("0", "tags") == ("even",)
+    assert app.step_tree.item("1", "tags") == ("odd",)
+    assert app.step_tree.item("2", "tags") == ("even",)
+    assert app.step_tree.item("0", "image") is not None
+    app._step_marks = {"斑马组": {1: "failed"}}
+    app._repaint_step_marks()
+    assert set(app.step_tree.item("1", "tags")) == {"odd", "failed"}
+    app._step_marks = {}
+    app._repaint_step_marks()
+    assert app.step_tree.item("1", "tags") == ("odd",)
+    mark("斑马纹与类型着色")
+
+
+def test_settings_dialog_preserves_keys():
+    """运行设置：改字段不冲掉定时运行等配置；迷你进度条开关可存。"""
+    real = gui_module.SettingsDialog
+    gui_module.SettingsDialog = _RealSettingsDialog
+    try:
+        app.settings.update({"delay": 5,
+                             "schedule": {"enabled": False, "time": "09:00",
+                                          "group": "甲组"},
+                             "show_mini_bar": True})
+        dialog = _RealSettingsDialog(app, app.settings, app.image_dir)
+        app.update()
+        assert dialog.var_mini.get() is True
+        dialog.var_delay.set("9")
+        dialog.var_mini.set(False)
+        dialog.ok()
+        app.update()
+        assert dialog.result["delay"] == 9
+        assert dialog.result["show_mini_bar"] is False
+        assert dialog.result["schedule"] == {"enabled": False, "time": "09:00",
+                                             "group": "甲组"}, "其它配置被冲掉了"
+        app.settings = dialog.result
+        app._save_state()
+        app._set_saved_label()
+    finally:
+        gui_module.SettingsDialog = real
+        app.settings.update({"delay": 3,
+                             "schedule": {"enabled": False, "time": "09:00",
+                                          "group": "甲组"},
+                             "show_mini_bar": True})
+    mark("设置对话框保留其它配置")
+
+
+def test_theme_switch():
+    """深色主题：模块常量 / 控件树 / 树标签 / 图标色整体切换，可还原。"""
+    light_bg = gui_module.BG
+    light_card = gui_module.CARD
+    app._apply_theme(True)
+    app.update()
+    assert gui_module.BG == "#171b22", "模块常量应换成暗色"
+    assert gui_module.CARD == "#1f242e"
+    assert app.cget("bg") == "#171b22", "主窗口底色应跟上"
+    assert str(app.log_card.cget("bg")) == "#1f242e", "卡片底色应跟上"
+    assert str(app.status_var.get()) != ""      # 界面还活着
+    assert gui_module.TYPE_COLORS["click"] == "#6f9bff", "类型图标应提亮"
+    assert str(app.btn_run["bg"]) == "#171b22", "按钮底色应跟上"
+    # 树标签重配（tag_configure 返回的是 Tk string 包装对象，要 str() 一下）
+    assert str(app.step_tree.tag_configure("odd", "background")) == "#232935"
+    assert str(app.step_tree.tag_configure("failed", "background")) == \
+        "#3a2628"
+    # 切回浅色：全部还原
+    app._apply_theme(False)
+    app.update()
+    assert gui_module.BG == light_bg
+    assert gui_module.CARD == light_card
+    assert app.cget("bg") == light_bg
+    assert str(app.btn_run["bg"]) == light_bg
+    assert gui_module.TYPE_COLORS["click"] == "#3b6ff5"
+    # toggle_theme：翻 settings 并落盘，两次切换回到原样
+    original = app.dark                  # 此时是浅色（前面已还原）
+    app.toggle_theme()
+    assert app.dark is (not original)
+    assert app.settings.get("theme") == ("dark" if app.dark else "light")
+    app.toggle_theme()
+    assert app.dark is original
+    assert app.settings.get("theme") == ("dark" if app.dark else "light")
+    assert gui_module.BG == light_bg, "两次切换后应回到浅色"
+    mark("深色主题切换")
+
+
+def test_batch_step_ops():
+    """批量多选：全选 / 批量复制 / 批量删除 / 整块移动。"""
+    app.project.groups = [Group("批量组", [
+        Step("wait", "0.1"), Step("input", "a"), Step("wait", "0.2"),
+        Step("cmd", "dir")])]
+    app.group_index = 0
+    app._refresh_all()
+    group = app.project.groups[0]
+
+    app.step_tree.focus_set()
+    app._select_all_steps()
+    assert app._selected_steps() == [0, 1, 2, 3]
+
+    # 批量复制第 0、2 步 → 副本紧跟在最后选中行之后
+    app.step_tree.selection_set("0", "2")
+    app.duplicate_step()
+    assert [s.content for s in group.steps] == \
+        ["0.1", "a", "0.2", "0.1", "0.2", "dir"], \
+        [s.content for s in group.steps]
+
+    # 批量删除第 1、2 步
+    app.step_tree.selection_set("1", "2")
+    app.delete_step()
+    assert [s.content for s in group.steps] == ["0.1", "0.1", "0.2", "dir"]
+
+    # 整块上移：选中 2、3（0.2、dir）→ 插到索引 1 之后
+    app.step_tree.selection_set("2", "3")
+    app.move_step(-1)
+    assert [s.content for s in group.steps] == ["0.1", "0.2", "dir", "0.1"], \
+        [s.content for s in group.steps]
+
+    # 单选上移保持原行为
+    app.step_tree.selection_set("3")
+    app.move_step(-1)
+    assert [s.content for s in group.steps] == ["0.1", "0.2", "0.1", "dir"]
+
+    # 删除键走批量删除（确认框已自动应答 True）
+    app.step_tree.selection_set("0", "1")
+    app._on_step_key_delete()
+    assert [s.content for s in group.steps] == ["0.1", "dir"]
+    mark("批量多选操作")
+
+
+def test_drag_indicator_line():
+    """拖拽落点：指示线在拖拽中出现、松手消失，并完成换行。"""
+    app.project.groups = [Group("拖拽组", [
+        Step("wait", str(index)) for index in range(4)])]
+    app.group_index = 0
+    app._refresh_all()
+    tree = app.step_tree
+    app.update()
+    bbox = tree.bbox("1")
+    assert bbox, "第 2 行应可见"
+    _x, top, _width, height = bbox
+    root_y = tree.winfo_rooty()
+    # 落点坐标：行上半段→行顶，下半段→行底
+    assert gui_module._insert_y(tree, top + 1) == root_y + top
+    assert gui_module._insert_y(tree, top + height - 1) == root_y + top + height
+    # 第一行之上 → 贴行顶；最后一行之下 → 贴行底
+    first = tree.bbox("0")
+    assert gui_module._insert_y(tree, first[1] - 5) == root_y + first[1]
+    last = tree.bbox("3")
+    assert gui_module._insert_y(tree, last[1] + last[3] + 50) == \
+        root_y + last[1] + last[3]
+
+    def has_line():
+        return any(isinstance(child, tk.Toplevel)
+                   for child in tree.winfo_children())
+
+    before = [s.content for s in app.project.groups[0].steps]
+    tree.event_generate("<ButtonPress-1>", x=6, y=top + 2)
+    tree.event_generate("<B1-Motion>", x=6, y=top + height + 10)
+    app.update()
+    assert has_line(), "拖拽中应出现落点指示线"
+    tree.event_generate("<ButtonRelease-1>", x=6, y=top + height + 10)
+    app.update()
+    assert not has_line(), "松手后指示线应消失"
+    after = [s.content for s in app.project.groups[0].steps]
+    assert after != before, "拖拽应触发换行"
+    mark("拖拽落点指示线")
+
+
+def test_debug_step_dialog():
+    """单步调试对话框：内容展示 + 三种选择 + 关窗即停止。"""
+    dialog = gui_module.DebugStepDialog(app, "甲组", 1,
+                                        Step("click", "按钮.png", 2))
+    app.update()
+    texts = []
+
+    def walk(node):
+        for child in node.winfo_children():
+            try:
+                texts.append(str(child.cget("text")))
+            except tk.TclError:
+                pass
+            walk(child)
+
+    walk(dialog)
+    assert any("第 2 步" in t for t in texts), texts
+    assert any("重复 2 次" in t for t in texts), texts
+    dialog._skip()
+    assert dialog.result == "skip"
+    dialog2 = gui_module.DebugStepDialog(app, "甲组", 0, Step("wait", "0.1"))
+    app.update()
+    dialog2._run()
+    assert dialog2.result == "run"
+    dialog3 = gui_module.DebugStepDialog(app, "甲组", 0, Step("wait", "0.1"))
+    app.update()
+    dialog3.cancel()               # Esc / 关窗 = 停止运行
+    assert dialog3.result == "stop"
+    mark("单步调试对话框")
+
+
+def test_debug_confirm_roundtrip():
+    """单步确认的线程接力：工作线程入队 → 主线程应答 → 结果回传。"""
+    import threading as _threading
+
+    # 主线程侧（_ask_debug）：对话框返回什么就回填什么
+    real_dialog = gui_module.DebugStepDialog
+
+    class _Fake:
+        def __init__(self, parent, name, index, step):
+            self.result = "run"
+
+        def wait(self):
+            return self.result
+
+    gui_module.DebugStepDialog = _Fake
+    try:
+        event, box = _threading.Event(), {}
+        app._ask_debug("甲组", 0, Step("wait", "0.1"), event, box)
+        assert event.is_set() and box["answer"] == "run"
+    finally:
+        gui_module.DebugStepDialog = real_dialog
+
+    # 工作线程侧（_confirm_step）：入队后阻塞，被应答后拿到答案
+    calls = []
+    real_ask = app._ask_debug
+
+    def fake_ask(name, index, step, event, box):
+        calls.append((name, index, step.type))
+        box["answer"] = "skip"
+        event.set()
+
+    app._ask_debug = fake_ask
+    try:
+        result = {}
+
+        def worker():
+            result["answer"] = app._confirm_step("甲组", 1, Step("wait", "0.2"))
+
+        thread = _threading.Thread(target=worker, daemon=True)
+        thread.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and "answer" not in result:
+            app.update()               # 让 _drain_queue 把确认请求取走
+            time.sleep(0.02)
+    finally:
+        app._ask_debug = real_ask
+    assert calls, "确认请求应经界面队列处理"
+    assert calls[0][0] == "甲组" and calls[0][1] == 1
+    assert result.get("answer") == "skip"
+    mark("单步确认线程接力")
+
+
+def test_settings_dialog_mini_bar():
+    """设置对话框：迷你进度条开关读写（真身，避免被全局桩挡住）。"""
+    real = gui_module.SettingsDialog
+    gui_module.SettingsDialog = _RealSettingsDialog
+    try:
+        app.settings["show_mini_bar"] = True
+        dialog = _RealSettingsDialog(app, app.settings, app.image_dir)
+        app.update()
+        assert dialog.var_mini.get() is True
+        dialog.var_mini.set(False)
+        dialog.ok()
+        assert dialog.result["show_mini_bar"] is False
+        app.settings = dialog.result
+    finally:
+        gui_module.SettingsDialog = real
+        app.settings["show_mini_bar"] = True
+    mark("设置对话框迷你条开关")
+
+
 def finish():
     try:
         checks()
@@ -943,6 +1764,27 @@ def finish():
         test_macro_recorder()
         test_macro_wheel_accumulate()
         test_run_with_data()
+        test_data_preview_dialog()
+        test_undo_redo_button_states()
+        test_save_indicator_and_ui_state()
+        test_log_link_and_failed_locate()
+        test_shortcuts_dialog()
+        test_step_dialog_types()
+        test_capture_overlay_from_modal_dialog()
+        test_type_icons_cover_all()
+        test_step_dialog_new_types()
+        test_image_preview_dialog()
+        test_step_search_filter()
+        test_progress_and_mini_bar()
+        test_image_preview_pane()
+        test_zebra_and_type_colors()
+        test_settings_dialog_preserves_keys()
+        test_theme_switch()
+        test_batch_step_ops()
+        test_drag_indicator_line()
+        test_debug_step_dialog()
+        test_debug_confirm_roundtrip()
+        test_settings_dialog_mini_bar()
     except Exception as exc:  # noqa: BLE001 — 任何异常都要退出，避免测试挂住
         print(f"  FAIL  {type(exc).__name__}: {exc}")
         app.destroy()

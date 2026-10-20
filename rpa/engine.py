@@ -173,7 +173,8 @@ class Step:
             if any(k.isdigit() for k in keys):
                 errors.append(f"{where}：单个数字键无法识别，请改用 num0 这类写法")
 
-        if self.type in IMAGE_TYPES and self.timeout:
+        # 图片类与拖拽（两端可能是图片）都支持等待超时
+        if (self.type in IMAGE_TYPES or self.type == "drag") and self.timeout:
             try:
                 if float(self.timeout) < 0:
                     errors.append(f"{where}：等待超时不能为负数")
@@ -185,6 +186,33 @@ class Step:
         if self.type == "if_image" and text:
             if "|" not in text:
                 errors.append(f"{where}：条件步骤要写成 图片名|组名")
+        elif self.type == "if_not_image" and text:
+            if "|" not in text:
+                errors.append(f"{where}：条件步骤要写成 图片名|组名")
+        elif self.type == "if_else" and text:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) != 3:
+                errors.append(f"{where}：二选一要写成 图片名|出现执行|没出现执行")
+            elif not parts[0] or not parts[1]:
+                errors.append(f"{where}：图片名和「出现执行」的组名不能为空")
+        elif self.type == "if_window" and text:
+            if "|" not in text:
+                errors.append(f"{where}：窗口条件要写成 窗口标题|组名")
+        elif self.type == "set" and text:
+            name, sep, _value = text.partition("=")
+            if not sep or not name.strip():
+                errors.append(f"{where}：设置变量要写成 变量名=值")
+            elif "{" in name or "}" in name:
+                errors.append(f"{where}：变量名里不能带 {{ 或 }}")
+        elif self.type == "drag" and text:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) != 2 or not all(parts):
+                errors.append(f"{where}：拖拽要写成 起点|终点（图或 x,y）")
+            else:
+                for part in parts:
+                    if not _valid_xy(part) and not image_names(part):
+                        errors.append(f"{where}：拖拽的「{part}」既不是坐标"
+                                      "（x,y）也不是图片文件名")
         elif self.type == "window" and text:
             action = text.split(":", 1)[0].strip().lower()
             if action not in ("activate", "wait", "close"):
@@ -195,12 +223,27 @@ class Step:
             if not _valid_xy(text):
                 errors.append(f"{where}：坐标要写成 x,y，如 500,300")
 
+        if self.region and self.type in IMAGE_TYPES:
+            if _parse_region(self.region) is None:
+                errors.append(f"{where}：识别范围要写成 x,y,宽,高")
+
         if self.type in REPEAT_TYPES:
             try:
                 if float(self.repeat) < -1:
                     errors.append(f"{where}：重复次数不能小于 -1")
             except (TypeError, ValueError):
                 errors.append(f"{where}：重复次数必须是数字")
+
+        try:
+            if int(self.retry) < 0:
+                errors.append(f"{where}：重试次数不能为负数")
+        except (TypeError, ValueError):
+            errors.append(f"{where}：重试次数必须是整数")
+        try:
+            if float(self.retry_delay) < 0:
+                errors.append(f"{where}：重试间隔不能为负数")
+        except (TypeError, ValueError):
+            errors.append(f"{where}：重试间隔必须是数字")
         return errors
 
     def to_row(self) -> list:
@@ -233,12 +276,16 @@ class Step:
 
     def copy(self) -> "Step":
         return Step(self.type, self.content, self.repeat, self.note,
-                    self.timeout, self.on_fail)
+                    self.timeout, self.on_fail, self.region, self.nth,
+                    self.grayscale, self.retry, self.retry_delay)
 
     def to_dict(self) -> dict:
         return {"type": self.type, "content": self.content,
                 "repeat": self.repeat, "note": self.note,
-                "timeout": self.timeout, "on_fail": self.on_fail}
+                "timeout": self.timeout, "on_fail": self.on_fail,
+                "region": self.region, "nth": self.nth,
+                "grayscale": self.grayscale, "retry": self.retry,
+                "retry_delay": self.retry_delay}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Step":
@@ -247,7 +294,12 @@ class Step:
                    repeat=float(data.get("repeat", 0) or 0),
                    note=str(data.get("note", "")),
                    timeout=float(data.get("timeout", 0) or 0),
-                   on_fail=str(data.get("on_fail", "skip") or "skip"))
+                   on_fail=str(data.get("on_fail", "skip") or "skip"),
+                   region=str(data.get("region", "") or ""),
+                   nth=int(data.get("nth", 0) or 0),
+                   grayscale=bool(data.get("grayscale", False)),
+                   retry=int(data.get("retry", 0) or 0),
+                   retry_delay=float(data.get("retry_delay", 0.5) or 0.5))
 
 
 @dataclass
@@ -339,26 +391,32 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
             for message in step.validate(row=index):
                 problems.append(f"[{group.name}] {message}")
             if check_images and step.type in IMAGE_TYPES:
-                name = (step.content or "").strip()
-                if name and not os.path.exists(
-                        assets.resolve_image(name, base_dir or None)):
-                    problems.append(
-                        f"[{group.name}] 第 {index} 行：找不到图片文件 {name}")
-            if check_images and step.type == "if_image":
+                for name in image_names(step.content):
+                    if name and not os.path.exists(
+                            assets.resolve_image(name, base_dir or None)):
+                        problems.append(
+                            f"[{group.name}] 第 {index} 行：找不到图片文件 {name}")
+            if check_images and step.type in ("if_image", "if_not_image",
+                                              "if_else"):
                 name = (step.content or "").split("|")[0].strip()
-                if name and not os.path.exists(
-                        assets.resolve_image(name, base_dir or None)):
-                    problems.append(
-                        f"[{group.name}] 第 {index} 行：找不到图片文件 {name}")
+                for item in image_names(name):
+                    if item and not os.path.exists(
+                            assets.resolve_image(item, base_dir or None)):
+                        problems.append(
+                            f"[{group.name}] 第 {index} 行：找不到图片文件 {item}")
+            if check_images and step.type == "drag":
+                for item in image_names((step.content or "").split("|")[0]):
+                    if item and not os.path.exists(
+                            assets.resolve_image(item, base_dir or None)):
+                        problems.append(
+                            f"[{group.name}] 第 {index} 行：找不到图片文件 {item}")
 
     index = {group.name: group for group in groups}
     for group in groups:
         for step in group.steps:
-            if step.type != "call":
-                continue
-            target = (step.content or "").strip()
-            if target and target not in index:
-                problems.append(f"[{group.name}] 调用的执行组不存在：{target}")
+            for target in target_groups(step):
+                if target not in index:
+                    problems.append(f"[{group.name}] 调用的执行组不存在：{target}")
 
     problems.extend(_find_cycles(index))
     return problems
@@ -377,16 +435,14 @@ def _find_cycles(index: dict[str, Group]) -> list[str]:
         state[name] = 1
         stack.append(name)
         for step in group.steps:
-            if step.type != "call":
-                continue
-            target = (step.content or "").strip()
-            if target not in index:
-                continue
-            if state.get(target) == 1:
-                cycle = stack[stack.index(target):] + [target]
-                problems.append("存在循环调用：" + " → ".join(cycle))
-            elif state.get(target, 0) == 0:
-                walk(target)
+            for target in target_groups(step):
+                if target not in index:
+                    continue
+                if state.get(target) == 1:
+                    cycle = stack[stack.index(target):] + [target]
+                    problems.append("存在循环调用：" + " → ".join(cycle))
+                elif state.get(target, 0) == 0:
+                    walk(target)
         stack.pop()
         state[name] = 2
 
@@ -565,6 +621,51 @@ def save_steps(path: str, steps: Iterable[Step]) -> None:
     export_excel(path, [Group("Sheet1", list(steps))], single=True)
 
 
+def _count_steps(groups: dict[str, list[Step]], name: str,
+                 seen: frozenset) -> int:
+    """递归数一个组展开后有多少步；遇到无限重复返回 -1。
+
+    调用 / 条件步骤会展开目标组（条件判断本身也算一步）；if_else 两个分支
+    只会走一个，估算时取步数较多的那个。
+    """
+    if name in seen:                 # 循环调用：已展开过，不再重复数
+        return 0
+    seen = seen | {name}
+    steps = groups.get(name)
+    if steps is None:
+        return 0
+    total = 0
+    for step in steps:
+        if step.repeat == -1:
+            return -1
+        targets = target_groups(step)
+        if targets:
+            times = int(step.repeat) if step.repeat and step.repeat > 0 else 1
+            inner = max(_count_steps(groups, target, seen)
+                        for target in targets)
+            if inner < 0:
+                return -1
+            total += (inner + 1) * times    # +1：条件/调用判断本身那一步
+        else:
+            total += 1
+    return total
+
+
+def estimate_steps(groups: dict[str, list[Step]], order: list[str],
+                   data_rows: int = 1) -> int:
+    """估算一次运行总共会执行多少步（展开调用组，乘数据行数）。
+
+    循环运行或含「无限重复」时步数不可估，返回 -1（界面改用不确定进度）。
+    """
+    total = 0
+    for name in order:
+        count = _count_steps(groups, name, frozenset())
+        if count < 0:
+            return -1
+        total += count
+    return total * max(1, data_rows)
+
+
 # ---------------------------------------------------------------------------
 # 窗口操作（Windows）
 # ---------------------------------------------------------------------------
@@ -661,19 +762,23 @@ def _window_action(text: str) -> str:
 
 LogFn = Callable[[str, str], None]
 StepFn = Callable[[str, int, "Step"], None]
+StepDoneFn = Callable[[str, int, "Step", bool], None]
+ConfirmFn = Callable[[str, int, "Step"], str]
+ProgressFn = Callable[[int, int], None]
 
 
 def render_content(text: str, row: Optional[dict] = None,
-                   row_no: int = 0) -> str:
+                   row_no: int = 0, vars: Optional[dict] = None) -> str:
     """把内容里的 {占位符} 替换成实际值。
 
-    支持的占位符：
-      {列名}    当前数据行里该列的值（数据驱动）
+    支持的占位符（查找顺序：内置 → 数据列 → 变量）：
       {index}   当前行号（从 1 开始）
       {time}    当前时刻 HH:MM:SS
       {date}    今天日期 YYYY-MM-DD
       {random}  4 位随机数字
-    数据列为空或不存在时保留原样，方便用户发现拼写问题。
+      {列名}    当前数据行里该列的值（数据驱动）
+      {变量名}  「设置变量 / 复制到变量」步骤存下的值
+    数据列、变量不存在时保留原样，方便用户发现拼写问题。
     """
     if not text or "{" not in text:
         return text
@@ -693,7 +798,9 @@ def render_content(text: str, row: Optional[dict] = None,
         if name in row:
             value = row[name]
             return "" if value is None else str(value)
-        return match.group(0)   # 列不存在：保留原样，方便发现拼写问题
+        if vars and name in vars:
+            return str(vars[name])
+        return match.group(0)   # 列/变量不存在：保留原样，方便发现拼写问题
 
     return re.sub(r"\{([^{}]+)\}", replace, text)
 
@@ -704,6 +811,10 @@ class Executor:
 
     data：数据驱动的行列表（list[dict]）。给了 data 时，整个流程会对每一行
     完整跑一遍，步骤内容里的 {列名} 会替换成该行的值。
+
+    vars：运行期变量（「设置变量 / 复制到变量」写入，任意步骤里用 {变量名}
+    读回）。作用范围是**一场运行**：run() 开始时清空，之后同一场运行内的
+    所有组、所有数据行、所有循环轮次共享；下一场运行重新开始。
     """
 
     confidence: float = DEFAULT_CONFIDENCE
@@ -714,9 +825,15 @@ class Executor:
     pause_event: threading.Event = field(default_factory=threading.Event)
     log: Optional[LogFn] = None
     on_step: Optional[StepFn] = None
+    on_step_done: Optional[StepDoneFn] = None
+    on_progress: Optional[ProgressFn] = None
+    confirm: Optional[ConfirmFn] = None
     on_finish: Optional[Callable[[str], None]] = None
     data: list[dict] = field(default_factory=list)
     stats: list[dict] = field(default_factory=list)
+    vars: dict[str, str] = field(default_factory=dict)
+    _progress_done: int = 0
+    _progress_total: int = 0
 
     # -- 生命周期 ---------------------------------------------------------
     def reset(self) -> None:
@@ -727,6 +844,8 @@ class Executor:
         self._row_no = 0
         self._step_ok = True
         self.stats = []
+        self.vars = {}
+        self._progress_done = 0
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -767,9 +886,19 @@ class Executor:
     def _locate(self, image: str):
         import pyautogui
 
-        return pyautogui.locateCenterOnScreen(
-            assets.resolve_image(image, self.base_dir or None),
-            confidence=self.confidence)
+        path = assets.resolve_image(image, self.base_dir or None)
+        if not os.path.exists(path):
+            # 文件缺失是配置错误（预检本该拦住）：明确中止，而不是让
+            # OpenCV 抛一句看不懂的 imread 失败、更不是永远等下去
+            raise StepError(f"找不到图片文件：{image}（{path}）")
+        try:
+            return pyautogui.locateCenterOnScreen(path,
+                                                  confidence=self.confidence)
+        except pyautogui.ImageNotFoundException:
+            # pyautogui 默认「找不到就抛异常」，但引擎的语义是「返回 None，
+            # 由调用方的等待/重试/超时逻辑决定怎么办」——这里必须接住，
+            # 否则「等图片出现」整套逻辑都是死代码
+            return None
 
     def _click(self, image: str, clicks: int, button: str, repeat: float,
                timeout: float = 0, on_fail: str = "skip") -> bool:
@@ -831,7 +960,7 @@ class Executor:
         import pyperclip
 
         text = render_content((step.content or "").strip(), self._row,
-                              self._row_no)
+                              self._row_no, self.vars)
         if step.type == "click":
             self._click(text, 1, "left", step.repeat, step.timeout,
                         step.on_fail)
@@ -875,6 +1004,18 @@ class Executor:
             self._sleep(0.5)
         elif step.type == "if_image":
             self._run_if_image(text, step, depth)
+        elif step.type == "if_not_image":
+            self._run_if_not_image(text, step, depth)
+        elif step.type == "if_else":
+            self._run_if_else(text, step, depth)
+        elif step.type == "if_window":
+            self._run_if_window(text, step, depth)
+        elif step.type == "set":
+            self._set_var(text)
+        elif step.type == "copy":
+            self._copy_to_var(text)
+        elif step.type == "drag":
+            self._drag(text, step)
         elif step.type == "window":
             result = _window_action(text)
             self._emit("info", result)
@@ -910,6 +1051,154 @@ class Executor:
         call_step = Step("call", target, step.repeat)
         self._call_group(call_step, depth)
 
+    def _run_if_not_image(self, text: str, step: Step,
+                          depth: int = 0) -> None:
+        """条件步骤：屏幕上**没有**指定图片，才调用对应的执行组。"""
+        image, _, target = text.partition("|")
+        image, target = image.strip(), target.strip()
+        if not image or not target:
+            raise StepError("条件步骤要写成 图片名|组名")
+        location = self._locate(image)
+        if location is not None:
+            self._emit("info", f"条件不满足：屏幕上还有 {image}，跳过")
+            return
+        self._emit("info", f"条件满足：屏幕上没有 {image}，执行「{target}」")
+        call_step = Step("call", target, step.repeat)
+        self._call_group(call_step, depth)
+
+    def _run_if_else(self, text: str, step: Step, depth: int = 0) -> None:
+        """条件步骤：图片出现执行 A 组，没出现执行 B 组（二选一）。"""
+        image, _, rest = text.partition("|")
+        yes, _, no = rest.partition("|")
+        image, yes, no = image.strip(), yes.strip(), no.strip()
+        if not image or not yes:
+            raise StepError("二选一要写成 图片名|出现执行|没出现执行")
+        location = self._locate(image)
+        if location is not None:
+            self._emit("info", f"条件满足：找到 {image}，执行「{yes}」")
+            self._call_group(Step("call", yes, step.repeat), depth)
+        elif no:
+            self._emit("info", f"条件不满足：没有 {image}，执行「{no}」")
+            self._call_group(Step("call", no, step.repeat), depth)
+        else:
+            self._emit("info", f"条件不满足：没有 {image}，跳过")
+
+    def _run_if_window(self, text: str, step: Step, depth: int = 0) -> None:
+        """条件步骤：存在标题包含指定文字的窗口，才调用对应的执行组。"""
+        if ctypes is None:
+            raise StepError("窗口条件只支持 Windows")
+        title, _, target = text.partition("|")
+        title, target = title.strip(), target.strip()
+        if not title or not target:
+            raise StepError("窗口条件要写成 窗口标题|组名")
+        if _find_window(title) is None:
+            self._emit("info", f"条件不满足：找不到窗口「{title}」，跳过")
+            return
+        self._emit("info", f"条件满足：窗口「{title}」存在，执行「{target}」")
+        call_step = Step("call", target, step.repeat)
+        self._call_group(call_step, depth)
+
+    # -- 变量 -------------------------------------------------------------
+    def _set_var(self, text: str) -> None:
+        """设置变量：变量名=值（值里的占位符在传入前已渲染好）。"""
+        name, _, value = text.partition("=")
+        name = name.strip()
+        if not name:
+            raise StepError("设置变量要写成 变量名=值")
+        self.vars[name] = value.strip()
+        self._emit("info", f"设置变量 {name} = {value.strip()}")
+
+    def _copy_to_var(self, text: str) -> None:
+        """复制选中文字到变量：发一次 Ctrl+C，把剪贴板内容存进变量。
+
+        为避免「其实没复制到、却把上一次的剪贴板内容当成成果」，步骤会先把
+        剪贴板清空再复制；读到的文字同时存进变量，原来剪贴板里的内容会还原。
+        """
+        import pyautogui
+        import pyperclip
+
+        name = text.strip()
+        if not name:
+            raise StepError("复制到变量：变量名不能为空")
+        try:
+            previous = pyperclip.paste()
+        except Exception:      # noqa: BLE001 - 剪贴板不可用时不影响主流程
+            previous = ""
+        pyperclip.copy("")     # 清空：没选中文字时结果应为空而不是旧内容
+        pyautogui.hotkey("ctrl", "c")
+        if not self._sleep(0.2):
+            return             # 已停止
+        try:
+            value = pyperclip.paste()
+        except Exception:      # noqa: BLE001
+            value = ""
+        try:
+            pyperclip.copy(previous)   # 还原用户原来的剪贴板内容
+        except Exception:      # noqa: BLE001
+            pass
+        if not value:
+            self._step_ok = False
+            self._emit("warn", f"没复制到文字（变量 {name} 未更新）")
+            return
+        self.vars[name] = value
+        self._emit("info", f"已复制到变量 {name}：{value[:40]}"
+                    + ("…" if len(value) > 40 else ""))
+
+    # -- 拖拽 -------------------------------------------------------------
+    def _drag_point(self, text: str, step: Step, what: str):
+        """把拖拽的一端（图片名或 x,y）解析成屏幕坐标。
+
+        图片等不到时按 step.timeout / step.on_fail 处理（与点击一致）；
+        timeout=0 表示一直等。返回 None 表示这步没做成。
+        """
+        if _valid_xy(text):
+            x, y, _button = _parse_xy(text)
+            return (x, y)
+        deadline = (time.time() + step.timeout
+                    if step.timeout and step.timeout > 0 else None)
+        while True:
+            if not self._wait_ready():
+                return None
+            location = self._locate(text)
+            if location is not None:
+                return (location.x, location.y)
+            if deadline is not None and time.time() >= deadline:
+                self._step_ok = False
+                self._emit("warn",
+                           f"等待{what}图片 {text} 超时（{step.timeout:g} 秒）")
+                if step.on_fail == "stop":
+                    raise StepError(f"等待{what}图片 {text} 超时，"
+                                    "按设置中止执行")
+                return None
+            self._emit("warn", f"未找到{what}图片 {text}，重试中…")
+            if not self._sleep(POLL_INTERVAL):
+                return None
+
+    def _drag(self, text: str, step: Step) -> bool:
+        """拖拽：起点|终点，两端各自是图片名或 x,y。
+
+        两端都就位后才按下鼠标——避免「按下了却等不到终点」把界面卡在
+        拖拽状态里。
+        """
+        import pyautogui
+
+        start_text, _, end_text = text.partition("|")
+        start = self._drag_point(start_text.strip(), step, "起点")
+        if start is None:
+            return False
+        end = self._drag_point(end_text.strip(), step, "终点")
+        if end is None:
+            return False
+        pyautogui.moveTo(start[0], start[1], duration=0.2)
+        pyautogui.mouseDown()
+        if not self._sleep(0.1):
+            return False
+        pyautogui.moveTo(end[0], end[1], duration=0.4)
+        pyautogui.mouseUp()
+        self._emit("info", f"拖拽 ({start[0]:g}, {start[1]:g}) → "
+                           f"({end[0]:g}, {end[1]:g})")
+        return True
+
     # -- 组执行 -----------------------------------------------------------
     def _run_group(self, name: str, depth: int = 0) -> None:
         steps = self.groups.get(name)
@@ -923,8 +1212,18 @@ class Executor:
                 return
             if not self._wait_ready():
                 return
+            if self.confirm is not None and step.type != "call":
+                answer = self.confirm(name, index, step)
+                if answer == "stop":
+                    raise StepError("已停止（单步调试）")
+                if answer == "skip":
+                    self._emit("info", f"单步调试：跳过第 {index + 1} 步"
+                                       f"（{step.label()}）")
+                    continue
             if self.on_step:
                 self.on_step(name, index, step)
+            if self.on_progress:
+                self.on_progress(self._progress_done, self._progress_total)
             started = time.time()
             failed = False
             fatal: Optional[StepError] = None
@@ -942,14 +1241,18 @@ class Executor:
                 except Exception as exc:  # 单步失败不应终止整体
                     failed = True
                     self._emit("error", f"第 {index + 1} 步出错：{exc}")
+            ok = not failed and self._step_ok
             self.stats.append({
                 "group": name, "index": index + 1, "type": step.type,
                 "content": render_content(step.content, self._row,
-                                          self._row_no),
+                                          self._row_no, self.vars),
                 "note": step.note,
                 "seconds": round(time.time() - started, 2),
-                "ok": not failed and self._step_ok, "row": self._row_no,
+                "ok": ok, "row": self._row_no,
             })
+            self._progress_done += 1
+            if self.on_step_done:
+                self.on_step_done(name, index, step, ok)
             self._step_ok = True
             if fatal is not None:
                 raise fatal
