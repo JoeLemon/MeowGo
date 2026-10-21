@@ -2259,6 +2259,8 @@ class App(tk.Tk):
                     self._on_run_end(str(payload))
                 elif kind == "stop":
                     self.stop_run()
+                elif kind == "run":
+                    self.run_group()
         except queue.Empty:
             pass
         self.after(120, self._drain_queue)
@@ -2947,6 +2949,12 @@ class App(tk.Tk):
     def _start_global_hotkey(self) -> None:
         if os.name != "nt":
             return
+        # 主窗的 Win32 句柄：全局 F5 触发时判断主窗是否在前台——在前台就
+        # 交给窗口内的 <F5> 绑定处理，避免一次按键跑两次
+        try:
+            self._win_hwnd = self.winfo_id()
+        except tk.TclError:
+            self._win_hwnd = None
 
         def loop():
             try:
@@ -2954,14 +2962,28 @@ class App(tk.Tk):
                 from ctypes import wintypes
 
                 user32 = ctypes.windll.user32
-                if not user32.RegisterHotKey(None, 1, 0, 0x78):  # VK_F9
+                ok_stop = user32.RegisterHotKey(None, 1, 0, 0x78)   # VK_F9
+                ok_run = user32.RegisterHotKey(None, 2, 0, 0x74)    # VK_F5
+                if not ok_stop:
                     self._log("warn", "全局停止热键 F9 注册失败（可能被占用）")
+                if not ok_run:
+                    self._log("warn", "全局运行热键 F5 注册失败（可能被占用）")
+                if not ok_stop and not ok_run:
                     return
                 msg = wintypes.MSG()
                 while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                     if msg.message == 0x0312:  # WM_HOTKEY
-                        self.ui_queue.put(("stop", None))
-                user32.UnregisterHotKey(None, 1)
+                        if msg.wParam == 1 and ok_stop:
+                            self.ui_queue.put(("stop", None))
+                        elif msg.wParam == 2 and ok_run:
+                            fg = user32.GetForegroundWindow()
+                            if fg and fg == self._win_hwnd:
+                                continue     # 主窗在前台：窗口内 F5 已响应
+                            self.ui_queue.put(("run", None))
+                if ok_stop:
+                    user32.UnregisterHotKey(None, 1)
+                if ok_run:
+                    user32.UnregisterHotKey(None, 2)
             except Exception:
                 pass
 
@@ -3039,7 +3061,7 @@ class App(tk.Tk):
                 lines.append(f"     重复次数：{repeat_hint}")
         lines += ["", "【快捷键】",
                   "Ctrl+G 新建组　Ctrl+Enter 新增步骤　F2 编辑步骤　Delete 删除步骤",
-                  "F5 运行当前组　F9 停止（全局，任何时候都有效）",
+                  "F5 运行当前组（全局）　F9 停止（全局，任何时候都有效）",
                   "",
                   "【安全】把鼠标快速甩到屏幕左上角可立即中断 pyautogui。"]
 
@@ -5309,7 +5331,7 @@ class ShortcutsDialog(BaseDialog):
         ("Ctrl+A", "全选当前组的步骤（可批量删除/复制/移动）"),
         ("F2", "编辑选中的步骤"),
         ("Delete", "删除选中的步骤"),
-        ("F5", "运行当前组"),
+        ("F5", "运行当前组（全局，任何时候有效）"),
         ("F8", "单步调试开关（每步执行前确认）"),
         ("F9", "停止（全局，任何时候有效）"),
         ("Ctrl+D", "深色 / 浅色主题切换"),

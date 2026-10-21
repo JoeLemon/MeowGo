@@ -1086,6 +1086,36 @@ def test_log_link_and_failed_locate():
     mark("日志跳转与失败定位")
 
 
+def test_global_run_hotkey_dispatch():
+    """全局 F5：ui_queue 收到 run 后走 run_group 入口。"""
+    fired = []
+    real_run = app.run_group
+    app.run_group = lambda: fired.append(True)
+    try:
+        app.ui_queue.put(("run", None))
+        app._drain_queue()
+        app.update()
+        assert fired, "全局 F5 应触发 run_group"
+    finally:
+        app.run_group = real_run
+    mark("全局运行热键分发")
+
+
+def test_log_level_coloring():
+    """运行日志按级别着色：info/warn/error 各打对应 tag。"""
+    app.clear_log()
+    for level, message in (("info", "着色测试-正常"), ("warn", "着色测试-警告"),
+                           ("error", "着色测试-错误")):
+        app._log(level, message)
+    app._drain_queue()
+    app.update()
+    assert app.log_text.tag_ranges("error"), "error 日志应打 error 标签"
+    assert app.log_text.tag_ranges("warn"), "warn 日志应打 warn 标签"
+    assert app.log_text.tag_ranges("info"), "info 日志应打 info 标签"
+    app.clear_log()
+    mark("日志分级着色")
+
+
 def test_shortcuts_dialog():
     """快捷键速查卡：内容、确定/取消返回值。"""
     dialog = gui_module.ShortcutsDialog(app)
@@ -1946,6 +1976,8 @@ def finish():
         test_undo_redo_button_states()
         test_save_indicator_and_ui_state()
         test_log_link_and_failed_locate()
+        test_global_run_hotkey_dispatch()
+        test_log_level_coloring()
         test_shortcuts_dialog()
         test_step_dialog_types()
         test_capture_overlay_from_modal_dialog()

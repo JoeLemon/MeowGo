@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import ast
 import csv
+import operator
 import os
 import random
 import re
@@ -280,6 +282,54 @@ def _parse_xy(text: str) -> tuple[float, float, str]:
     button = parts[2] if len(parts) > 2 and parts[2] in (
         "left", "right", "middle") else "left"
     return x, y, button
+
+
+# ---------------------------------------------------------------------------
+# 变量表达式求值：set 步骤里「变量名=表达式」。表达式**只支持纯算术**
+# （+ - * / // % ** 和括号），其余一律当作字符串原样保存——既避免 eval
+# 注入，也符合「set 文本=订单-{编号}」这种拼接场景的直觉。
+# ---------------------------------------------------------------------------
+_ARITH_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub,
+    ast.Mult: operator.mul, ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_OPERATOR_RE = re.compile(r"[+\-*/%]")
+_NUMERIC_RE = re.compile(r"^[0-9+\-*/().%\s]+$")
+
+
+def _eval_arith(node: "ast.AST"):
+    """受控求值：只允许数字常量 + 算术运算符，其余抛异常。"""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        raise ValueError("非常量")
+    if isinstance(node, ast.BinOp) and type(node.op) in _ARITH_OPS:
+        return _ARITH_OPS[type(node.op)](_eval_arith(node.left),
+                                         _eval_arith(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in (ast.UAdd, ast.USub):
+        value = _eval_arith(node.operand)
+        return value if isinstance(node.op, ast.UAdd) else -value
+    raise ValueError("不支持的表达式")
+
+
+def _eval_expression(expr: str) -> str:
+    """求 set 步骤的值；纯算术表达式才计算，其余原样返回字符串。"""
+    expr = (expr or "").strip()
+    if not expr or _OPERATOR_RE.search(expr) is None:
+        return expr                      # 无运算符：字符串或纯数字，原样
+    if not _NUMERIC_RE.fullmatch(expr):
+        return expr                      # 含非数字字符：字符串拼接，原样
+    try:
+        result = _eval_arith(ast.parse(expr, mode="eval").body)
+    except Exception:  # noqa: BLE001 — 求值失败按字符串原样保存
+        return expr
+    if isinstance(result, float):
+        if result.is_integer():
+            return str(int(result))
+        return f"{result:.6f}".rstrip("0").rstrip(".")
+    return str(result)
 
 
 @dataclass
@@ -1509,14 +1559,19 @@ class Executor:
 
     # -- 变量 -------------------------------------------------------------
     def _set_var(self, text: str) -> None:
-        """设置变量：变量名=值（值里的占位符在传入前已渲染好）。"""
+        """设置变量：变量名=值。
+
+        值里的 {占位符} 在传入前已渲染好；若渲染后是纯算术表达式
+        （如 5+1、12.5*4），会先算出结果再存，否则按字符串原样保存。
+        """
         name, _, value = text.partition("=")
         name = name.strip()
         if not name:
             raise StepError("设置变量要写成 变量名=值")
-        self.vars[name] = value.strip()
+        value = _eval_expression(value)
+        self.vars[name] = value
         self._row_var_keys.add(name)
-        self._emit("info", f"设置变量 {name} = {value.strip()}")
+        self._emit("info", f"设置变量 {name} = {value}")
 
     def _copy_to_var(self, text: str) -> None:
         """复制选中文字到变量：发一次 Ctrl+C，把剪贴板内容存进变量。

@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa.engine import (STEP_TYPES, TYPE_TO_CODE, Executor, Group,  # noqa: E402
                         Project, Step, export_excel, import_excel,
-                        load_steps, render_content, validate_project)
+                        load_steps, render_content, validate_project,
+                        _eval_expression)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -706,6 +707,37 @@ def test_set_var_and_placeholder():
         assert ex3.vars["名字"] == "变量值"
         assert ex3.stats[1]["content"] == "甲", "数据列应优先于同名变量"
         assert ex3.stats[2]["content"] == "{没定义过}"
+
+
+def test_set_var_expression():
+    """set 的算术表达式：纯算式才求值，字符串/前导零/非法式原样保留。"""
+    assert _eval_expression("5+1") == "6"
+    assert _eval_expression("12.5*4") == "50"
+    assert _eval_expression("(2+3)*4") == "20"
+    assert _eval_expression("7//2") == "3"
+    assert _eval_expression("2**10") == "1024"
+    assert _eval_expression("10%3") == "1"
+    assert _eval_expression("1/3") == "0.333333"
+    # 字符串 / 前导零 / 拼接 / 非法表达式：原样
+    assert _eval_expression("007") == "007"
+    assert _eval_expression("5") == "5"
+    assert _eval_expression("订单-5") == "订单-5"
+    assert _eval_expression("") == ""
+    assert _eval_expression("__import__('os')") == "__import__('os')"
+    assert _eval_expression("1/0") == "1/0"          # 除零：求值失败，原样
+
+    # 集成：计数自增
+    with _fake_input_modules([]):
+        ex = Executor()
+        ex.log = lambda level, msg: None
+        ex._sleep = lambda s: True
+        ex.groups = {"主": [Step("set", "计数=0"),
+                            Step("set", "计数={计数}+1"),
+                            Step("set", "计数={计数}+1"),
+                            Step("set", "总价={计数}*2")]}
+        assert ex.run("主") == "finished"
+        assert ex.vars["计数"] == "2"
+        assert ex.vars["总价"] == "4"
 
 
 def test_copy_to_var():
