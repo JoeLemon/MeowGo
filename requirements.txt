@@ -1,0 +1,8 @@
+# Excel执行喵 · 可视化版 运行依赖
+# 安装：pip install -r requirements.txt
+pyautogui==0.9.54
+pyperclip
+pillow
+opencv-python
+xlrd
+openpyxl
