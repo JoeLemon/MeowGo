@@ -70,3 +70,4 @@ $RECYCLE.BIN/
 backups/
 reports/
 tests/_shot_preview_dir/
+tests/*.png
