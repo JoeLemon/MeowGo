@@ -13,8 +13,8 @@ from tkinter import ttk
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa import gui as gui_module  # noqa: E402
-from rpa.engine import (STEP_TYPES, Group, Step, import_excel,  # noqa: E402
-                        validate_project)
+from rpa.engine import (STEP_TYPES, Group, Project, Step,  # noqa: E402
+                        import_excel, validate_project)
 
 # 把配置、报告、失败截图都写到临时目录，避免影响用户数据和仓库里的 reports/
 _TMP = tempfile.mkdtemp(prefix="rpa_gui_test_")
@@ -25,6 +25,10 @@ gui_module.enable_dpi_awareness()
 
 app = gui_module.App()
 print(f"  INFO  DPI 缩放系数 = {app.scale}")
+# App 初始化时会预置默认组；seed() 随后会覆盖项目，先留一份快照做断言
+_INITIAL_GROUPS = [(group.name,
+                    [(step.type, step.content) for step in group.steps])
+                   for group in app.project.groups]
 
 # ---------------------------------------------------------------- 假对话框
 # 假对话框必须模拟真实对话框的模态语义：wait() 之前 result 不可用。
@@ -717,7 +721,9 @@ def test_schedule_dialog_and_tick():
         assert files, "应写出一份 markdown 报告"
         assert os.path.exists(os.path.join(gui_module.REPORTS_DIR,
                                            "index.html"))
-        text = open(os.path.join(gui_module.REPORTS_DIR, files[0]),
+        latest = max(files, key=lambda name: os.path.getmtime(
+            os.path.join(gui_module.REPORTS_DIR, name)))
+        text = open(os.path.join(gui_module.REPORTS_DIR, latest),
                     encoding="utf-8").read()
         assert "结果：finished" in text and "| 甲 | 1 | 1 |" in text
     finally:
@@ -1573,23 +1579,46 @@ def test_settings_dialog_preserves_keys():
     mark("设置对话框保留其它配置")
 
 
+def test_canvas_cat_empty_state():
+    """空状态用 Canvas 小猫上半身，不依赖 PIL 图片。"""
+    for cat in (app.step_empty_icon, app.group_empty_icon):
+        assert isinstance(cat, gui_module.uikit.CatCanvas), type(cat)
+        # 身体 / 围脖 / 双耳内外 / 胡须 ×4 / 头 / 眼 ×2 / 瞳 ×2 / 鼻子
+        assert len(cat.find_all()) == 16, len(cat.find_all())
+        fills = {str(cat.itemcget(item, "fill")) for item in cat.find_all()}
+        assert gui_module.TEXT in fills, fills
+        assert gui_module.ACCENT in fills, fills
+        assert gui_module.ACCENT_STRONG in fills, fills
+    mark("Canvas 小猫空状态")
+
+
 def test_theme_switch():
     """深色主题：模块常量 / 控件树 / 树标签 / 图标色整体切换，可还原。"""
     light_bg = gui_module.BG
     light_card = gui_module.CARD
     app._apply_theme(True)
     app.update()
-    assert gui_module.BG == "#171b22", "模块常量应换成暗色"
-    assert gui_module.CARD == "#1f242e"
-    assert app.cget("bg") == "#171b22", "主窗口底色应跟上"
-    assert str(app.log_card.cget("bg")) == "#1f242e", "卡片底色应跟上"
+    assert gui_module.BG == "#12110F", "模块常量应换成暗色"
+    assert gui_module.CARD == "#1D1B18"
+    assert app.cget("bg") == "#12110F", "主窗口底色应跟上"
+    assert str(app.log_card.cget("bg")) == "#1D1B18", "卡片底色应跟上"
     assert str(app.status_var.get()) != ""      # 界面还活着
-    assert gui_module.TYPE_COLORS["click"] == "#6f9bff", "类型图标应提亮"
-    assert str(app.btn_run["bg"]) == "#171b22", "按钮底色应跟上"
+    assert gui_module.TYPE_COLORS["click"] == "#FDAD63", "类型图标应提亮"
+    assert str(app.btn_run["bg"]) == "#12110F", "按钮底色应跟上"
+    assert str(app.step_title.cget("fg")) == "#F5F2ED", "正文应换成暖白"
+    assert str(app.log_text.cget("fg")) == "#F7F4EF", "日志正文保持暖白"
+    # Canvas 小猫跟随主题重绘（不是 PIL 图片，不能靠 configure(image) 换色）
+    assert app.step_empty_icon.paper == gui_module.CARD
+    assert app.step_empty_icon.ink == gui_module.TEXT
+    assert app.step_empty_icon.accent == gui_module.ACCENT
+    assert str(app.step_empty_icon.cget("bg")) == gui_module.CARD
+    fills = {str(app.step_empty_icon.itemcget(item, "fill"))
+             for item in app.step_empty_icon.find_all()}
+    assert gui_module.TEXT in fills and gui_module.ACCENT in fills, fills
     # 树标签重配（tag_configure 返回的是 Tk string 包装对象，要 str() 一下）
-    assert str(app.step_tree.tag_configure("odd", "background")) == "#232935"
+    assert str(app.step_tree.tag_configure("odd", "background")) == "#25221E"
     assert str(app.step_tree.tag_configure("failed", "background")) == \
-        "#3a2628"
+        "#352322"
     # 切回浅色：全部还原
     app._apply_theme(False)
     app.update()
@@ -1597,7 +1626,9 @@ def test_theme_switch():
     assert gui_module.CARD == light_card
     assert app.cget("bg") == light_bg
     assert str(app.btn_run["bg"]) == light_bg
-    assert gui_module.TYPE_COLORS["click"] == "#3b6ff5"
+    assert gui_module.TYPE_COLORS["click"] == "#E8861F"
+    assert str(app.step_title.cget("fg")) == "#080806", "正文应还原成墨黑"
+    assert str(app.log_text.cget("fg")) == "#F5F2ED", "日志正文仍保持暖白"
     # toggle_theme：翻 settings 并落盘，两次切换回到原样
     original = app.dark                  # 此时是浅色（前面已还原）
     app.toggle_theme()
@@ -1964,9 +1995,53 @@ def test_resume_retries_failed_tail():
     mark("断点续跑重试失败行")
 
 
+def test_default_groups():
+    """首次启动预置浏览器 / 软件组；不覆盖已有组，也不重复添加。"""
+    names = [name for name, _steps in _INITIAL_GROUPS]
+    assert names == ["打开浏览器", "打开软件"], names
+    browser_steps = dict(_INITIAL_GROUPS)["打开浏览器"]
+    assert [step_type for step_type, _content in browser_steps] == [
+        "set", "set", "cmd", "wait", "hotkey", "input", "hotkey"]
+    assert browser_steps[0][1] == "浏览器=chrome"
+    assert browser_steps[1][1] == "网址=https://www.baidu.com"
+    assert browser_steps[2][1] == 'start "" "{浏览器}"'
+    assert browser_steps[5][1] == "{网址}"
+    software_steps = dict(_INITIAL_GROUPS)["打开软件"]
+    assert [step_type for step_type, _content in software_steps] == [
+        "set", "cmd"]
+    assert software_steps[0][1] == "软件=notepad"
+    assert software_steps[1][1] == 'start "" "{软件}"'
+
+    # 已有组保留，只补充缺失的预置组
+    project = Project(groups=[Group("我的组", [Step("wait", "1")], "保留我")])
+    settings = {}
+    assert gui_module.seed_default_groups(project, settings) is True
+    assert project.names() == ["我的组", "打开浏览器", "打开软件"], \
+        project.names()
+    assert project.get("我的组").steps[0].content == "1"
+    assert project.get("我的组").note == "保留我"
+
+    # 第二次启动不重复添加
+    count = len(project.groups)
+    assert gui_module.seed_default_groups(project, settings) is False
+    assert len(project.groups) == count
+
+    # 旧版留下的唯一空「默认组」占位符会被替换；用户自己的空组不删
+    placeholder = Project(groups=[Group("默认组")])
+    gui_module.seed_default_groups(placeholder, {})
+    assert placeholder.names() == ["打开浏览器", "打开软件"], \
+        placeholder.names()
+    custom_empty = Project(groups=[Group("我的空组")])
+    gui_module.seed_default_groups(custom_empty, {})
+    assert custom_empty.names() == ["我的空组", "打开浏览器", "打开软件"], \
+        custom_empty.names()
+    mark("默认组预置")
+
+
 def finish():
     try:
         checks()
+        test_default_groups()
         test_schedule_dialog_and_tick()
         test_editing_features()
         test_macro_recorder()
@@ -1989,6 +2064,7 @@ def finish():
         test_image_preview_pane()
         test_zebra_and_type_colors()
         test_settings_dialog_preserves_keys()
+        test_canvas_cat_empty_state()
         test_theme_switch()
         test_batch_step_ops()
         test_drag_indicator_line()

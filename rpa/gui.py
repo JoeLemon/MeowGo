@@ -26,6 +26,13 @@ from .engine import (CONDITION_TYPES, IMAGE_STEP_TYPES, IMAGE_TYPES,
 from .lock import InstanceLock, make_lock_name
 
 APP_TITLE = "MeowGo"
+APP_LOGO_FILE = "meowgo_logo_transparent.png"
+CARD_RADIUS = 16                  # 大卡片 / 面板（--mg-radius-l）
+INNER_RADIUS = 12                 # 小卡片 / 弹窗（--mg-radius-m）
+FIELD_RADIUS = 8                  # 输入框 / 小按钮（--mg-radius-s）
+HEADER_HEIGHT = 56                # 顶栏（--mg header）
+UI_FONT = "Microsoft YaHei UI"
+MONO_FONT = "Cascadia Code"
 
 
 def _app_dir() -> str:
@@ -42,35 +49,56 @@ REPORTS_DIR = os.path.join(APP_DIR, "reports")
 SHOTS_DIR = os.path.join(REPORTS_DIR, "shots")
 BACKUPS_DIR = os.path.join(APP_DIR, "backups")
 MAX_CONFIG_BACKUPS = 10
+MAX_LOG_LINES = 2000              # 日志上限：超出后从最早的行开始丢弃
+DEFAULT_GROUPS_KEY = "default_groups_version"   # 状态文件里的预置组版本
+DEFAULT_GROUPS_VERSION = 1
 
-# 配色（默认浅色；_apply_theme 会整组换血并重染界面）
-BG = "#f4f6fa"
-CARD = "#ffffff"
-ACCENT = "#3b6ff5"
-TEXT = "#22262e"
-MUTED = "#7a8290"
-BORDER = "#e2e7f0"
-LOG_BG = "#1e2228"
-LOG_FG = "#d7dce3"
-ZEBRA = "#f5f8fd"                 # 步骤表斑马纹（奇数行）
-HEADING_BG = "#eef2f8"            # 表头
-HEADING_FG = "#66708a"
-SELECT_BG = "#dbe7ff"             # 树控件选中色
-ENTRY_BG = "white"                # 输入框底色
-SCROLL_BG = "#ccd3e0"
-SCROLL_TROUGH = "#ffffff"
-PROGRESS_TROUGH = "#e8edf6"
-PREVIEW_BG = "#f8fafd"            # 图片预览窗格
-SUMMARY_BG = "#eef3ff"            # 运行摘要条
-SUMMARY_BORDER = "#c9d9f8"
-MARK_RUNNING = "#fff4d6"          # 运行染色：正在执行
-MARK_DONE = "#eaf6ec"             # 成功
-MARK_FAILED = "#fdecec"           # 失败
+# 配色（Design Tokens v1.0：暖白 / 墨黑 / 暖橙点缀；_apply_theme 整组切换）
+BG = "#FAF9F7"                    # --mg-bg 页面背景
+CARD = "#FFFFFF"                  # --mg-surface 卡片面
+ACCENT = "#FDAD63"                # --mg-orange 品牌暖橙
+ACCENT_STRONG = "#E8861F"         # --mg-orange-strong
+ACCENT_TINT = "#FFE9D2"           # --mg-orange-tint
+ACCENT_MIST = "#FFF6EC"           # --mg-orange-mist
+TEXT = "#080806"                  # --mg-text-1 / --mg-ink
+MUTED = "#6B655E"                 # --mg-text-2
+TEXT_WEAK = "#A8A29A"             # --mg-text-3
+BORDER = "#E6E2DB"                # --mg-border
+BORDER_STRONG = "#D4CFC6"         # --mg-border-strong
+SUCCESS = "#3E9B6F"               # --mg-success
+WARNING = "#E0A33C"               # --mg-warning
+DANGER = "#D9534F"                # --mg-danger
+INFO = "#5B8DEF"                  # --mg-info
+LOG_BG = "#12110F"                # 深色控制台（暖黑）
+LOG_FG = "#F5F2ED"
+LOG_HEAD_BG = "#1D1B18"           # 日志标题栏：和正文一起构成深色控制台
+LOG_HEAD_FG = "#F5F2ED"
+LOG_HEAD_MUTED = "#9A938A"
+ZEBRA = "#F7F5F1"                 # 步骤表斑马纹（奇数行）
+HEADING_BG = "#F3F1ED"            # 表头 --mg-surface-2
+HEADING_FG = "#6B655E"
+SELECT_BG = "#FFE9D2"             # 树控件选中色 --mg-orange-tint
+ENTRY_BG = "#FFFFFF"              # 输入框底色
+SCROLL_BG = "#CFC8BE"
+SCROLL_TROUGH = "#FAF9F7"
+PROGRESS_TROUGH = "#F0EDE8"
+PREVIEW_BG = "#FFF6EC"            # 图片预览窗格
+SUMMARY_BG = "#FFF6EC"            # 运行摘要条
+SUMMARY_BORDER = "#F2C38C"
+MARK_RUNNING = "#FFF3DF"          # 运行染色：正在执行
+MARK_DONE = "#EAF5EF"             # 成功
+MARK_FAILED = "#FBEAE9"           # 失败
 
 # 主题色板：_apply_theme 按这张表换模块常量 + 重染控件
 LIGHT_PALETTE = {
     "BG": BG, "CARD": CARD, "ACCENT": ACCENT, "TEXT": TEXT, "MUTED": MUTED,
-    "BORDER": BORDER, "LOG_BG": LOG_BG, "LOG_FG": LOG_FG, "ZEBRA": ZEBRA,
+    "ACCENT_STRONG": ACCENT_STRONG, "ACCENT_TINT": ACCENT_TINT,
+    "ACCENT_MIST": ACCENT_MIST, "TEXT_WEAK": TEXT_WEAK,
+    "BORDER": BORDER, "BORDER_STRONG": BORDER_STRONG,
+    "SUCCESS": SUCCESS, "WARNING": WARNING, "DANGER": DANGER, "INFO": INFO,
+    "LOG_BG": LOG_BG, "LOG_FG": LOG_FG, "ZEBRA": ZEBRA,
+    "LOG_HEAD_BG": LOG_HEAD_BG, "LOG_HEAD_FG": LOG_HEAD_FG,
+    "LOG_HEAD_MUTED": LOG_HEAD_MUTED,
     "HEADING_BG": HEADING_BG, "HEADING_FG": HEADING_FG, "SELECT_BG": SELECT_BG,
     "ENTRY_BG": ENTRY_BG, "SCROLL_BG": SCROLL_BG,
     "SCROLL_TROUGH": SCROLL_TROUGH, "PROGRESS_TROUGH": PROGRESS_TROUGH,
@@ -79,14 +107,20 @@ LIGHT_PALETTE = {
     "MARK_DONE": MARK_DONE, "MARK_FAILED": MARK_FAILED,
 }
 DARK_PALETTE = {
-    "BG": "#171b22", "CARD": "#1f242e", "ACCENT": "#5b8cff",
-    "TEXT": "#e6eaf2", "MUTED": "#8b95a5", "BORDER": "#2e3542",
-    "LOG_BG": "#101318", "LOG_FG": "#c9d1dc", "ZEBRA": "#232935",
-    "HEADING_BG": "#262d3a", "HEADING_FG": "#93a0b4", "SELECT_BG": "#2e3f5f",
-    "ENTRY_BG": "#262d3a", "SCROLL_BG": "#39414f", "SCROLL_TROUGH": "#1f242e",
-    "PROGRESS_TROUGH": "#2a313c", "PREVIEW_BG": "#232935",
-    "SUMMARY_BG": "#1d2635", "SUMMARY_BORDER": "#31405c",
-    "MARK_RUNNING": "#3a3324", "MARK_DONE": "#22332a", "MARK_FAILED": "#3a2628",
+    "BG": "#12110F", "CARD": "#1D1B18", "ACCENT": "#FDAD63",
+    "TEXT": "#F5F2ED", "MUTED": "#A8A29A", "BORDER": "#35312B",
+    "ACCENT_STRONG": "#FFB86F", "ACCENT_TINT": "#3A2D20",
+    "ACCENT_MIST": "#2A2118", "TEXT_WEAK": "#6B655E",
+    "BORDER_STRONG": "#4A443C", "SUCCESS": "#6BC79A", "WARNING": "#F0BC5E",
+    "DANGER": "#EE8B88", "INFO": "#8FB3F5",
+    "LOG_BG": "#0D0C0A", "LOG_FG": "#F7F4EF", "ZEBRA": "#25221E",
+    "LOG_HEAD_BG": "#1E1B18", "LOG_HEAD_FG": "#F7F4EF",
+    "LOG_HEAD_MUTED": "#B8B1A8",
+    "HEADING_BG": "#26231F", "HEADING_FG": "#A8A29A", "SELECT_BG": "#3A2D20",
+    "ENTRY_BG": "#1D1B18", "SCROLL_BG": "#3D3831", "SCROLL_TROUGH": "#12110F",
+    "PROGRESS_TROUGH": "#3B3630", "PREVIEW_BG": "#2A2118",
+    "SUMMARY_BG": "#2A2118", "SUMMARY_BORDER": "#71573B",
+    "MARK_RUNNING": "#33291C", "MARK_DONE": "#1F2E27", "MARK_FAILED": "#352322",
 }
 
 TYPE_ICONS = {
@@ -102,30 +136,34 @@ TYPE_ICONS = {
 # 条件步骤里「图片 | 组名」两段式的类型（对话框用图形化双输入框）
 PIPE_CONDITION_TYPES = ("if_image", "if_not_image", "if_window")
 
-# 每种步骤类型的图标色调：鼠标操作蓝、文本紫、等待橙、键盘青、条件棕
+# 每种步骤类型的图标色调：遵循「墨黑为主、暖橙点睛、语义色克制」。
+# 鼠标 / 操作类用暖橙，输入类用信息蓝，等待类用警告黄，键盘类用成功绿，
+# 条件类用错误红；其余使用暖中性灰，避免界面出现彩虹色。
 TYPE_COLORS = {
-    "click": "#3b6ff5", "dblclick": "#3b6ff5", "rightclick": "#3b6ff5",
-    "click_xy": "#3b6ff5", "move_xy": "#3b6ff5", "drag": "#3b6ff5",
-    "input": "#8a5cf6", "time": "#8a5cf6", "set": "#c2557a", "copy": "#c2557a",
-    "wait": "#e0a83c", "scroll": "#e0a83c",
-    "hotkey": "#0e9f9f", "cmd": "#0e9f9f",
-    "call": "#66708a",
-    "if_image": "#e2683c", "if_not_image": "#e2683c", "if_else": "#e2683c",
-    "if_window": "#e2683c", "window": "#e2683c",
+    "click": ACCENT_STRONG, "dblclick": ACCENT_STRONG,
+    "rightclick": ACCENT_STRONG, "click_xy": ACCENT_STRONG,
+    "move_xy": ACCENT_STRONG, "drag": ACCENT_STRONG,
+    "input": INFO, "time": INFO,
+    "set": MUTED, "copy": MUTED,
+    "wait": WARNING, "scroll": WARNING,
+    "hotkey": SUCCESS, "cmd": SUCCESS,
+    "call": TEXT_WEAK,
+    "if_image": DANGER, "if_not_image": DANGER, "if_else": DANGER,
+    "if_window": DANGER, "window": DANGER,
 }
-TYPE_ICON_COLOR = "#5a6478"
+TYPE_ICON_COLOR = MUTED
 # 深色下把类型图标提亮一档，避免深底看不清（_apply_theme 时整组替换）
 TYPE_COLORS_DARK = dict(TYPE_COLORS)
 LIGHT_TYPE_COLORS = dict(TYPE_COLORS)   # 留底：切回浅色时整组还原
 TYPE_COLORS_DARK.update({
-    "click": "#6f9bff", "dblclick": "#6f9bff", "rightclick": "#6f9bff",
-    "click_xy": "#6f9bff", "move_xy": "#6f9bff", "drag": "#6f9bff",
-    "input": "#a98cf0", "time": "#a98cf0", "set": "#e07b9c", "copy": "#e07b9c",
-    "wait": "#f0bc5e", "scroll": "#f0bc5e",
-    "hotkey": "#3fc4c4", "cmd": "#3fc4c4",
-    "call": "#8b95a5",
-    "if_image": "#f08a5d", "if_not_image": "#f08a5d", "if_else": "#f08a5d",
-    "if_window": "#f08a5d", "window": "#f08a5d",
+    "click": "#FDAD63", "dblclick": "#FDAD63", "rightclick": "#FDAD63",
+    "click_xy": "#FDAD63", "move_xy": "#FDAD63", "drag": "#FDAD63",
+    "input": "#8FB3F5", "time": "#8FB3F5", "set": "#A8A29A", "copy": "#A8A29A",
+    "wait": "#F0BC5E", "scroll": "#F0BC5E",
+    "hotkey": "#6BC79A", "cmd": "#6BC79A",
+    "call": "#A8A29A",
+    "if_image": "#EE8B88", "if_not_image": "#EE8B88", "if_else": "#EE8B88",
+    "if_window": "#EE8B88", "window": "#EE8B88",
 })
 
 # 步骤搜索框的占位文字（失焦为空时显示，不计入过滤条件）
@@ -271,6 +309,71 @@ def enable_dpi_awareness() -> None:
         pass
 
 
+def build_default_groups() -> list[Group]:
+    """首次启动时预置的常用执行组（每次返回新对象，避免共享状态）。"""
+    browser = Group(
+        "打开浏览器",
+        [
+            Step("set", "浏览器=chrome",
+                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", "网址=https://www.baidu.com",
+                 note="要打开的链接"),
+            Step("cmd", 'start "" "{浏览器}"',
+                 note="按变量启动浏览器"),
+            Step("wait", "2",
+                 note="等浏览器启动；慢就改大"),
+            Step("hotkey", "ctrl,l", note="聚焦地址栏"),
+            Step("input", "{网址}", note="输入网址"),
+            Step("hotkey", "enter", note="打开网址"),
+        ],
+        note="预置模板：改前两步变量即可运行；浏览器启动慢时把等待秒数改大。",
+    )
+    software = Group(
+        "打开软件",
+        [
+            Step("set", "软件=notepad",
+                 note="exe 名或完整路径，如 notepad / calc"),
+            Step("cmd", 'start "" "{软件}"',
+                 note="按变量启动软件；找不到就填完整路径"),
+        ],
+        note="预置模板：把「软件」变量改成要打开的程序名或完整 exe 路径。",
+    )
+    return [browser, software]
+
+
+def seed_default_groups(project: Project, settings: dict) -> bool:
+    """按版本补充预置执行组，返回是否新增了组。
+
+    只在首次启动（或预置版本升级）时执行；按组名去重，绝不覆盖用户
+    已有组。补完后写回版本号，用户以后删掉预置组也不会再次出现。
+    """
+    try:
+        seeded = int(settings.get(DEFAULT_GROUPS_KEY, 0) or 0)
+    except (TypeError, ValueError):
+        seeded = 0
+    if seeded >= DEFAULT_GROUPS_VERSION:
+        return False
+
+    # 早期版本在空项目里自动建过一个空「默认组」，它只是占位符；
+    # 仅当它是唯一的空组时才清掉，避免把用户自己建的空组误删。
+    if (len(project.groups) == 1
+            and project.groups[0].name == "默认组"
+            and not project.groups[0].steps
+            and not project.groups[0].note.strip()):
+        project.groups.clear()
+
+    existing = set(project.names())
+    added = False
+    for group in build_default_groups():
+        if group.name in existing:
+            continue
+        project.groups.append(group)
+        existing.add(group.name)
+        added = True
+    settings[DEFAULT_GROUPS_KEY] = DEFAULT_GROUPS_VERSION
+    return added
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -352,6 +455,7 @@ class App(tk.Tk):
         self._restore_ui_state()
         self._apply_theme(self.dark)
 
+        seed_default_groups(self.project, self.settings)
         if not self.project.groups:
             self.project.groups.append(Group(self.project.unique_name("默认组")))
         self._refresh_all(select_group=0)
@@ -411,10 +515,33 @@ class App(tk.Tk):
             y = min(max(y, top), max(top, bottom - height))
         window.geometry(f"+{int(x)}+{int(y)}")
 
-    def pic(self, name: str, size: int = 16, color: str = "#33405a"):
+    def pic(self, name: str, size: int = 16, color: str = TEXT_WEAK):
         key = (name, self.s(size), color)
         if key not in self._icons:
             self._icons[key] = uikit.icon(name, self.s(size), color)
+        return self._icons[key]
+
+    def step_pic(self, step_type: str, size: int = 14):
+        """行首「类型色条 + 图标」：让 TYPE_COLORS 真正参与扫行。
+
+        Treeview 不能给单个单元格上色，所以把颜色做成 #0 列的窄色条；
+        图标与色条同色，浅色 / 深色主题共用同一套 TYPE_COLORS。
+        """
+        color = TYPE_COLORS.get(step_type, TYPE_ICON_COLOR)
+        key = ("step_type", step_type, self.s(size), color)
+        if key not in self._icons:
+            from PIL import Image, ImageDraw, ImageTk
+
+            px = self.s(size)
+            bar = max(2, self.s(3))
+            gap = max(1, self.s(2))
+            canvas = Image.new("RGBA", (px + bar + gap, px), (0, 0, 0, 0))
+            ImageDraw.Draw(canvas).rounded_rectangle(
+                [0, 0, bar - 1, px - 1], radius=max(1, bar / 2), fill=color)
+            glyph = uikit.icon_image(
+                TYPE_ICONS.get(step_type, "note"), px, color)
+            canvas.paste(glyph, (bar + gap, 0), glyph)
+            self._icons[key] = ImageTk.PhotoImage(canvas)
         return self._icons[key]
 
     @staticmethod
@@ -443,6 +570,43 @@ class App(tk.Tk):
             self._icons[key] = photo
         return self._icons[key]
 
+    @staticmethod
+    def _logo_paths() -> list[str]:
+        """品牌 Logo 的位置（与 main.png 一样兼容打包后的目录）。"""
+        return [os.path.join(getattr(sys, "_MEIPASS", APP_DIR), APP_LOGO_FILE),
+                os.path.join(APP_DIR, APP_LOGO_FILE)]
+
+    def brand_logo(self, height: int, dark: bool):
+        """加载品牌 Logo；深色主题下把黑色字标反白，保留橙色圆点。"""
+        key = ("brand_logo", self.s(height), bool(dark))
+        if key not in self._icons:
+            photo = None
+            for path in self._logo_paths():
+                if not os.path.exists(path):
+                    continue
+                try:
+                    from PIL import Image, ImageTk
+
+                    image = Image.open(path).convert("RGBA")
+                    width, src_height = image.size
+                    target_h = max(1, self.s(height))
+                    target_w = max(1, round(width * target_h / src_height))
+                    image = image.resize((target_w, target_h), Image.LANCZOS)
+                    if dark:
+                        pixels = image.load()
+                        for y in range(target_h):
+                            for x in range(target_w):
+                                r, g, b, alpha = pixels[x, y]
+                                if (alpha and max(r, g, b) < 170
+                                        and max(r, g, b) - min(r, g, b) < 36):
+                                    pixels[x, y] = (245, 242, 237, alpha)
+                    photo = ImageTk.PhotoImage(image)
+                    break
+                except Exception:  # noqa: BLE001 — 读不到就用文字兜底
+                    continue
+            self._icons[key] = photo
+        return self._icons[key]
+
     def _set_icon(self) -> None:
         for icon in self._icon_paths():
             if not os.path.exists(icon):
@@ -463,33 +627,78 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         style.configure(".", background=BG, foreground=TEXT,
-                        font=("Microsoft YaHei UI", 9))
+                        font=(UI_FONT, 10))
         style.configure("Card.TFrame", background=CARD)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Card.TLabel", background=CARD, foreground=TEXT)
         style.configure("Muted.TLabel", background=BG, foreground=MUTED)
         style.configure("Treeview", background=CARD, fieldbackground=CARD,
-                        rowheight=self.s(27), borderwidth=0,
-                        font=("Microsoft YaHei UI", 9))
+                        rowheight=self.s(32), borderwidth=0,
+                        bordercolor=BORDER, lightcolor=BORDER,
+                        darkcolor=BORDER, font=(UI_FONT, 10))
         style.configure("Treeview.Heading", background=HEADING_BG,
-                        foreground=HEADING_FG,
-                        font=("Microsoft YaHei UI", 9, "bold"))
+                        foreground=HEADING_FG, bordercolor=BORDER,
+                        lightcolor=BORDER, darkcolor=BORDER,
+                        relief="flat", font=(UI_FONT, 10, "bold"))
         style.map("Treeview", background=[("selected", SELECT_BG)],
                   foreground=[("selected", TEXT)])
         style.configure("TEntry", fieldbackground=ENTRY_BG,
-                        foreground=TEXT, padding=self.s(4),
-                        bordercolor=BORDER)
-        style.configure("TCombobox", padding=self.s(3))
-        style.configure("TSpinbox", padding=self.s(3))
+                        foreground=TEXT, padding=self.s(5),
+                        bordercolor=BORDER, lightcolor=ENTRY_BG,
+                        darkcolor=ENTRY_BG, borderwidth=1)
+        style.map("TEntry",
+                  bordercolor=[("focus", ACCENT_STRONG)],
+                  lightcolor=[("focus", ACCENT_STRONG)],
+                  darkcolor=[("focus", ACCENT_STRONG)])
+        # 搜索框：外层用圆角卡片，Entry 自身去掉边框融入卡片
+        style.configure("Search.TEntry", fieldbackground=ENTRY_BG,
+                        foreground=TEXT, bordercolor=ENTRY_BG,
+                        lightcolor=ENTRY_BG, darkcolor=ENTRY_BG,
+                        borderwidth=0, relief="flat", padding=self.s(2))
+        style.configure("TCombobox", padding=self.s(4),
+                        fieldbackground=ENTRY_BG, foreground=TEXT,
+                        bordercolor=BORDER, arrowcolor=MUTED)
+        style.map("TCombobox",
+                  bordercolor=[("focus", ACCENT_STRONG)],
+                  fieldbackground=[("readonly", ENTRY_BG)],
+                  foreground=[("readonly", TEXT)])
+        style.configure("TSpinbox", padding=self.s(4),
+                        fieldbackground=ENTRY_BG, foreground=TEXT,
+                        bordercolor=BORDER, arrowcolor=MUTED)
+        style.map("TSpinbox", bordercolor=[("focus", ACCENT_STRONG)])
         style.configure("Vertical.TScrollbar", background=SCROLL_BG,
-                        troughcolor=SCROLL_TROUGH, bordercolor=CARD,
-                        arrowcolor="#8d97ab", width=self.s(11))
+                        troughcolor=SCROLL_TROUGH, bordercolor=SCROLL_TROUGH,
+                        arrowcolor=MUTED, width=self.s(11),
+                        lightcolor=SCROLL_BG, darkcolor=SCROLL_BG)
+        style.map("Vertical.TScrollbar",
+                  background=[("pressed", ACCENT_STRONG),
+                              ("active", BORDER_STRONG)],
+                  lightcolor=[("active", BORDER_STRONG)],
+                  darkcolor=[("active", BORDER_STRONG)])
+        # 日志控制台专用：深色滚动条 / 进度条，避免浅色主题里出现亮补丁
+        style.configure("Console.Vertical.TScrollbar", background="#3D3831",
+                        troughcolor=LOG_BG, bordercolor=LOG_BG,
+                        arrowcolor=LOG_HEAD_MUTED, width=self.s(11),
+                        lightcolor="#3D3831", darkcolor="#3D3831")
+        style.configure("TPanedwindow", background=BG)
+        style.configure("Sash", background=BG, bordercolor=BG,
+                        lightcolor=BG, darkcolor=BG, sashthickness=self.s(10))
         # 进度条：主窗口细条 + 迷你置顶条里的深色款
         style.configure("Accent.Horizontal.TProgressbar",
                         background=ACCENT, troughcolor=PROGRESS_TROUGH,
+                        bordercolor=PROGRESS_TROUGH,
+                        lightcolor=PROGRESS_TROUGH,
+                        darkcolor=PROGRESS_TROUGH,
+                        borderwidth=0, thickness=self.s(6))
+        style.configure("Console.Horizontal.TProgressbar",
+                        background=ACCENT, troughcolor=LOG_HEAD_BG,
+                        bordercolor=LOG_HEAD_BG, lightcolor=LOG_HEAD_BG,
+                        darkcolor=LOG_HEAD_BG,
                         borderwidth=0, thickness=self.s(6))
         style.configure("Mini.Horizontal.TProgressbar",
-                        background="#4f8cff", troughcolor="#2c313a",
+                        background=ACCENT, troughcolor=LOG_HEAD_BG,
+                        bordercolor=LOG_HEAD_BG, lightcolor=LOG_HEAD_BG,
+                        darkcolor=LOG_HEAD_BG,
                         borderwidth=0, thickness=self.s(4))
 
     # --------------------------------------------------------------- 菜单
@@ -608,7 +817,7 @@ class App(tk.Tk):
             button = uikit.RoundButton(parent, name, None,
                                        lambda n=name: self._open_top_menu(n),
                                        kind="ghost", scale=self.scale, bg=CARD,
-                                       height=30, pad=self.s(11), font_size=9)
+                                       height=32, pad=self.s(12), font_size=10)
             button.pack(side="left", padx=self.s(1))
             self._top_buttons[name] = button
 
@@ -623,31 +832,48 @@ class App(tk.Tk):
 
     # --------------------------------------------------------------- 顶部
     def _build_header(self) -> None:
-        header = tk.Frame(self, bg=CARD, height=self.s(46))
+        header = tk.Frame(self, bg=CARD, height=self.s(HEADER_HEIGHT))
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Frame(header, bg=BORDER, height=1).pack(side="bottom", fill="x")
 
         left = tk.Frame(header, bg=CARD)
-        left.pack(side="left", padx=(self.s(16), 0))
-        logo = self.app_icon(self.s(24))     # 用程序自带的默认图标
+        left.pack(side="left", padx=(self.s(24), 0))
+        self.brand_logo_label = tk.Label(left, bg=CARD, cursor="hand2")
+        logo = self.brand_logo(28, self.dark)
         if logo is not None:
-            tk.Label(left, image=logo, bg=CARD).pack(
-                side="left", pady=self.s(11), padx=(0, self.s(2)))
-        tk.Label(left, text=APP_TITLE, bg=CARD, fg=TEXT,
-                 font=("Microsoft YaHei UI", 12, "bold")).pack(
-            side="left", padx=(self.s(7), self.s(14)))
+            self.brand_logo_label.configure(image=logo)
+        else:                            # 没有 Logo 文件时退回文字标题
+            self.brand_logo_label.configure(
+                text=APP_TITLE, fg=TEXT,
+                font=(UI_FONT, 13, "bold"))
+        self.brand_logo_label.pack(side="left", pady=self.s(14),
+                                   padx=(0, self.s(20)))
+        self.brand_logo_label.bind("<Button-1>", lambda e: self.show_about())
+        uikit.Tooltip(self.brand_logo_label, f"关于 {APP_TITLE}")
 
         self._build_menubar(left)
 
         self.autosave_label = tk.Label(
             header, text="执行组自动保存", bg=CARD, fg=MUTED,
-            font=("Microsoft YaHei UI", 8))
-        self.autosave_label.pack(side="right", padx=self.s(18))
+            font=(UI_FONT, 9))
+        self.autosave_label.pack(side="right", padx=self.s(24))
+
+    def _refresh_brand_logo(self) -> None:
+        """主题切换后重新取 Logo（深色主题用暖白反白版本）。"""
+        label = getattr(self, "brand_logo_label", None)
+        if label is None:
+            return
+        logo = self.brand_logo(28, self.dark)
+        if logo is not None:
+            label.configure(image=logo, text="")
+        else:
+            label.configure(image="", text=APP_TITLE, fg=TEXT,
+                            font=(UI_FONT, 13, "bold"))
 
     def _build_toolbar(self) -> None:
         bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=self.s(12), pady=(self.s(8), self.s(4)))
+        bar.pack(fill="x", padx=self.s(24), pady=(self.s(12), self.s(6)))
 
         def add(text, icon, cmd, kind="solid", pad=self.s(4), side="left",
                 tooltip=""):
@@ -670,7 +896,7 @@ class App(tk.Tk):
         self.btn_debug = add("单步", "debug", self.toggle_debug, kind="ghost",
                              tooltip="单步调试：每步执行前确认（F8）")
         if self.debug_mode:
-            self.btn_debug.set_kind("solid")
+            self.btn_debug.set_kind("accent")
 
         self.btn_stop = add("停止", "stop", self.stop_run, kind="danger",
                             side="right", tooltip="停止（全局热键 F9）")
@@ -685,7 +911,7 @@ class App(tk.Tk):
 
     def _build_body(self) -> None:
         body = tk.Frame(self, bg=BG)
-        body.pack(fill="both", expand=True, padx=self.s(12))
+        body.pack(fill="both", expand=True, padx=self.s(24))
 
         self.paned = ttk.PanedWindow(body, orient="horizontal")
         self.paned.pack(fill="both", expand=True)
@@ -694,73 +920,115 @@ class App(tk.Tk):
         self._build_step_panel(self.paned)
 
     def _build_group_panel(self, parent) -> None:
-        panel = tk.Frame(parent, bg=CARD, highlightthickness=1,
-                         highlightbackground=BORDER)
-        parent.add(panel, weight=0)
+        card = uikit.RoundedCard(
+            parent, radius=self.s(CARD_RADIUS), bg=CARD, border=BORDER,
+            outer_bg=BG, padding=self.s(6))
+        card.configure(width=self.s(240))
+        parent.add(card, weight=0)
+        panel = card.body
 
         head = tk.Frame(panel, bg=CARD)
-        head.pack(fill="x", padx=self.s(12), pady=(self.s(10), self.s(4)))
-        tk.Label(head, image=self.pic("folder", 16, "#e0a83c"), bg=CARD).pack(
-            side="left")
+        head.pack(fill="x", padx=self.s(16), pady=(self.s(14), self.s(6)))
+        tk.Label(head, image=self.pic("folder", 18, ACCENT_STRONG),
+                 bg=CARD).pack(side="left")
         tk.Label(head, text="执行组", bg=CARD, fg=TEXT,
-                 font=("Microsoft YaHei UI", 10, "bold")).pack(
-            side="left", padx=(self.s(6), self.s(2)))
+                 font=(UI_FONT, 11, "bold")).pack(
+            side="left", padx=(self.s(8), self.s(4)))
         uikit.RoundButton(head, "", "add", self.add_group, kind="ghost",
-                          scale=self.scale, bg=CARD, height=24, pad=self.s(4),
+                          scale=self.scale, bg=CARD, height=26, pad=self.s(4),
                           icon_size=13, tooltip="新建执行组（Ctrl+G）"
                           ).pack(side="left")
-        self.group_count = tk.Label(head, text="", bg=CARD, fg=MUTED,
-                                    font=("Microsoft YaHei UI", 8))
+        self.group_count = tk.Label(head, text="", bg=ACCENT_MIST,
+                                    fg=ACCENT_STRONG, padx=self.s(8),
+                                    pady=self.s(2),
+                                    font=(UI_FONT, 8, "bold"))
         self.group_count.pack(side="right")
 
-        hint = tk.Label(panel, text="右键执行组：新建 / 重命名 / 删除 / 排序",
-                        bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 8))
-        hint.pack(side="bottom", pady=self.s(9))
+        hint = tk.Label(panel, text="双击重命名 · 拖拽排序 · 右键更多操作",
+                        bg=CARD, fg=MUTED, font=(UI_FONT, 9))
+        hint.pack(side="bottom", pady=self.s(12))
 
         wrap = tk.Frame(panel, bg=CARD)
-        wrap.pack(fill="both", expand=True, padx=(self.s(6), 0))
+        wrap.pack(fill="both", expand=True, padx=(self.s(12), 0))
         self.group_tree = ttk.Treeview(wrap, show="tree", selectmode="browse")
         self.group_tree.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(wrap, orient="vertical",
                                command=self.group_tree.yview)
         scroll.pack(side="right", fill="y")
         self.group_tree.configure(yscrollcommand=scroll.set)
-        self.group_tree.tag_configure("running", foreground="#b06a00")
+        self.group_tree.tag_configure("running", foreground=WARNING)
         self.group_tree.bind("<<TreeviewSelect>>", self._on_group_select)
         self.group_tree.bind("<Double-1>", self._on_group_double)
         self.group_tree.bind("<Button-3>", self._group_menu)
         enable_tree_drag(self.group_tree, self._on_group_drop)
 
+        # 空状态：Canvas 小猫上半身 + 说明 + 主按钮（不用先右键就能新建）
+        self.group_empty_box = tk.Frame(panel, bg=CARD)
+        self.group_empty_icon = uikit.CatCanvas(
+            self.group_empty_box, scale=self.scale * 0.86, bg=CARD, ink=TEXT,
+            accent=ACCENT, nose=ACCENT_STRONG)
+        self.group_empty_icon.pack(pady=(0, self.s(10)))
         self.group_empty = tk.Label(
-            panel, text="还没有执行组\n在列表上右键 → 新建执行组", bg=CARD, fg=MUTED,
-            justify="center", font=("Microsoft YaHei UI", 9))
+            self.group_empty_box, text="这里空空如也，喵～", bg=CARD, fg=TEXT,
+            font=(UI_FONT, 14, "bold"))
+        self.group_empty.pack()
+        tk.Label(self.group_empty_box,
+                 text="执行组是一组可重复运行的步骤；\n先建一个，再往里面添加步骤。",
+                 bg=CARD, fg=MUTED, justify="center",
+                 font=(UI_FONT, 10)).pack(pady=(self.s(6), self.s(14)))
+        uikit.RoundButton(
+            self.group_empty_box, "新建执行组", "add", self.add_group,
+            kind="accent", scale=self.scale, bg=CARD, height=38,
+            pad=self.s(16), font_size=10).pack()
 
     def _build_step_panel(self, parent) -> None:
-        panel = tk.Frame(parent, bg=CARD, highlightthickness=1,
-                         highlightbackground=BORDER)
-        parent.add(panel, weight=1)
+        card = uikit.RoundedCard(
+            parent, radius=self.s(CARD_RADIUS), bg=CARD, border=BORDER,
+            outer_bg=BG, padding=self.s(6))
+        parent.add(card, weight=1)
+        panel = card.body
 
         head = tk.Frame(panel, bg=CARD)
-        head.pack(fill="x", padx=self.s(12), pady=(self.s(10), self.s(4)))
-        tk.Label(head, image=self.pic("note", 16, ACCENT), bg=CARD).pack(
-            side="left")
+        head.pack(fill="x", padx=self.s(16), pady=(self.s(14), self.s(6)))
+        tk.Label(head, image=self.pic("note", 18, ACCENT_STRONG),
+                 bg=CARD).pack(side="left")
         self.step_title = tk.Label(head, text="步骤", bg=CARD, fg=TEXT,
-                                   font=("Microsoft YaHei UI", 10, "bold"))
-        self.step_title.pack(side="left", padx=(self.s(6), 0))
+                                   font=(UI_FONT, 11, "bold"))
+        self.step_title.pack(side="left", padx=(self.s(8), 0))
         tk.Label(head, text="双击单元格可直接修改", bg=CARD,
-                 fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(
-            side="left", padx=(self.s(10), 0))
+                 fg=MUTED, font=(UI_FONT, 9)).pack(
+            side="left", padx=(self.s(12), 0))
         self.btn_add_step = uikit.RoundButton(
             head, "＋ 步骤", "add", self.add_step, kind="ghost",
-            scale=self.scale, bg=CARD, height=24, pad=self.s(7),
-            font_size=8, tooltip="新增步骤（Ctrl+Enter）")
+            scale=self.scale, bg=CARD, height=28, pad=self.s(8),
+            font_size=9, tooltip="新增步骤（Ctrl+Enter）")
         self.btn_add_step.pack(side="right")
         # 步骤搜索：按类型 / 内容 / 备注过滤，右侧显示「匹配数/总数」
         self.search_count = tk.Label(head, text="", bg=CARD, fg=MUTED,
-                                     font=("Microsoft YaHei UI", 8))
-        self.search_count.pack(side="right", padx=(0, self.s(6)))
-        self.step_search = ttk.Entry(head, width=self.s(13))
-        self.step_search.pack(side="right", padx=(0, self.s(2)))
+                                     padx=0, pady=0,
+                                     font=(UI_FONT, 8, "bold"))
+        self.search_count.pack(side="right", padx=(0, self.s(8)))
+        # 搜索框：圆角字段 + 有内容时出现的 ×
+        self.search_field = uikit.RoundedCard(
+            head, radius=self.s(FIELD_RADIUS), bg=ENTRY_BG,
+            border=BORDER, outer_bg=CARD, padding=self.s(3),
+            shadow=False)
+        self.search_field.pack(side="right", padx=(0, self.s(2)))
+        self.search_box = self.search_field.body
+        self.step_search = ttk.Entry(self.search_box, width=self.s(14),
+                                     style="Search.TEntry")
+        self.step_search.pack(side="left", fill="x", expand=True,
+                              padx=(self.s(5), 0))
+        # × 只在有搜索词时出现；用固定宽度占位，避免标题栏左右跳动
+        self.search_clear_slot = tk.Frame(
+            self.search_box, bg=ENTRY_BG, width=self.s(22),
+            height=self.s(22))
+        self.search_clear_slot.pack(side="left", padx=(self.s(2), 0))
+        self.search_clear_slot.pack_propagate(False)
+        self.btn_search_clear = uikit.RoundButton(
+            self.search_clear_slot, "", "close", self._clear_search_and_focus,
+            kind="ghost", scale=self.scale, bg=ENTRY_BG, height=22,
+            pad=self.s(4), icon_size=12, tooltip="清除搜索（Esc）")
         self.step_search.insert(0, SEARCH_PLACEHOLDER)
         self.step_search.configure(foreground=MUTED)
         self.step_search.bind("<FocusIn>", self._on_search_focus_in)
@@ -769,8 +1037,8 @@ class App(tk.Tk):
         self.step_search.bind("<Escape>", self._on_search_escape)
 
         wrap = tk.Frame(panel, bg=CARD)
-        wrap.pack(fill="both", expand=True, padx=(self.s(12), 0),
-                  pady=(0, self.s(12)))
+        wrap.pack(fill="both", expand=True, padx=(self.s(16), 0),
+                  pady=(0, self.s(16)))
         self.step_wrap = wrap
         columns = ("no", "type", "content", "repeat", "note")
         self.step_tree = ttk.Treeview(wrap, columns=columns,
@@ -779,7 +1047,7 @@ class App(tk.Tk):
         self.step_tree.heading("#0", text="")
         self.step_tree.column("#0", width=self.s(30), stretch=False)
         for key, (text, width, stretch) in {
-                "no": ("#", 44, False), "type": ("类型", 96, False),
+                "no": ("#", 44, False), "type": ("类型", 140, False),
                 "content": ("内容", 320, True), "repeat": ("重复", 60, False),
                 "note": ("备注", 180, True)}.items():
             self.step_tree.heading(key, text=text)
@@ -805,17 +1073,34 @@ class App(tk.Tk):
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_select)
         enable_tree_drag(self.step_tree, self._on_step_drop)
 
+        # 空状态：Canvas 小猫上半身 + 标题 + 说明 + 主按钮
+        self.step_empty_box = tk.Frame(wrap, bg=CARD)
+        self.step_empty_icon = uikit.CatCanvas(
+            self.step_empty_box, scale=self.scale, bg=CARD, ink=TEXT,
+            accent=ACCENT, nose=ACCENT_STRONG)
+        self.step_empty_icon.pack(pady=(0, self.s(8)))
         self.step_empty = tk.Label(
-            wrap, text="这个组还没有步骤\n在列表上右键 → 新增步骤", bg=CARD,
-            fg=MUTED, justify="center", font=("Microsoft YaHei UI", 9))
+            self.step_empty_box, text="这个组还没有步骤", bg=CARD, fg=TEXT,
+            font=(UI_FONT, 14, "bold"))
+        self.step_empty.pack()
+        self.step_empty_hint = tk.Label(
+            self.step_empty_box, text="", bg=CARD, fg=MUTED, justify="center",
+            font=(UI_FONT, 10))
+        self.step_empty_hint.pack(pady=(self.s(6), self.s(14)))
+        self.step_empty_btn = uikit.RoundButton(
+            self.step_empty_box, "新增步骤", "add", self.add_step,
+            kind="accent", scale=self.scale, bg=CARD, height=38,
+            pad=self.s(16), font_size=10)
+        self.step_empty_btn.pack()
 
         # 图片预览窗格：选中图片类步骤时出现，显示缩略图与文件信息
-        self.preview_frame = tk.Frame(panel, bg=PREVIEW_BG,
-                                      highlightthickness=1,
-                                      highlightbackground=BORDER)
-        self.preview_image = tk.Label(self.preview_frame, bg=PREVIEW_BG)
+        self.preview_frame = uikit.RoundedCard(
+            panel, radius=self.s(INNER_RADIUS), bg=PREVIEW_BG, border=BORDER,
+            outer_bg=CARD, padding=self.s(3), shadow=False)
+        preview = self.preview_frame.body
+        self.preview_image = tk.Label(preview, bg=PREVIEW_BG)
         self.preview_image.pack(side="left", padx=self.s(8), pady=self.s(6))
-        info = tk.Frame(self.preview_frame, bg=PREVIEW_BG)
+        info = tk.Frame(preview, bg=PREVIEW_BG)
         info.pack(side="left", fill="x", expand=True, pady=self.s(6))
         self.preview_name = tk.Label(info, text="", bg=PREVIEW_BG, fg=TEXT,
                                      font=("Microsoft YaHei UI", 9, "bold"))
@@ -823,76 +1108,99 @@ class App(tk.Tk):
         self.preview_meta = tk.Label(info, text="", bg=PREVIEW_BG, fg=MUTED,
                                      font=("Microsoft YaHei UI", 8))
         self.preview_meta.pack(anchor="w")
-        uikit.RoundButton(self.preview_frame, "在文件夹中显示", "folder_open",
+        uikit.RoundButton(preview, "在文件夹中显示", "folder_open",
                           self._open_preview_image_dir, kind="ghost",
                           scale=self.scale, bg=PREVIEW_BG, height=22,
                           pad=self.s(6), font_size=8).pack(side="right",
                                                            padx=self.s(6))
 
     def _build_log(self) -> None:
-        self.log_card = tk.Frame(self, bg=CARD, highlightthickness=1,
-                                 highlightbackground=BORDER)
-        self.log_card.pack(fill="x", side="bottom", padx=self.s(12),
+        self.log_card = uikit.RoundedCard(
+            self, radius=self.s(CARD_RADIUS), bg=CARD, border=BORDER,
+            outer_bg=BG, padding=self.s(5))
+        self.log_card.pack(fill="x", side="bottom", padx=self.s(24),
                            pady=(self.s(8), 0))
+        card = self.log_card.body
 
-        head = tk.Frame(self.log_card, bg=CARD)
-        head.pack(fill="x", padx=self.s(10), pady=self.s(6))
+        head = tk.Frame(card, bg=LOG_HEAD_BG)
+        head.pack(fill="x", padx=1, pady=(1, 0))
         self.btn_log_toggle = uikit.RoundButton(
             head, "运行日志", "chevron_down", self.toggle_log, kind="ghost",
-            scale=self.scale, bg=CARD, height=26, pad=self.s(6), font_size=8,
-            tooltip="收起 / 展开日志")
+            scale=self.scale, bg=LOG_HEAD_BG, height=30, pad=self.s(8),
+            font_size=9, tooltip="收起 / 展开日志")
         self.btn_log_toggle.pack(side="left")
-        self.log_state = tk.Label(head, text="就绪", bg=CARD, fg=MUTED,
-                                  font=("Microsoft YaHei UI", 9))
+        self.log_state = tk.Label(head, text="就绪", bg=LOG_HEAD_BG,
+                                  fg=LOG_HEAD_MUTED,
+                                  font=(UI_FONT, 9))
         self.log_state.pack(side="left", padx=(self.s(10), 0))
         self.btn_log_clear = uikit.RoundButton(
             head, "清空", "trash", self.clear_log, kind="ghost",
-            scale=self.scale, bg=CARD, height=26, pad=self.s(8), font_size=8)
+            scale=self.scale, bg=LOG_HEAD_BG, height=28, pad=self.s(8),
+            font_size=9)
         self.btn_log_clear.pack(side="right")
+        self.btn_log_copy = uikit.RoundButton(
+            head, "复制", "copy", self.copy_log, kind="ghost",
+            scale=self.scale, bg=LOG_HEAD_BG, height=28, pad=self.s(8),
+            font_size=9, tooltip="复制全部日志到剪贴板")
+        self.btn_log_copy.pack(side="right", padx=(0, self.s(2)))
         # 点标题栏空白处也能收放
         for widget in (head, self.log_state):
             widget.bind("<Button-1>", lambda e: self.toggle_log())
 
         # 运行进度条：已知总步数→确定进度；循环 / 无限重复→脉冲滚动
-        self.progress_frame = tk.Frame(self.log_card, bg=CARD)
-        self.progress_frame.pack(fill="x", padx=self.s(10), pady=(0, self.s(4)))
+        # 和标题栏共用深色底，让「控制台」从上到下是一整块
+        self.progress_frame = tk.Frame(card, bg=LOG_HEAD_BG)
+        self.progress_frame.pack(fill="x", padx=1)
         self.progress = ttk.Progressbar(
-            self.progress_frame, style="Accent.Horizontal.TProgressbar",
+            self.progress_frame, style="Console.Horizontal.TProgressbar",
             mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True)
-        self.progress_label = tk.Label(self.progress_frame, text="", bg=CARD,
-                                       fg=MUTED,
+        self.progress.pack(side="left", fill="x", expand=True,
+                           padx=(self.s(10), 0), pady=(0, self.s(6)))
+        self.progress_label = tk.Label(self.progress_frame, text="",
+                                       bg=LOG_HEAD_BG, fg=LOG_HEAD_MUTED,
                                        font=("Microsoft YaHei UI", 8))
-        self.progress_label.pack(side="left", padx=(self.s(8), 0))
+        self.progress_label.pack(side="left", padx=(self.s(8), self.s(10)),
+                                 pady=(0, self.s(6)))
 
         # 运行摘要条：默认隐藏，一次运行结束后显示结论 + 打开报告
-        self.summary_frame = tk.Frame(self.log_card, bg=SUMMARY_BG,
-                                      highlightthickness=1,
-                                      highlightbackground=SUMMARY_BORDER)
-        self.summary_label = tk.Label(self.summary_frame, text="",
+        self.summary_frame = uikit.RoundedCard(
+            card, radius=self.s(INNER_RADIUS), bg=SUMMARY_BG,
+            border=SUMMARY_BORDER, outer_bg=CARD, padding=self.s(3),
+            shadow=False)
+        summary = self.summary_frame.body
+        self.summary_label = tk.Label(summary, text="",
                                       bg=SUMMARY_BG, fg=TEXT,
                                       font=("Microsoft YaHei UI", 9))
         self.summary_label.pack(side="left", padx=self.s(10))
-        uikit.RoundButton(self.summary_frame, "", "close", self._hide_summary,
+        uikit.RoundButton(summary, "", "close", self._hide_summary,
                           kind="ghost", scale=self.scale, bg=SUMMARY_BG,
                           height=22, pad=self.s(4), icon_size=12,
                           tooltip="收起摘要").pack(side="right", padx=self.s(4))
         self.btn_open_report = uikit.RoundButton(
-            self.summary_frame, "打开报告", "folder_open",
+            summary, "打开报告", "folder_open",
             self._open_last_report,
             kind="outline", scale=self.scale, bg=SUMMARY_BG, height=22,
             pad=self.s(7), font_size=8)
         self.btn_open_report.pack(side="right")
 
-        self.log_text = tk.Text(self.log_card, height=7, bg=LOG_BG, fg=LOG_FG,
+        # 正文 + 滚动条：能回看历史日志；超过 MAX_LOG_LINES 自动丢弃最早行
+        self.log_body = tk.Frame(card, bg=LOG_BG)
+        self.log_body.pack(fill="x", padx=1, pady=(0, 1))
+        self.log_text = tk.Text(self.log_body, height=7, bg=LOG_BG, fg=LOG_FG,
                                 insertbackground=LOG_FG, relief="flat",
-                                font=("Consolas", 9), wrap="word",
-                                padx=self.s(10), pady=self.s(6), state="disabled")
-        self.log_text.pack(fill="x", padx=1, pady=(0, 1))
+                                font=(MONO_FONT, 9), wrap="word",
+                                padx=self.s(12), pady=self.s(8),
+                                state="disabled")
+        self.log_scroll = ttk.Scrollbar(
+            self.log_body, orient="vertical", style="Console.Vertical.TScrollbar",
+            command=self.log_text.yview)
+        self.log_scroll.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_text.configure(yscrollcommand=self.log_scroll.set)
         # 可点击的「第 N 步」日志行：点一下跳到步骤表对应行
         # （先建 link，info/warn/error 后建——Tk 里后建的标签优先级高，
         #  这样错误行仍是红色，只额外获得下划线）
-        self.log_text.tag_configure("link", foreground="#7cc7ff",
+        self.log_text.tag_configure("link", foreground=ACCENT,
                                     underline=True)
         self.log_text.tag_bind("link", "<Button-1>",
                                lambda e: self._on_log_link_click(e))
@@ -900,35 +1208,35 @@ class App(tk.Tk):
                                lambda e: self.log_text.configure(cursor="hand2"))
         self.log_text.tag_bind("link", "<Leave>",
                                lambda e: self.log_text.configure(cursor=""))
-        self.log_text.tag_configure("info", foreground="#9fd3a0")
-        self.log_text.tag_configure("warn", foreground="#f0c674")
-        self.log_text.tag_configure("error", foreground="#f2777a")
-        self.log_text.tag_configure("muted", foreground="#8b93a1")
-        self.log_text.tag_configure("time", foreground="#6b7480")
+        self.log_text.tag_configure("info", foreground="#7ED3A8")
+        self.log_text.tag_configure("warn", foreground="#F0C674")
+        self.log_text.tag_configure("error", foreground="#F28B82")
+        self.log_text.tag_configure("muted", foreground="#A8A29A")
+        self.log_text.tag_configure("time", foreground="#8C857D")
 
     def toggle_log(self) -> None:
         if self.log_visible:
-            self.log_text.pack_forget()
+            self.log_body.pack_forget()
             self.btn_log_toggle.set_text("运行日志", "chevron_right")
         else:
-            self.log_text.pack(fill="x", padx=1, pady=(0, 1))
+            self.log_body.pack(fill="x", padx=1, pady=(0, 1))
             self.btn_log_toggle.set_text("运行日志", "chevron_down")
         self.log_visible = not self.log_visible
 
     def _build_statusbar(self) -> None:
         bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", side="bottom", padx=self.s(14),
-                 pady=(self.s(2), self.s(6)))
+        bar.pack(fill="x", side="bottom", padx=self.s(24),
+                 pady=(self.s(2), self.s(8)))
         self.status_var = tk.StringVar(value="就绪")
         tk.Label(bar, textvariable=self.status_var, bg=BG, fg=MUTED,
-                 font=("Microsoft YaHei UI", 9)).pack(side="left")
+                 font=(UI_FONT, 9)).pack(side="left")
         self.btn_shortcuts = uikit.RoundButton(
             bar, "", "question", self.show_shortcuts, kind="ghost",
             scale=self.scale, bg=BG, height=24, pad=self.s(4),
             icon_size=14, tooltip="快捷键速查（?）")
         self.btn_shortcuts.pack(side="right")
         self.image_label = tk.Label(bar, text="", bg=BG, fg=MUTED,
-                                    font=("Microsoft YaHei UI", 9))
+                                    font=(UI_FONT, 9))
         self.image_label.pack(side="right", padx=(0, self.s(6)))
         self.btn_locate = uikit.RoundButton(
             bar, "定位到失败步骤", "target", self._locate_failed_step,
@@ -1002,7 +1310,7 @@ class App(tk.Tk):
             if isinstance(width, int) and width > 0:
                 self.step_tree.column(key, width=self.s(width))
         if not self.log_visible:
-            self.log_text.pack_forget()
+            self.log_body.pack_forget()
             self.btn_log_toggle.set_text("运行日志", "chevron_right")
         self.after(150, self._restore_paned)
 
@@ -1032,17 +1340,21 @@ class App(tk.Tk):
         self._build_style()
         self._recolor_widgets(self, previous, palette)
         # 树标签（斑马纹 / 运行染色）跟着色板走
+        self.group_tree.tag_configure("running", foreground=WARNING)
         self.step_tree.tag_configure("running", background=MARK_RUNNING)
         self.step_tree.tag_configure("done", background=MARK_DONE)
         self.step_tree.tag_configure("failed", background=MARK_FAILED)
         self.step_tree.tag_configure("even", background=CARD)
         self.step_tree.tag_configure("odd", background=ZEBRA)
+        self.log_text.tag_configure("link", foreground=ACCENT)
         self._icons.clear()            # 图标按新色调重画
+        self._refresh_brand_logo()
         self._refresh_groups()
         self._refresh_steps()
         if self.step_search.get() == SEARCH_PLACEHOLDER:
             self.step_search.configure(foreground=MUTED)
         self._last_palette = dict(palette)
+        self.after(0, lambda: uikit.style_window(self, self.dark))
 
     def _recolor_widgets(self, widget, old: dict, new: dict) -> None:
         """递归重染控件树：Label/Frame/Text/Canvas 按颜色映射换 bg/fg。
@@ -1051,8 +1363,12 @@ class App(tk.Tk):
         RoundButton 是自绘 Canvas，换完底色还要重画一遍。
         """
         bg_map = {old[key]: new[key] for key in new if key in old}
-        fg_map = {old["TEXT"]: new["TEXT"], old["MUTED"]: new["MUTED"],
-                  old["ACCENT"]: new["ACCENT"]}
+        fg_map = {old[key]: new[key]
+                  for key in ("TEXT", "MUTED", "TEXT_WEAK", "ACCENT",
+                              "ACCENT_STRONG", "SUCCESS", "WARNING",
+                              "DANGER", "INFO", "LOG_FG", "LOG_HEAD_FG",
+                              "LOG_HEAD_MUTED")
+                  if key in old and key in new}
 
         def _get(widget, option):
             try:
@@ -1060,9 +1376,21 @@ class App(tk.Tk):
             except tk.TclError:
                 return ""          # Frame / 根窗口没有 -fg，无所谓
 
-        if isinstance(widget, uikit.RoundButton):
+        if isinstance(widget, uikit.CatCanvas):
+            bg = _get(widget, "bg")
+            widget.set_colors(
+                bg=bg_map.get(bg, bg),
+                ink=fg_map.get(widget.ink, widget.ink),
+                accent=fg_map.get(widget.accent, widget.accent),
+                nose=fg_map.get(widget.nose, widget.nose))
+        elif isinstance(widget, uikit.RoundButton):
             bg = _get(widget, "bg")
             widget.set_bg(bg_map.get(bg, bg))
+        elif isinstance(widget, uikit.RoundedCard):
+            widget.set_colors(
+                bg=bg_map.get(widget.card_bg, widget.card_bg),
+                border=bg_map.get(widget.border, widget.border),
+                outer_bg=bg_map.get(widget.outer_bg, widget.outer_bg))
         elif not isinstance(widget, ttk.Widget):
             bg, fg = _get(widget, "bg"), _get(widget, "fg")
             if bg in bg_map:
@@ -1207,23 +1535,21 @@ class App(tk.Tk):
             self.group_tree.insert(
                 "", "end", iid=iid,
                 text=f"  {group.name}   ({len(group.steps)})",
-                image=self.pic("folder", 15, "#e0a83c"),
+                image=self.pic("folder", 16, ACCENT_STRONG),
                 open=(index == self.group_index))
             for step_index, step in enumerate(group.steps):
                 self.group_tree.insert(
                     iid, "end", iid=f"{iid}_{step_index}",
                     text="   " + self._step_summary(step, step_index),
-                    image=self.pic(TYPE_ICONS.get(step.type, "note"), 13,
-                                   TYPE_COLORS.get(step.type,
-                                                   TYPE_ICON_COLOR)))
+                    image=self.step_pic(step.type, 13))
         self.group_count.configure(text=f"{len(self.project.groups)} 个组")
         if self.project.groups:
             iid = f"g{self.group_index}"
             if self.group_tree.exists(iid):
                 self.group_tree.selection_set(iid)
-            self.group_empty.place_forget()
+            self.group_empty_box.place_forget()
         else:
-            self.group_empty.place(relx=0.5, rely=0.4, anchor="center")
+            self.group_empty_box.place(relx=0.5, rely=0.45, anchor="center")
 
     def _step_summary(self, step: Step, index: int) -> str:
         text = step.content.strip().replace("\n", " ")
@@ -1249,24 +1575,35 @@ class App(tk.Tk):
             iid = str(index)
             self.step_tree.insert(
                 "", "end", iid=iid,
-                image=self.pic(TYPE_ICONS.get(step.type, "note"), 14,
-                               TYPE_COLORS.get(step.type, TYPE_ICON_COLOR)),
+                image=self.step_pic(step.type, 14),
                 values=(index + 1, step.label(), step.content, repeat,
                         step.note),
                 tags=(self._zebra_tag(index),))
+        filtered = self._step_filter_active()
         if matched:
-            self.step_empty.place_forget()
+            self.step_empty_box.place_forget()
         else:
-            self.step_empty.configure(
-                text=f"没有包含“{self._step_filter}”的步骤"
-                if self._step_filter_active() else
-                "这个组还没有步骤\n在列表上右键 → 新增步骤")
-            self.step_empty.place(relx=0.5, rely=0.4, anchor="center")
-        if self._step_filter_active():
+            if filtered:
+                self.step_empty.configure(
+                    text=f"没有找到“{self._step_filter}”的步骤")
+                self.step_empty_hint.configure(
+                    text="换个关键词试试，或清除搜索查看全部步骤")
+                self.step_empty_btn.set_text("清除搜索", "close")
+                self.step_empty_btn.command = self._clear_search_and_focus
+            else:
+                self.step_empty.configure(text="这个组还没有步骤")
+                self.step_empty_hint.configure(
+                    text="添加第一个步骤；也可以右键列表批量导入或粘贴")
+                self.step_empty_btn.set_text("新增步骤", "add")
+                self.step_empty_btn.command = self.add_step
+            self.step_empty_box.place(relx=0.5, rely=0.45, anchor="center")
+        if filtered:
             self.search_count.configure(
-                text=f"{matched}/{len(group.steps)}")
+                text=f"{matched}/{len(group.steps)}", bg=ACCENT_MIST,
+                fg=ACCENT_STRONG, padx=self.s(8), pady=self.s(2))
         else:
-            self.search_count.configure(text="")
+            self.search_count.configure(text="", bg=CARD, fg=MUTED,
+                                        padx=0, pady=0)
         if select is not None and 0 <= select < len(group.steps):
             if self.step_tree.exists(str(select)):
                 self.step_tree.selection_set(str(select))
@@ -1314,9 +1651,7 @@ class App(tk.Tk):
         step = group.steps[index]
         repeat = "" if not step.repeat else f"{step.repeat:g}"
         self.step_tree.item(str(index),
-                            image=self.pic(TYPE_ICONS.get(step.type, "note"), 14,
-                                           TYPE_COLORS.get(step.type,
-                                                           TYPE_ICON_COLOR)),
+                            image=self.step_pic(step.type, 14),
                             values=(index + 1, step.label(), step.content,
                                     repeat, step.note))
         self._refresh_groups()
@@ -1338,11 +1673,16 @@ class App(tk.Tk):
         if self.step_search.get() == SEARCH_PLACEHOLDER:
             self.step_search.delete(0, "end")
             self.step_search.configure(foreground=TEXT)
+        if hasattr(self, "search_field"):
+            self.search_field.set_colors(border=ACCENT_STRONG)
+        self._sync_search_clear()
 
     def _on_search_focus_out(self, _event=None) -> None:
         if not self.step_search.get():
             self.step_search.insert(0, SEARCH_PLACEHOLDER)
             self.step_search.configure(foreground=MUTED)
+        if hasattr(self, "search_field"):
+            self.search_field.set_colors(border=BORDER)
         self._apply_step_filter()
 
     def _on_search_key(self, event) -> None:
@@ -1355,10 +1695,24 @@ class App(tk.Tk):
         self.step_search.focus_set()
         return "break"
 
+    def _sync_search_clear(self) -> None:
+        """有实际搜索词时才显示 ×；占位符不算。"""
+        text = self.step_search.get()
+        if text in ("", SEARCH_PLACEHOLDER):
+            self.btn_search_clear.pack_forget()
+        else:
+            self.btn_search_clear.pack()
+
+    def _clear_search_and_focus(self) -> None:
+        """空状态主按钮 / × 按钮共用：清空过滤并把焦点放回搜索框。"""
+        self._clear_step_filter()
+        self.step_search.focus_set()
+
     def _apply_step_filter(self) -> None:
         text = self.step_search.get()
         self._step_filter = ("" if text == SEARCH_PLACEHOLDER
                              else text.strip())
+        self._sync_search_clear()
         self._refresh_steps()
 
     def _clear_step_filter(self) -> None:
@@ -1366,6 +1720,7 @@ class App(tk.Tk):
         self.step_search.delete(0, "end")
         self.step_search.insert(0, SEARCH_PLACEHOLDER)
         self.step_search.configure(foreground=MUTED)
+        self._sync_search_clear()
         self._refresh_steps()
 
     # ------------------------------------------------------- 图片预览
@@ -2124,7 +2479,8 @@ class App(tk.Tk):
         def on_press(event):
             state["x"], state["y"] = event.x, event.y
             state["rect"] = canvas.create_rectangle(event.x, event.y, event.x,
-                                                    event.y, outline="#4d8dff",
+                                                    event.y,
+                                                    outline=ACCENT_STRONG,
                                                     width=2)
 
         def on_drag(event):
@@ -2240,6 +2596,7 @@ class App(tk.Tk):
                     self.log_text.insert("end", message + "\n", ("link", level))
                 else:
                     self.log_text.insert("end", message + "\n", level)
+                self._trim_log()
                 self.log_text.see("end")
                 self.log_text.configure(state="disabled")
         except queue.Empty:
@@ -2265,6 +2622,18 @@ class App(tk.Tk):
             pass
         self.after(120, self._drain_queue)
 
+    def _trim_log(self) -> None:
+        """日志行数上限：超出的最早行连同点击映射一起丢掉。"""
+        lines = int(self.log_text.index("end-1c").split(".")[0])
+        extra = lines - MAX_LOG_LINES
+        if extra <= 0:
+            return
+        self.log_text.delete("1.0", f"{extra + 1}.0")
+        self._step_log_lines = {
+            line - extra: target
+            for line, target in self._step_log_lines.items()
+            if line - extra >= 1}
+
     def _on_log_link_click(self, event) -> None:
         """点日志里带下划线的行：跳到对应步骤。"""
         index = self.log_text.index(f"@{event.x},{event.y}")
@@ -2277,6 +2646,18 @@ class App(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+        self._step_log_lines = {}
+
+    def copy_log(self) -> None:
+        """把当前可见日志（最近 MAX_LOG_LINES 行）复制到剪贴板。"""
+        text = self.log_text.get("1.0", "end-1c")
+        if not text.strip():
+            self._set_status("日志为空，没有可复制的内容")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        lines = text.count("\n") + 1
+        self._set_status(f"已复制 {lines} 行日志到剪贴板")
 
     # --------------------------------------------------------------- 执行
     def _validate(self, names: Optional[list[str]] = None,
@@ -2458,17 +2839,17 @@ class App(tk.Tk):
         overlay = tk.Toplevel(self)
         overlay.overrideredirect(True)
         overlay.attributes("-topmost", True)
-        overlay.configure(bg="#1e2228")
+        overlay.configure(bg=LOG_BG)
         width, height = self.s(280), self.s(126)
         x = (self.winfo_screenwidth() - width) // 2
         y = (self.winfo_screenheight() - height) // 2
         overlay.geometry(f"{width}x{height}+{x}+{y}")
-        label = tk.Label(overlay, text="", bg="#1e2228", fg="white",
-                         font=("Microsoft YaHei UI", 22, "bold"))
+        label = tk.Label(overlay, text="", bg=LOG_BG, fg=LOG_FG,
+                         font=(UI_FONT, 22, "bold"))
         label.pack(expand=True)
         tk.Label(overlay, text="即将开始，请切换到目标窗口（Esc 取消）",
-                 bg="#1e2228", fg="#9aa3af",
-                 font=("Microsoft YaHei UI", 9)).pack(pady=(0, self.s(12)))
+                 bg=LOG_BG, fg=LOG_HEAD_MUTED,
+                 font=(UI_FONT, 9)).pack(pady=(0, self.s(12)))
         state = {"left": seconds, "cancelled": False}
 
         def cancel(_event=None):
@@ -2586,7 +2967,7 @@ class App(tk.Tk):
         parts.append(f"耗时 {report['seconds']:g} 秒")
         self.summary_label.configure(text=" · ".join(parts))
         self.summary_frame.pack(fill="x", padx=self.s(8), pady=(0, self.s(6)),
-                                before=self.log_text)
+                                before=self.log_body)
 
     def _hide_summary(self) -> None:
         self.summary_frame.pack_forget()
@@ -2659,7 +3040,7 @@ class App(tk.Tk):
         """开/关单步调试（工具栏 / F8）：下次运行每步前都会问一句。"""
         self.debug_mode = not self.debug_mode
         self.settings["debug_mode"] = self.debug_mode
-        self.btn_debug.set_kind("solid" if self.debug_mode else "ghost")
+        self.btn_debug.set_kind("accent" if self.debug_mode else "ghost")
         self._save_state()
         state = "已开启" if self.debug_mode else "已关闭"
         self._set_status(f"单步调试{state}"
@@ -3069,6 +3450,7 @@ class App(tk.Tk):
         win.title("使用说明")
         win.configure(bg=CARD)
         win.transient(self)
+        win.after_idle(lambda: uikit.style_window(win, self.dark))
         text = tk.Text(win, width=64, height=27, wrap="word", relief="flat",
                        bg=CARD, fg=TEXT, font=("Microsoft YaHei UI", 9),
                        padx=self.s(14), pady=self.s(12))
@@ -3632,6 +4014,7 @@ class BaseDialog(tk.Toplevel):
         self.geometry(f"{parent.s(width)}x{parent.s(height)}")
         self.protocol("WM_DELETE_WINDOW", self.cancel)
         self.bind("<Escape>", lambda e: self.cancel())
+        self.after_idle(lambda: uikit.style_window(self, bool(parent.dark)))
 
     def center(self) -> None:
         self.update_idletasks()
@@ -4020,13 +4403,13 @@ class StepDialog(BaseDialog):
         content = self.var_content.get().strip().split("|", 1)[0].strip()
         if not content:
             self.lbl_check_result.configure(text="先填写图片名",
-                                            fg="#b06a00")
+                                            fg=WARNING)
             return
         raw_region = self.var_region.get().strip()
         region = parse_region(raw_region)
         if raw_region and region is None:
             self.lbl_check_result.configure(
-                text="识别范围格式不对，要写 x,y,宽,高", fg="#b06a00")
+                text="识别范围格式不对，要写 x,y,宽,高", fg=WARNING)
             return
         grayscale = bool(self.var_gray.get())
         confidence = float(self.app.settings.get("confidence", 0.9) or 0.9)
@@ -4078,7 +4461,7 @@ class StepDialog(BaseDialog):
                 pass
             self.btn_check.set_enabled(True)
             self.lbl_check_result.configure(
-                text=message, fg="#b06a00" if warn else "#2e7d32")
+                text=message, fg=WARNING if warn else SUCCESS)
 
         self.after(350, run)
 
@@ -4204,7 +4587,7 @@ class StepDialog(BaseDialog):
 
     # -- 按键录入 -----------------------------------------------------------
     def _show_hint(self, text: str, warn: bool = False) -> None:
-        self.hint.configure(text=text, fg="#b06a00" if warn else MUTED)
+        self.hint.configure(text=text, fg=WARNING if warn else MUTED)
 
     def _start_record(self) -> None:
         if self._recorder.active:
@@ -4694,12 +5077,12 @@ class ScheduleDialog(BaseDialog):
             return
         if proc.returncode == 0:
             text = f"已创建：{name}（每天 {hour:02d}:{minute:02d} → {group}）"
-            self.lbl_task.configure(text=text, fg="#2e7d32")
+            self.lbl_task.configure(text=text, fg=SUCCESS)
             self.app._log("info", f"Windows 计划任务已创建：{name}")
         else:
             detail = (proc.stderr or proc.stdout or "").strip()[:500]
             self.lbl_task.configure(text="创建失败：" + detail,
-                                    fg="#c62828")
+                                    fg=DANGER)
             messagebox.showerror("创建失败", detail or "schtasks 返回错误",
                                  parent=self)
 
@@ -4719,11 +5102,11 @@ class ScheduleDialog(BaseDialog):
                                  parent=self)
             return
         if proc.returncode == 0:
-            self.lbl_task.configure(text=f"已删除：{name}", fg="#2e7d32")
+            self.lbl_task.configure(text=f"已删除：{name}", fg=SUCCESS)
             self.app._log("info", f"Windows 计划任务已删除：{name}")
         else:
             detail = (proc.stderr or proc.stdout or "").strip()[:500]
-            self.lbl_task.configure(text="删除失败：" + detail, fg="#c62828")
+            self.lbl_task.configure(text="删除失败：" + detail, fg=DANGER)
             messagebox.showerror("删除失败", detail or "schtasks 返回错误",
                                  parent=self)
 
@@ -4818,20 +5201,20 @@ class RunMiniBar:
         self.win = tk.Toplevel(parent)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.configure(bg="#1e2228")
+        self.win.configure(bg=LOG_BG)
         s = parent.s
         width, height = s(320), s(58)
         x = (self.win.winfo_screenwidth() - width) // 2
         self.win.geometry(f"{width}x{height}+{x}+{s(8)}")
 
-        box = tk.Frame(self.win, bg="#1e2228")
+        box = tk.Frame(self.win, bg=LOG_BG)
         box.pack(fill="both", expand=True, padx=s(12), pady=s(7))
-        self.counts = tk.Label(box, text="准备开始", bg="#1e2228",
-                               fg="#7cc7ff",
-                               font=("Microsoft YaHei UI", 8, "bold"))
+        self.counts = tk.Label(box, text="准备开始", bg=LOG_BG,
+                               fg=ACCENT,
+                               font=(UI_FONT, 9, "bold"))
         self.counts.pack(anchor="w")
-        self.text = tk.Label(box, text="", bg="#1e2228", fg="#e8ecf2",
-                             font=("Microsoft YaHei UI", 9))
+        self.text = tk.Label(box, text="", bg=LOG_BG, fg=LOG_FG,
+                             font=(UI_FONT, 9))
         self.text.pack(anchor="w")
         self.bar = ttk.Progressbar(box, style="Mini.Horizontal.TProgressbar",
                                    mode="determinate", maximum=100,

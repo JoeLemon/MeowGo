@@ -11,7 +11,7 @@ a = Analysis(
     ['start-app.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('main.png', '.')],
+    datas=[('main.png', '.'), ('meowgo_logo_transparent.png', '.')],
     hiddenimports=[
         'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.lock',
         'pyautogui', 'pyperclip', 'PIL', 'PIL.ImageGrab', 'PIL.ImageTk',

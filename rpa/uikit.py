@@ -6,8 +6,10 @@
 """
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from tkinter import font as tkfont
+from typing import Optional
 
 from PIL import Image, ImageDraw, ImageTk
 
@@ -25,6 +27,28 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     if len(color) == 3:
         color = "".join(ch * 2 for ch in color)
     return tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#%02X%02X%02X" % tuple(max(0, min(255, int(v))) for v in rgb)
+
+
+def _mix(color: str, other: str, amount: float) -> str:
+    """把两种颜色按 amount 混合（0=color，1=other）。"""
+    try:
+        a, b = _hex_to_rgb(color), _hex_to_rgb(other)
+    except (ValueError, IndexError):
+        return color        # Tk 颜色名（如 white）无法直接解析时放弃阴影
+    return _rgb_to_hex(tuple(a[i] + (b[i] - a[i]) * amount for i in range(3)))
+
+
+def _is_dark_color(color: str) -> bool:
+    """判断底色是否偏暗：ghost 按钮据此决定用亮字还是暗字。"""
+    try:
+        r, g, b = _hex_to_rgb(color)
+    except (ValueError, IndexError):
+        return False
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 128
 
 
 class _ScaledDraw:
@@ -314,6 +338,121 @@ def icon(name: str, size: int, color: str) -> ImageTk.PhotoImage:
     return _cache[key]
 
 
+class CatCanvas(tk.Canvas):
+    """空状态用的猫猫插画：Canvas 绘制，只画上半身。
+
+    参考掘金「使用 canvas 绘制一只超萌小黑猫」的造型，用椭圆、平滑多边形
+    和圆头线条重画成 Tk Canvas 版本。坐标按 140×122 设计，scale 负责按
+    DPI 缩放；颜色由调用方传入，主题切换时用 set_colors() 重绘。
+    """
+
+    DESIGN_W = 140
+    DESIGN_H = 122
+
+    def __init__(self, parent, scale: float = 1.0, bg: str = "#FFFFFF",
+                 ink: str = "#080806", accent: str = "#FDAD63",
+                 nose: str = "#E8861F", **kwargs):
+        self.ink = ink
+        self.accent = accent
+        self.nose = nose
+        self.paper = bg
+        self._k = max(0.2, float(scale))
+        super().__init__(
+            parent,
+            width=max(1, int(round(self.DESIGN_W * self._k))),
+            height=max(1, int(round(self.DESIGN_H * self._k))),
+            bg=bg, highlightthickness=0, bd=0, **kwargs)
+        self.redraw()
+
+    def set_colors(self, *, bg: Optional[str] = None,
+                   ink: Optional[str] = None, accent: Optional[str] = None,
+                   nose: Optional[str] = None) -> None:
+        """换主题时更新颜色并重绘。"""
+        if bg is not None:
+            self.paper = bg
+            self.configure(bg=bg)
+        if ink is not None:
+            self.ink = ink
+        if accent is not None:
+            self.accent = accent
+        if nose is not None:
+            self.nose = nose
+        self.redraw()
+
+    def _points(self, points):
+        k = self._k
+        return [coord * k for point in points for coord in point]
+
+    def _box(self, box):
+        k = self._k
+        return [value * k for value in box]
+
+    def _line(self, value: float) -> int:
+        return max(1, int(round(value * self._k)))
+
+    def redraw(self) -> None:
+        """按当前颜色重画整只猫（从后往前：身体 → 围脖 → 耳朵 → 头）。"""
+        self.delete("all")
+        inner = _mix(self.accent, self.paper, 0.55)
+
+        # 上半身：肩膀和胸口，画到画布底边为止（不画腿和尾巴）
+        body = [
+            (46, 84), (38, 90), (32, 99), (30, 109), (34, 118),
+            (42, 122), (98, 122), (106, 118), (110, 109),
+            (108, 99), (102, 90), (94, 84), (82, 89), (70, 91),
+            (58, 89),
+        ]
+        self.create_polygon(
+            self._points(body), fill=self.ink, outline="", smooth=True,
+            splinesteps=24)
+
+        # 围脖：暖橙色的平滑横带
+        scarf = [(46, 88), (54, 95), (70, 98), (86, 95), (94, 88)]
+        self.create_line(
+            self._points(scarf), fill=self.accent, width=self._line(9),
+            capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
+            splinesteps=24)
+
+        # 双耳：先画外耳，再画浅色内耳；耳根由后面的头盖住
+        for outer, inner_ear in (
+                ([(43, 55), (27, 11), (66, 34)],
+                 [(46, 48), (37, 22), (59, 33)]),
+                ([(97, 55), (113, 11), (74, 34)],
+                 [(94, 48), (103, 22), (81, 33)])):
+            self.create_polygon(
+                self._points(outer), fill=self.ink, outline="")
+            self.create_polygon(
+                self._points(inner_ear), fill=inner, outline="")
+
+        # 胡须：画在头后面，只露出脸两侧的部分
+        for x1, y1, x2, y2 in (
+                (36, 59, 12, 57), (38, 68, 14, 72),
+                (104, 59, 128, 57), (102, 68, 126, 72)):
+            self.create_line(
+                *self._points([(x1, y1), (x2, y2)]),
+                fill=self.ink, width=self._line(2.2),
+                capstyle=tk.ROUND)
+
+        # 头：大圆脸，盖住耳根、胡须根和围脖上沿
+        self.create_oval(*self._box([30, 27, 110, 93]),
+                         fill=self.ink, outline="")
+
+        # 眼睛：眼白跟主题底色一致，深色主题下自然变成「反色猫」
+        self.create_oval(*self._box([47, 49, 69, 71]),
+                         fill=self.paper, outline="")
+        self.create_oval(*self._box([71, 49, 93, 71]),
+                         fill=self.paper, outline="")
+        # 瞳孔稍微向内靠，显得更呆萌
+        self.create_oval(*self._box([55, 57, 62, 66]),
+                         fill=self.ink, outline="")
+        self.create_oval(*self._box([78, 57, 85, 66]),
+                         fill=self.ink, outline="")
+
+        # 鼻子：暖橙色小椭圆（参考图的「嘴巴」也是这颗圆鼻子）
+        self.create_oval(*self._box([66, 73, 74, 80]),
+                         fill=self.nose, outline="")
+
+
 # ---------------------------------------------------------------------------
 # 圆角按钮
 # ---------------------------------------------------------------------------
@@ -326,6 +465,93 @@ def round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kwargs):
         x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
     ]
     return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+class RoundedCard(tk.Frame):
+    """圆角卡片：外层用 Canvas 画圆角底与描边，内容放进 .body。
+
+    卡片尺寸仍由内容撑开（普通 Frame 的几何传播），Canvas 只作为背景，
+    因此可以直接替换原来的 tk.Frame，不需要改成固定尺寸。
+    """
+
+    def __init__(self, master, radius: int = 16, bg: str = "#FFFFFF",
+                 border: str = "#E6E2DB", outer_bg: str | None = None,
+                 padding: int = 6, shadow: bool = True, **kwargs):
+        if outer_bg is None:
+            try:
+                outer_bg = str(master.cget("bg"))
+            except tk.TclError:
+                outer_bg = "#FAF9F7"
+        super().__init__(master, bg=bg, bd=0, highlightthickness=0, **kwargs)
+        self.radius = int(radius)
+        self.card_bg = bg
+        self.border = border
+        self.outer_bg = outer_bg
+        self.padding = int(padding)
+        self.shadow = bool(shadow)
+        self._canvas = tk.Canvas(self, bg=outer_bg, highlightthickness=0, bd=0)
+        self._canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        self.body = tk.Frame(self, bg=bg, bd=0, highlightthickness=0)
+        self.body.pack(fill="both", expand=True,
+                       padx=self.padding, pady=self.padding)
+        self._shape = None
+        self.bind("<Configure>", self._redraw)
+
+    def _redraw(self, _event=None) -> None:
+        width, height = self.winfo_width(), self.winfo_height()
+        if width < 4 or height < 4:
+            return
+        self._canvas.delete("card")
+        # 低饱和柔和阴影：Tk 没有 alpha，用外侧底色混一点墨黑模拟 shadow-1。
+        if self.shadow:
+            shadow = _mix(self.outer_bg, "#080806", 0.08)
+            round_rect(
+                self._canvas, 3, 3, width - 1, height - 1,
+                min(self.radius, (width - 4) / 2, (height - 4) / 2),
+                fill=shadow, outline="", tags="card")
+        self._shape = round_rect(
+            self._canvas, 1, 1, width - 3, height - 3,
+            min(self.radius, (width - 4) / 2, (height - 4) / 2),
+            fill=self.card_bg, outline=self.border, width=1, tags="card")
+
+    def set_colors(self, bg: str | None = None, border: str | None = None,
+                   outer_bg: str | None = None) -> None:
+        """主题切换：同步卡片、描边与圆角外侧的底色。"""
+        if bg is not None:
+            self.card_bg = bg
+            self.body.configure(bg=bg)
+            self.configure(bg=bg)
+        if border is not None:
+            self.border = border
+        if outer_bg is not None:
+            self.outer_bg = outer_bg
+            self._canvas.configure(bg=outer_bg)
+        self._redraw()
+
+
+def style_window(window: tk.Misc, dark: bool | None = None,
+                 rounded: bool = True) -> None:
+    """Windows 11 原生窗口圆角 + 深色标题栏（老系统静默忽略）。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = int(window.winfo_id())
+        parent = ctypes.windll.user32.GetParent(hwnd)
+        if parent:
+            hwnd = parent
+        dwm = ctypes.windll.dwmapi
+        if rounded:
+            pref = ctypes.c_int(2)          # DWMWCP_ROUND
+            dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref),
+                                      ctypes.sizeof(pref))
+        if dark is not None:
+            flag = ctypes.c_int(1 if dark else 0)
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(flag),
+                                      ctypes.sizeof(flag))
+    except Exception:  # noqa: BLE001 — 非 Win11 / 无 DWM 时保持系统默认
+        pass
 
 
 class Tooltip:
@@ -345,8 +571,8 @@ class Tooltip:
         self.tip = tk.Toplevel(self.widget)
         self.tip.overrideredirect(True)
         self.tip.attributes("-topmost", True)
-        label = tk.Label(self.tip, text=self.text, bg="#2b3240", fg="#f2f4f8",
-                         padx=8, pady=4, font=("Microsoft YaHei UI", 9),
+        label = tk.Label(self.tip, text=self.text, bg="#080806", fg="#F5F2ED",
+                         padx=9, pady=5, font=("Microsoft YaHei UI", 9),
                          bd=0)
         label.pack()
         x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
@@ -368,14 +594,14 @@ class Tooltip:
 # 自绘右键菜单（与界面同风格：圆角卡片 + 图标 + 悬停高亮）
 # ---------------------------------------------------------------------------
 
-MENU_CARD = "#ffffff"
-MENU_BORDER = "#dbe2ee"
-MENU_HOVER = "#eaf1ff"
-MENU_HOVER_DANGER = "#fdeceb"
-MENU_TEXT = "#22262e"
-MENU_MUTED = "#9aa2b1"
-MENU_DANGER = "#e5484d"
-MENU_ACCENT = "#3b6ff5"
+MENU_CARD = "#FFFFFF"
+MENU_BORDER = "#E6E2DB"
+MENU_HOVER = "#FFF6EC"
+MENU_HOVER_DANGER = "#FBEAE9"
+MENU_TEXT = "#080806"
+MENU_MUTED = "#A8A29A"
+MENU_DANGER = "#D9534F"
+MENU_ACCENT = "#E8861F"
 
 # 暗色模式开关：自绘控件（圆角按钮 / 菜单）的配色随此切换。
 # 菜单是即用即建的，改全局常量即可；按钮要存活过切换，故 _palette 现读现算。
@@ -389,12 +615,13 @@ def set_dark_mode(on: bool) -> None:
         return
     _DARK_MODE["on"] = dark
     globals().update(
-        MENU_CARD="#232936" if dark else "#ffffff",
-        MENU_BORDER="#39414f" if dark else "#dbe2ee",
-        MENU_HOVER="#2b3445" if dark else "#eaf1ff",
-        MENU_HOVER_DANGER="#3a2628" if dark else "#fdeceb",
-        MENU_TEXT="#e6eaf2" if dark else "#22262e",
-        MENU_MUTED="#8b95a5" if dark else "#9aa2b1",
+        MENU_CARD="#1D1B18" if dark else "#FFFFFF",
+        MENU_BORDER="#35312B" if dark else "#E6E2DB",
+        MENU_HOVER="#2A2118" if dark else "#FFF6EC",
+        MENU_HOVER_DANGER="#352322" if dark else "#FBEAE9",
+        MENU_TEXT="#F5F2ED" if dark else "#080806",
+        MENU_MUTED="#A8A29A" if dark else "#A8A29A",
+        MENU_ACCENT="#FDAD63" if dark else "#E8861F",
     )
 TRANSPARENT_KEY = "#ff00fe"   # 用于抠掉圆角外的区域
 
@@ -805,9 +1032,9 @@ class RoundButton(tk.Canvas):
 
     def __init__(self, master, text: str = "", icon_name: str | None = None,
                  command=None, kind: str = SOLID, scale: float = 1.0,
-                 height: int = 34, pad: tuple[int, int] = (14, 14),
-                 icon_size: int = 16, radius: int = 9, tooltip: str = "",
-                 font_size: int = 9, bg: str = "#f5f6f8", bold: bool = False):
+                 height: int = 36, pad: tuple[int, int] = (14, 14),
+                 icon_size: int = 16, radius: int = 12, tooltip: str = "",
+                 font_size: int = 9, bg: str = "#FAF9F7", bold: bool = False):
         if isinstance(pad, (int, float)):
             pad = (pad, pad)
         self.scale = scale
@@ -847,38 +1074,45 @@ class RoundButton(tk.Canvas):
     def _palette(self) -> tuple[str, str]:
         """返回 (背景色, 前景色)。"""
         dark = _DARK_MODE["on"]
+        bg = str(self["bg"])
+        dark_bg = _is_dark_color(bg)
         if self.kind == "accent":
-            base, fg = "#3b6ff5", "#ffffff"
-            hover, active = "#2f5fdc", "#2854c4"
+            base, fg = "#FDAD63", "#080806"
+            hover, active = "#E8861F", "#D97712"
         elif self.kind == "danger":
-            base, fg = "#e5484d", "#ffffff"
-            hover, active = "#d23c41", "#b83136"
+            base, fg = "#D9534F", "#FFFFFF"
+            hover, active = "#C74642", "#B03B37"
         elif self.kind == "outline":
             if dark:
-                base, fg = "#232936", "#c6cddb"
-                hover, active = "#2b3345", "#303948"
+                base, fg = "#1D1B18", "#F5F2ED"
+                hover, active = "#26231F", "#302B26"
             else:
-                base, fg = "#ffffff", "#33405a"
-                hover, active = "#eef3ff", "#e0e9ff"
+                base, fg = "#FFFFFF", "#080806"
+                hover, active = "#F3F1ED", "#FFE9D2"
         elif self.kind == "ghost":
-            base = self["bg"]
-            if dark:
-                fg, hover, active = "#aab4c4", "#2a3038", "#323944"
+            base = bg
+            if dark or dark_bg:
+                # 深色底（如日志标题栏）上的 ghost：暖白文字 + 深色悬停
+                fg = "#F5F2ED"
+                hover = "#2A2118" if dark else "#26231F"
+                active = "#3A2D20" if dark else "#302B26"
             else:
-                fg, hover, active = "#4a5768", "#e8ecf3", "#dde3ec"
+                fg, hover, active = "#080806", "#FFF6EC", "#FFE9D2"
         else:
             if dark:
-                base, fg = "#2b3242", "#dde3ec"
-                hover, active = "#323a4b", "#39424f"
+                base, fg = "#26231F", "#F5F2ED"
+                hover, active = "#302B26", "#3A342C"
             else:
-                base, fg = "#e9edf4", "#2b3444"
-                hover, active = "#dfe4ee", "#d3dae7"
+                base, fg = "#F3F1ED", "#080806"
+                hover, active = "#E9E5DE", "#DFDAD2"
         if not self._enabled:
             if self.kind in ("accent", "danger"):
-                return "#c9d2e0", "#ffffff"
-            if dark:
-                return "#262b33", "#5c6470"
-            return "#f0f1f4", "#b3b8c0"
+                if dark:
+                    return "#2A2622", "#6B655E"
+                return "#E6E2DB", "#A8A29A"
+            if dark or (self.kind == "ghost" and dark_bg):
+                return "#26231F", "#6B655E"
+            return "#E6E2DB", "#A8A29A"
         if self._pressed:
             return active, fg
         if self._hover:
@@ -887,7 +1121,7 @@ class RoundButton(tk.Canvas):
 
     def _rebuild(self) -> None:
         fill, fg = self._palette()
-        border = ("#3a4252" if _DARK_MODE["on"] else "#d8dee9") \
+        border = ("#35312B" if _DARK_MODE["on"] else "#E6E2DB") \
             if (self.kind == "outline" and self._enabled) else ""
         self.itemconfigure(self._shape, fill=fill, outline=border)
         for item in self._content:
