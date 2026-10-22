@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import math
 import random
 import sys
 import tkinter as tk
@@ -401,6 +402,46 @@ class CatCanvas(tk.Canvas):
     def _line(self, value: float) -> int:
         return max(1, int(round(value * self._k)))
 
+    @staticmethod
+    def _rounded_tip(base1, tip, base2, radius: float):
+        """把三角形耳尖换成指定半径的圆角，保留两条直边。
+
+        返回 base1 → 切点 → 圆弧 → 切点 → base2 的多边形点列。
+        Tk 的 smooth 多边形会把整只耳朵都揉圆，这里用几何圆弧只处理耳尖。
+        """
+        def unit(x, y):
+            length = math.hypot(x, y) or 1.0
+            return x / length, y / length
+
+        u1 = unit(base1[0] - tip[0], base1[1] - tip[1])
+        u2 = unit(base2[0] - tip[0], base2[1] - tip[1])
+        dot = max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1]))
+        half = max(0.08, math.acos(dot) / 2)          # 耳尖夹角的一半
+        r = max(0.5, float(radius))
+        dist = r / math.sin(half)                     # 圆心到耳尖的距离
+        bis = unit(u1[0] + u2[0], u1[1] + u2[1])      # 指向耳朵内部
+        # 把顶点往外多走一点，圆角最外侧正好落在原耳尖位置。
+        ex = tip[0] - bis[0] * (dist - r)
+        ey = tip[1] - bis[1] * (dist - r)
+        cx = ex + bis[0] * dist
+        cy = ey + bis[1] * dist
+        tangent = r / math.tan(half)
+        p1 = (ex + u1[0] * tangent, ey + u1[1] * tangent)
+        p2 = (ex + u2[0] * tangent, ey + u2[1] * tangent)
+        a1 = math.atan2(p1[1] - cy, p1[0] - cx)
+        a2 = math.atan2(p2[1] - cy, p2[0] - cx)
+        at = math.atan2(tip[1] - cy, tip[0] - cx)
+        span = (a2 - a1) % (2 * math.pi)
+        if (at - a1) % (2 * math.pi) > span:
+            span -= 2 * math.pi                      # 走经过耳尖的那一侧
+        points = [base1, p1]
+        for index in range(1, 10):
+            angle = a1 + span * index / 10
+            points.append((cx + r * math.cos(angle),
+                           cy + r * math.sin(angle)))
+        points += [p2, base2]
+        return points
+
     # ------------------------------------------------------- 空状态小动画
     def _cancel_after(self, attr: str) -> None:
         job = getattr(self, attr, None)
@@ -512,16 +553,19 @@ class CatCanvas(tk.Canvas):
             capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
             splinesteps=24)
 
-        # 双耳：先画外耳，再画浅色内耳；耳根由后面的头盖住
-        for outer, inner_ear in (
-                ([(43, 55), (27, 11), (66, 34)],
-                 [(46, 48), (37, 22), (59, 33)]),
-                ([(97, 55), (113, 11), (74, 34)],
-                 [(94, 48), (103, 22), (81, 33)])):
+        # 双耳：先画外耳，再画浅色内耳；耳根由后面的头盖住。
+        # 耳朵整体比旧版更大，耳尖用很小的几何圆角，保留三角耳的直边。
+        for outer, inner_ear, outer_r, inner_r in (
+                (((42, 57), (21, 4), (68, 33)),
+                 ((45, 50), (32, 15), (61, 33)), 3.2, 2.4),
+                (((98, 57), (119, 4), (72, 33)),
+                 ((95, 50), (108, 15), (79, 33)), 3.2, 2.4)):
             self.create_polygon(
-                self._points(outer), fill=self.ink, outline="")
+                self._points(self._rounded_tip(*outer, outer_r)),
+                fill=self.ink, outline="")
             self.create_polygon(
-                self._points(inner_ear), fill=inner, outline="")
+                self._points(self._rounded_tip(*inner_ear, inner_r)),
+                fill=inner, outline="")
 
         # 胡须：画在头后面，只露出脸两侧的部分
         for x1, y1, x2, y2 in (
