@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import random
 import sys
 import tkinter as tk
 from tkinter import font as tkfont
@@ -362,6 +363,16 @@ class CatCanvas(tk.Canvas):
             width=max(1, int(round(self.DESIGN_W * self._k))),
             height=max(1, int(round(self.DESIGN_H * self._k))),
             bg=bg, highlightthickness=0, bd=0, **kwargs)
+        # 空状态小动画：轻微呼吸浮动 + 定时眨眼。after 任务在重绘 /
+        # 销毁时取消，避免主题切换后叠加多个循环。
+        self._bob_after: Optional[str] = None
+        self._blink_after: Optional[str] = None
+        self._open_after: Optional[str] = None
+        self._bob_offset = 0
+        self._eye_items: list[int] = []
+        self._blink_items: list[int] = []
+        self._eyes_hidden = False
+        self.bind("<Destroy>", self._on_destroy, add="+")
         self.redraw()
 
     def set_colors(self, *, bg: Optional[str] = None,
@@ -390,8 +401,96 @@ class CatCanvas(tk.Canvas):
     def _line(self, value: float) -> int:
         return max(1, int(round(value * self._k)))
 
+    # ------------------------------------------------------- 空状态小动画
+    def _cancel_after(self, attr: str) -> None:
+        job = getattr(self, attr, None)
+        setattr(self, attr, None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass                    # 窗口已经销毁 / 任务已执行完
+
+    def _stop_animation(self) -> None:
+        """取消所有 after 任务，并回到静止状态。"""
+        for attr in ("_bob_after", "_blink_after", "_open_after"):
+            self._cancel_after(attr)
+        self._bob_offset = 0
+        self._eyes_hidden = False
+        self._blink_items = []
+
+    def _start_animation(self) -> None:
+        if not self.winfo_exists():
+            return
+        self._stop_animation()
+        self._bob_after = self.after(1400, self._bob)
+        self._blink_after = self.after(4200, self._blink)
+
+    def _bob(self) -> None:
+        """上下浮动 1–2px，像轻轻呼吸；不追求明显，避免抢内容焦点。"""
+        self._bob_after = None
+        if not self.winfo_exists():
+            return
+        step = max(1, int(round(2 * self._k)))
+        target = 0 if self._bob_offset else -step
+        delta = target - self._bob_offset
+        self.move("cat", 0, delta)
+        self.move("blink", 0, delta)
+        self._bob_offset = target
+        self._bob_after = self.after(1500, self._bob)
+
+    def _blink(self) -> None:
+        """把圆眼藏起来，画两条小弧线，再在 130ms 后睁开。"""
+        self._cancel_after("_blink_after")
+        if not self.winfo_exists() or self._eyes_hidden:
+            return
+        for item in self._eye_items:
+            try:
+                self.itemconfigure(item, state="hidden")
+            except tk.TclError:
+                pass
+        self._blink_items = []
+        for x1, y1, x2, y2 in ((50, 56, 66, 68), (74, 56, 90, 68)):
+            item = self.create_arc(
+                *self._box([x1, y1, x2, y2]),
+                start=200, extent=140, style=tk.ARC,
+                outline=self.paper, width=self._line(2.2),
+                tags=("blink",))
+            if self._bob_offset:
+                self.move(item, 0, self._bob_offset)
+            self._blink_items.append(item)
+        self._eyes_hidden = True
+        self._open_after = self.after(130, self._open_eyes)
+
+    def _open_eyes(self) -> None:
+        self._cancel_after("_open_after")
+        if not self.winfo_exists():
+            return
+        for item in self._blink_items:
+            try:
+                self.delete(item)
+            except tk.TclError:
+                pass
+        self._blink_items = []
+        for item in self._eye_items:
+            try:
+                self.itemconfigure(item, state="normal")
+            except tk.TclError:
+                pass
+        self._eyes_hidden = False
+        self._blink_after = self.after(random.randint(3600, 6200), self._blink)
+
+    def _on_destroy(self, event=None) -> None:
+        if event is None or getattr(event, "widget", None) is self:
+            self._stop_animation()
+
+    def destroy(self) -> None:  # noqa: D401 - tkinter override
+        self._stop_animation()
+        super().destroy()
+
     def redraw(self) -> None:
         """按当前颜色重画整只猫（从后往前：身体 → 围脖 → 耳朵 → 头）。"""
+        self._stop_animation()
         self.delete("all")
         inner = _mix(self.accent, self.paper, 0.55)
 
@@ -438,19 +537,25 @@ class CatCanvas(tk.Canvas):
                          fill=self.ink, outline="")
 
         # 眼睛：眼白跟主题底色一致，深色主题下自然变成「反色猫」
-        self.create_oval(*self._box([47, 49, 69, 71]),
-                         fill=self.paper, outline="")
-        self.create_oval(*self._box([71, 49, 93, 71]),
-                         fill=self.paper, outline="")
+        left_eye = self.create_oval(*self._box([47, 49, 69, 71]),
+                                    fill=self.paper, outline="")
+        right_eye = self.create_oval(*self._box([71, 49, 93, 71]),
+                                     fill=self.paper, outline="")
         # 瞳孔稍微向内靠，显得更呆萌
-        self.create_oval(*self._box([55, 57, 62, 66]),
-                         fill=self.ink, outline="")
-        self.create_oval(*self._box([78, 57, 85, 66]),
-                         fill=self.ink, outline="")
+        left_pupil = self.create_oval(*self._box([55, 57, 62, 66]),
+                                      fill=self.ink, outline="")
+        right_pupil = self.create_oval(*self._box([78, 57, 85, 66]),
+                                       fill=self.ink, outline="")
+        self._eye_items = [left_eye, right_eye, left_pupil, right_pupil]
 
         # 鼻子：暖橙色小椭圆（参考图的「嘴巴」也是这颗圆鼻子）
         self.create_oval(*self._box([66, 73, 74, 80]),
                          fill=self.nose, outline="")
+
+        # 统一打标签，浮动动画只移动猫本身，不碰眨眼临时弧线。
+        for item in self.find_all():
+            self.addtag_withtag("cat", item)
+        self._start_animation()
 
 
 # ---------------------------------------------------------------------------

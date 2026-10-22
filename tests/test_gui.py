@@ -1580,15 +1580,24 @@ def test_settings_dialog_preserves_keys():
 
 
 def test_canvas_cat_empty_state():
-    """空状态用 Canvas 小猫上半身，不依赖 PIL 图片。"""
+    """空状态用 Canvas 小猫上半身，不依赖 PIL 图片，并带眨眼动画。"""
     for cat in (app.step_empty_icon, app.group_empty_icon):
         assert isinstance(cat, gui_module.uikit.CatCanvas), type(cat)
         # 身体 / 围脖 / 双耳内外 / 胡须 ×4 / 头 / 眼 ×2 / 瞳 ×2 / 鼻子
-        assert len(cat.find_all()) == 16, len(cat.find_all())
-        fills = {str(cat.itemcget(item, "fill")) for item in cat.find_all()}
+        items = cat.find_withtag("cat")
+        assert len(items) == 16, len(items)
+        fills = {str(cat.itemcget(item, "fill")) for item in items}
         assert gui_module.TEXT in fills, fills
         assert gui_module.ACCENT in fills, fills
         assert gui_module.ACCENT_STRONG in fills, fills
+        # 手动走一次眨眼，确认临时弧线出现又消失
+        cat._cancel_after("_blink_after")
+        cat._blink()
+        assert cat._eyes_hidden
+        assert len(cat.find_withtag("blink")) == 2
+        cat._open_eyes()
+        assert not cat._eyes_hidden
+        assert not cat.find_withtag("blink")
     mark("Canvas 小猫空状态")
 
 
@@ -1996,28 +2005,45 @@ def test_resume_retries_failed_tail():
 
 
 def test_default_groups():
-    """首次启动预置浏览器 / 软件组；不覆盖已有组，也不重复添加。"""
+    """首次启动预置 5 个模板组；升级不覆盖用户组，也不复活已删除的旧组。"""
     names = [name for name, _steps in _INITIAL_GROUPS]
-    assert names == ["打开浏览器", "打开软件"], names
-    browser_steps = dict(_INITIAL_GROUPS)["打开浏览器"]
+    assert names == ["打开浏览器", "打开软件", "批量打开网址", "上传文件",
+                     "打开工作环境"], names
+    groups = dict(_INITIAL_GROUPS)
+    browser_steps = groups["打开浏览器"]
     assert [step_type for step_type, _content in browser_steps] == [
-        "set", "set", "cmd", "wait", "hotkey", "input", "hotkey"]
+        "set", "set", "set", "cmd", "window", "hotkey", "input", "hotkey"]
     assert browser_steps[0][1] == "浏览器=chrome"
-    assert browser_steps[1][1] == "网址=https://www.baidu.com"
-    assert browser_steps[2][1] == 'start "" "{浏览器}"'
-    assert browser_steps[5][1] == "{网址}"
-    software_steps = dict(_INITIAL_GROUPS)["打开软件"]
+    assert browser_steps[1][1] == "窗口标题=Chrome"
+    assert browser_steps[2][1] == "网址=https://www.baidu.com"
+    assert browser_steps[3][1] == 'start "" "{浏览器}"'
+    assert browser_steps[4][1] == "wait:{窗口标题}|10"
+    assert browser_steps[6][1] == "{网址}"
+    software_steps = groups["打开软件"]
     assert [step_type for step_type, _content in software_steps] == [
         "set", "cmd"]
     assert software_steps[0][1] == "软件=notepad"
     assert software_steps[1][1] == 'start "" "{软件}"'
+    batch_steps = groups["批量打开网址"]
+    assert [step_type for step_type, _content in batch_steps] == [
+        "set", "set", "cmd", "wait"]
+    assert batch_steps[2][1] == 'start "" "{浏览器}" "{网址}"'
+    upload_steps = groups["上传文件"]
+    assert [step_type for step_type, _content in upload_steps] == [
+        "set", "click", "wait", "hotkey", "input", "hotkey"]
+    assert upload_steps[1][1] == "上传按钮.png"
+    assert upload_steps[3][1] == "alt,n"
+    assert upload_steps[4][1] == "{文件路径}"
+    workspace_steps = groups["打开工作环境"]
+    assert [step_type for step_type, _content in workspace_steps] == [
+        "set", "set", "set", "cmd", "wait", "cmd"]
+    assert workspace_steps[5][1] == 'start "" "{浏览器}" "{网址}"'
 
     # 已有组保留，只补充缺失的预置组
     project = Project(groups=[Group("我的组", [Step("wait", "1")], "保留我")])
     settings = {}
     assert gui_module.seed_default_groups(project, settings) is True
-    assert project.names() == ["我的组", "打开浏览器", "打开软件"], \
-        project.names()
+    assert project.names() == ["我的组"] + names, project.names()
     assert project.get("我的组").steps[0].content == "1"
     assert project.get("我的组").note == "保留我"
 
@@ -2029,13 +2055,102 @@ def test_default_groups():
     # 旧版留下的唯一空「默认组」占位符会被替换；用户自己的空组不删
     placeholder = Project(groups=[Group("默认组")])
     gui_module.seed_default_groups(placeholder, {})
-    assert placeholder.names() == ["打开浏览器", "打开软件"], \
-        placeholder.names()
+    assert placeholder.names() == names, placeholder.names()
     custom_empty = Project(groups=[Group("我的空组")])
     gui_module.seed_default_groups(custom_empty, {})
-    assert custom_empty.names() == ["我的空组", "打开浏览器", "打开软件"], \
-        custom_empty.names()
+    assert custom_empty.names() == ["我的空组"] + names, custom_empty.names()
+
+    # v1 -> v2：没改过的浏览器模板原地升级，新增模板补在后面
+    legacy_browser = Group(
+        "打开浏览器",
+        [
+            Step("set", "浏览器=chrome",
+                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", "网址=https://www.baidu.com",
+                 note="要打开的链接"),
+            Step("cmd", 'start "" "{浏览器}"',
+                 note="按变量启动浏览器"),
+            Step("wait", "2",
+                 note="等浏览器启动；慢就改大"),
+            Step("hotkey", "ctrl,l", note="聚焦地址栏"),
+            Step("input", "{网址}", note="输入网址"),
+            Step("hotkey", "enter", note="打开网址"),
+        ],
+        note="预置模板：改前两步变量即可运行；浏览器启动慢时把等待秒数改大。",
+    )
+    legacy_software = Group(
+        "打开软件",
+        [Step("set", "软件=notepad",
+              note="exe 名或完整路径，如 notepad / calc"),
+         Step("cmd", 'start "" "{软件}"',
+              note="按变量启动软件；找不到就填完整路径")],
+        note="预置模板：把「软件」变量改成要打开的程序名或完整 exe 路径。",
+    )
+    upgraded = Project(groups=[legacy_browser, legacy_software])
+    v1_settings = {gui_module.DEFAULT_GROUPS_KEY: 1}
+    assert gui_module.seed_default_groups(upgraded, v1_settings) is True
+    assert upgraded.names() == names, upgraded.names()
+    assert not validate_project(upgraded.groups, check_images=False), \
+        validate_project(upgraded.groups, check_images=False)
+    new_browser = upgraded.get("打开浏览器")
+    assert [step.type for step in new_browser.steps] == [
+        "set", "set", "set", "cmd", "window", "hotkey", "input", "hotkey"]
+    assert new_browser.steps[1].content == "窗口标题=Chrome"
+    assert v1_settings[gui_module.DEFAULT_GROUPS_KEY] == 2
+
+    # v1 用户删掉的旧组不加回；只补 v2 新增的三个模板
+    only_software = Project(groups=[Group("打开软件", [Step("wait", "1")])])
+    v1_settings = {gui_module.DEFAULT_GROUPS_KEY: 1}
+    assert gui_module.seed_default_groups(only_software, v1_settings) is True
+    assert only_software.names() == [
+        "打开软件", "批量打开网址", "上传文件", "打开工作环境"], \
+        only_software.names()
+    assert only_software.get("打开浏览器") is None
+
+    # 用户改过的旧浏览器组不覆盖
+    modified = Group("打开浏览器", [Step("wait", "9")], "我改过")
+    modified_project = Project(groups=[modified])
+    gui_module.seed_default_groups(
+        modified_project, {gui_module.DEFAULT_GROUPS_KEY: 1})
+    assert modified_project.get("打开浏览器").steps[0].content == "9"
+    assert modified_project.get("打开浏览器").note == "我改过"
     mark("默认组预置")
+
+
+def test_restore_default_groups():
+    """编辑菜单 / 右键里的「恢复预置执行组」只补缺失组，不覆盖同名组。"""
+    saved_project = app.project
+    saved_index = app.group_index
+    try:
+        labels = [getattr(item, "label", "") for item in app._edit_items()]
+        assert any("恢复预置执行组" in label for label in labels), labels
+        app.project = Project(groups=[
+            Group("保留组", [Step("wait", "1")], "别动我")])
+        app.group_index = 0
+        app._refresh_all()
+        app.restore_default_groups()
+        expected = ["保留组"] + [name for name, _steps in _INITIAL_GROUPS]
+        assert app.project.names() == expected, app.project.names()
+        assert app.project.get("保留组").steps[0].content == "1"
+        assert app.project.get("保留组").note == "别动我"
+
+        # 已经有全部预置组时，再点一次不会重复添加
+        count = len(app.project.groups)
+        app.restore_default_groups()
+        assert len(app.project.groups) == count
+
+        # 只剩旧版空占位组时，恢复会顺手清掉它
+        app.project = Project(groups=[Group("默认组")])
+        app.group_index = 0
+        app._refresh_all()
+        app.restore_default_groups()
+        assert app.project.names() == [
+            name for name, _steps in _INITIAL_GROUPS], app.project.names()
+    finally:
+        app.project = saved_project
+        app.group_index = saved_index
+        app._refresh_all(select_group=saved_index)
+    mark("恢复预置执行组")
 
 
 def finish():
@@ -2076,6 +2191,7 @@ def finish():
         test_schedule_task_command()
         test_result_writeback_from_gui()
         test_resume_retries_failed_tail()
+        test_restore_default_groups()
     except Exception as exc:  # noqa: BLE001 — 任何异常都要退出，避免测试挂住
         print(f"  FAIL  {type(exc).__name__}: {exc}")
         app.destroy()

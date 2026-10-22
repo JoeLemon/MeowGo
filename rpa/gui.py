@@ -51,7 +51,20 @@ BACKUPS_DIR = os.path.join(APP_DIR, "backups")
 MAX_CONFIG_BACKUPS = 10
 MAX_LOG_LINES = 2000              # 日志上限：超出后从最早的行开始丢弃
 DEFAULT_GROUPS_KEY = "default_groups_version"   # 状态文件里的预置组版本
-DEFAULT_GROUPS_VERSION = 1
+DEFAULT_GROUPS_VERSION = 2
+# v1 只预置了这两个组。升级到 v2 时只“原地升级”未改过的浏览器组，
+# 不把用户已经删掉的旧组加回来。
+DEFAULT_GROUPS_V1_NAMES = {"打开浏览器", "打开软件"}
+LEGACY_BROWSER_NOTE = "预置模板：改前两步变量即可运行；浏览器启动慢时把等待秒数改大。"
+LEGACY_BROWSER_SIGNATURE = (
+    ("set", "浏览器=chrome", 0, "chrome / msedge / 完整 exe 路径"),
+    ("set", "网址=https://www.baidu.com", 0, "要打开的链接"),
+    ("cmd", 'start "" "{浏览器}"', 0, "按变量启动浏览器"),
+    ("wait", "2", 0, "等浏览器启动；慢就改大"),
+    ("hotkey", "ctrl,l", 0, "聚焦地址栏"),
+    ("input", "{网址}", 0, "输入网址"),
+    ("hotkey", "enter", 0, "打开网址"),
+)
 
 # 配色（Design Tokens v1.0：暖白 / 墨黑 / 暖橙点缀；_apply_theme 整组切换）
 BG = "#FAF9F7"                    # --mg-bg 页面背景
@@ -316,17 +329,19 @@ def build_default_groups() -> list[Group]:
         [
             Step("set", "浏览器=chrome",
                  note="chrome / msedge / 完整 exe 路径"),
+            Step("set", "窗口标题=Chrome",
+                 note="窗口标题关键词；Edge 填 Edge，Firefox 填 Firefox"),
             Step("set", "网址=https://www.baidu.com",
                  note="要打开的链接"),
             Step("cmd", 'start "" "{浏览器}"',
                  note="按变量启动浏览器"),
-            Step("wait", "2",
-                 note="等浏览器启动；慢就改大"),
+            Step("window", "wait:{窗口标题}|10",
+                 note="等窗口出现并激活；慢就改大秒数"),
             Step("hotkey", "ctrl,l", note="聚焦地址栏"),
             Step("input", "{网址}", note="输入网址"),
             Step("hotkey", "enter", note="打开网址"),
         ],
-        note="预置模板：改前两步变量即可运行；浏览器启动慢时把等待秒数改大。",
+        note="预置模板：改浏览器 / 窗口标题 / 网址；窗口标题填浏览器窗口标题里的关键词。",
     )
     software = Group(
         "打开软件",
@@ -338,14 +353,79 @@ def build_default_groups() -> list[Group]:
         ],
         note="预置模板：把「软件」变量改成要打开的程序名或完整 exe 路径。",
     )
-    return [browser, software]
+    batch_urls = Group(
+        "批量打开网址",
+        [
+            Step("set", "浏览器=chrome",
+                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", "网址=https://www.baidu.com",
+                 note="默认网址；带数据时由「网址」列覆盖"),
+            Step("cmd", 'start "" "{浏览器}" "{网址}"',
+                 note="每个数据行打开一个链接"),
+            Step("wait", "1",
+                 note="间隔 1 秒，避免一次开太多"),
+        ],
+        note="预置模板：配合 Excel / CSV 的「网址」列带数据运行；没有数据时打开默认网址。",
+    )
+    upload = Group(
+        "上传文件",
+        [
+            Step("set", "文件路径=C:\\Users\\Public\\Documents\\示例.txt",
+                 note="要上传文件的完整路径"),
+            Step("click", "上传按钮.png",
+                 note="先把页面上的上传按钮截成这个文件名"),
+            Step("wait", "0.8",
+                 note="等文件选择框出现"),
+            Step("hotkey", "alt,n",
+                 note="把焦点切到文件名输入框"),
+            Step("input", "{文件路径}",
+                 note="粘贴完整路径；也可在数据里给「文件路径」列"),
+            Step("hotkey", "enter", note="确认上传"),
+        ],
+        note="预置模板：先截图上传按钮保存为 images/上传按钮.png，再改文件路径变量。",
+    )
+    workspace = Group(
+        "打开工作环境",
+        [
+            Step("set", "软件=notepad",
+                 note="先打开的程序，如 notepad / calc / 完整路径"),
+            Step("set", "浏览器=chrome",
+                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", "网址=https://www.baidu.com",
+                 note="要打开的链接"),
+            Step("cmd", 'start "" "{软件}"',
+                 note="启动常用软件"),
+            Step("wait", "0.5",
+                 note="给软件一点启动时间"),
+            Step("cmd", 'start "" "{浏览器}" "{网址}"',
+                 note="启动浏览器并打开网址"),
+        ],
+        note="预置模板：改软件 / 浏览器 / 网址，一键进入工作状态；可复制 cmd 步骤添加更多程序。",
+    )
+    return [browser, software, batch_urls, upload, workspace]
+
+
+def _is_default_placeholder(group: Group) -> bool:
+    """早期版本自动建的空「默认组」，只是占位符，没有用户内容。"""
+    return (group.name == "默认组" and not group.steps
+            and not group.note.strip())
+
+
+def _matches_legacy_browser(group: Group) -> bool:
+    """判断组是否仍是 v1 原封不动的浏览器模板（用户改过就不动）。"""
+    if group.note != LEGACY_BROWSER_NOTE:
+        return False
+    signature = tuple(
+        (step.type, step.content, step.repeat, step.note)
+        for step in group.steps)
+    return signature == LEGACY_BROWSER_SIGNATURE
 
 
 def seed_default_groups(project: Project, settings: dict) -> bool:
-    """按版本补充预置执行组，返回是否新增了组。
+    """按版本补充预置执行组，返回是否改动了组。
 
-    只在首次启动（或预置版本升级）时执行；按组名去重，绝不覆盖用户
-    已有组。补完后写回版本号，用户以后删掉预置组也不会再次出现。
+    只在首次启动（或预置版本升级）时执行；按组名去重，不覆盖用户改过的
+    组。补完后写回版本号，用户以后删掉预置组也不会再次出现。
     """
     try:
         seeded = int(settings.get(DEFAULT_GROUPS_KEY, 0) or 0)
@@ -356,22 +436,32 @@ def seed_default_groups(project: Project, settings: dict) -> bool:
 
     # 早期版本在空项目里自动建过一个空「默认组」，它只是占位符；
     # 仅当它是唯一的空组时才清掉，避免把用户自己建的空组误删。
-    if (len(project.groups) == 1
-            and project.groups[0].name == "默认组"
-            and not project.groups[0].steps
-            and not project.groups[0].note.strip()):
+    if len(project.groups) == 1 and _is_default_placeholder(project.groups[0]):
         project.groups.clear()
 
+    templates = build_default_groups()
+    changed = False
+    if seeded == 1:
+        # v1 → v2：只升级没改过的浏览器模板，并补 v2 新增的模板；
+        # 不把用户已删掉的「打开浏览器 / 打开软件」加回来。
+        browser = project.get("打开浏览器")
+        if browser is not None and _matches_legacy_browser(browser):
+            template = next(g for g in templates if g.name == "打开浏览器")
+            browser.steps = [step.copy() for step in template.steps]
+            browser.note = template.note
+            changed = True
+        templates = [g for g in templates
+                     if g.name not in DEFAULT_GROUPS_V1_NAMES]
+
     existing = set(project.names())
-    added = False
-    for group in build_default_groups():
+    for group in templates:
         if group.name in existing:
             continue
         project.groups.append(group)
         existing.add(group.name)
-        added = True
+        changed = True
     settings[DEFAULT_GROUPS_KEY] = DEFAULT_GROUPS_VERSION
-    return added
+    return changed
 
 
 class App(tk.Tk):
@@ -749,6 +839,8 @@ class App(tk.Tk):
                enabled=bool(self._redo_stack)),
             "-",
             MI("新建执行组", "add", self.add_group, "Ctrl+G", accent=True),
+            MI("恢复预置执行组…", "add", self.restore_default_groups,
+               "补回缺失模板"),
             MI("重命名执行组…", "pencil", self.rename_group),
             MI("复制为副本", "copy", self.duplicate_group),
             MI("删除执行组", "trash", self.delete_group, danger=True),
@@ -1847,6 +1939,32 @@ class App(tk.Tk):
         self._refresh_all(select_group=len(self.project.groups) - 1)
         self._log("info", f"已新建执行组：{name}")
 
+    def restore_default_groups(self) -> None:
+        """把缺失的预置执行组补回来；同名组保留，不覆盖用户内容。"""
+        existing = set(self.project.names())
+        missing = [group for group in build_default_groups()
+                   if group.name not in existing]
+        if not missing:
+            messagebox.showinfo("预置执行组",
+                                "所有预置执行组都已存在。", parent=self)
+            return
+        names = "、".join(group.name for group in missing)
+        if not messagebox.askyesno(
+                "恢复预置执行组",
+                f"将补回 {len(missing)} 个预置执行组：\n{names}\n\n"
+                "已有同名组会保留，不会覆盖。是否继续？",
+                parent=self):
+            return
+        self._push_undo("恢复预置执行组")
+        if (len(self.project.groups) == 1
+                and _is_default_placeholder(self.project.groups[0])):
+            self.project.groups.clear()
+        start = len(self.project.groups)
+        self.project.groups.extend(missing)
+        self._refresh_all(select_group=start)
+        self._log("info", f"已恢复预置执行组：{names}")
+        self._set_status(f"已恢复 {len(missing)} 个预置执行组")
+
     def rename_group(self) -> None:
         group = self._current_group()
         if group is None:
@@ -2364,6 +2482,8 @@ class App(tk.Tk):
             uikit.MenuItem("循环运行这个组", "loop", self.run_loop),
             "-",
             uikit.MenuItem("新建执行组…", "add", self.add_group, "Ctrl+G"),
+            uikit.MenuItem("恢复预置执行组…", "add",
+                           self.restore_default_groups, "补回缺失模板"),
             uikit.MenuItem("重命名执行组…", "pencil", self.rename_group),
             uikit.MenuItem("复制为副本", "copy", self.duplicate_group),
             "-",
