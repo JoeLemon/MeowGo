@@ -554,12 +554,12 @@ class CatCanvas(tk.Canvas):
             splinesteps=24)
 
         # 双耳：先画外耳，再画浅色内耳；耳根由后面的头盖住。
-        # 耳朵整体比旧版更大，耳尖用很小的几何圆角，保留三角耳的直边。
+        # 耳朵更短更圆，耳尖用较大的几何圆角，保留三角耳的大致轮廓。
         for outer, inner_ear, outer_r, inner_r in (
-                (((42, 57), (21, 4), (68, 33)),
-                 ((45, 50), (32, 15), (61, 33)), 6.5, 4.8),
-                (((98, 57), (119, 4), (72, 33)),
-                 ((95, 50), (108, 15), (79, 33)), 6.5, 4.8)):
+                (((42, 57), (21, 14), (68, 33)),
+                 ((45, 50), (32, 22), (61, 33)), 9.0, 6.8),
+                (((98, 57), (119, 14), (72, 33)),
+                 ((95, 50), (108, 22), (79, 33)), 9.0, 6.8)):
             self.create_polygon(
                 self._points(self._rounded_tip(*outer, outer_r)),
                 fill=self.ink, outline="")
@@ -585,12 +585,16 @@ class CatCanvas(tk.Canvas):
                                     fill=self.paper, outline="")
         right_eye = self.create_oval(*self._box([71, 49, 93, 71]),
                                      fill=self.paper, outline="")
-        # 瞳孔稍微向内靠，显得更呆萌
-        left_pupil = self.create_oval(*self._box([55, 57, 62, 66]),
-                                      fill=self.ink, outline="")
-        right_pupil = self.create_oval(*self._box([78, 57, 85, 66]),
-                                       fill=self.ink, outline="")
-        self._eye_items = [left_eye, right_eye, left_pupil, right_pupil]
+        # 瞳孔以眼睛中心为基准，左右取完全相同的尺寸，避免视觉大小不一。
+        pupil_w, pupil_h = 10, 12
+        pupils = [
+            self.create_oval(
+                *self._box([cx - pupil_w / 2, 60 - pupil_h / 2,
+                            cx + pupil_w / 2, 60 + pupil_h / 2]),
+                fill=self.ink, outline="")
+            for cx in (58, 82)
+        ]
+        self._eye_items = [left_eye, right_eye, *pupils]
 
         # 鼻子：暖橙色小椭圆（参考图的「嘴巴」也是这颗圆鼻子）
         self.create_oval(*self._box([66, 73, 74, 80]),
