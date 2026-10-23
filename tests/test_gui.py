@@ -25,6 +25,15 @@ gui_module.enable_dpi_awareness()
 
 app = gui_module.App()
 print(f"  INFO  DPI 缩放系数 = {app.scale}")
+# DEBUG: 抓合成按键来源
+_REAL_EG = tk.Misc.event_generate
+def _dbg_eg(self, sequence=None, **kw):
+    if "space" in str(sequence).lower() or kw.get("keysym") == "space":
+        import traceback
+        print("DEBUG EG", self, sequence, kw)
+        traceback.print_stack()
+    return _REAL_EG(self, sequence, **kw)
+tk.Misc.event_generate = _dbg_eg
 # App 初始化时会预置默认组；seed() 随后会覆盖项目，先留一份快照做断言
 _INITIAL_GROUPS = [(group.name,
                     [(step.type, step.content) for step in group.steps])
@@ -893,10 +902,14 @@ def test_run_with_data():
 
     gui_module.filedialog.askopenfilename = lambda *a, **k: path
     gui_module.DataPreviewDialog = _AutoPreview
+    # 预热 pyautogui（cv2/numpy，冷导入十几秒）：不让它发生在计时区间里
+    import pyautogui  # noqa: F401
+    # 真往桌面打字会漏到后面的测试窗口里（例如把空格打进别的输入框），
+    # 这里只验证数据驱动流程，输入动作换成空实现。
+    real_input_text = app.executor._input_text
+    app.executor._input_text = lambda *a, **k: None
     try:
         app.settings["delay"] = 0
-        # 预热 pyautogui（cv2/numpy，冷导入十几秒）：不让它发生在计时区间里
-        import pyautogui  # noqa: F401
         app.project.groups = [Group("数据组", [
             Step("input", "你好{名字}"), Step("wait", "0.05")])]
         app.group_index = 0
@@ -913,6 +926,7 @@ def test_run_with_data():
     finally:
         gui_module.filedialog.askopenfilename = real_ask
         gui_module.DataPreviewDialog = real_preview
+        app.executor._input_text = real_input_text
     text = app.log_text.get("1.0", "end")
     assert "数据驱动：共 2 行" in text, text
     assert "第 2/2 行" in text, text
@@ -1183,6 +1197,105 @@ def test_step_dialog_types():
     finally:
         gui_module.StepDialog = fake
     mark("步骤对话框类型")
+
+
+def test_searchable_type_combo():
+    """指令类型下拉：基础 / 执行组分组 + 模糊搜索 + 选中回填。"""
+    fake = gui_module.StepDialog
+    gui_module.StepDialog = _RealStepDialog
+    dialog = None
+    try:
+        dialog = _RealStepDialog(app, app.project, Step("click", "a.png"))
+        app.update()
+        dialog.combo._show_popup("")
+        rows = list(dialog.combo._rows)
+        labels = [text for text, _value in rows]
+        assert labels[0] == "基础", labels
+        assert "执行组" in labels, labels
+        dialog.combo._hide_popup()
+        # 跳字模糊：条 + 窗 命中「条件：窗口存在则执行」
+        dialog.combo._show_popup("条窗")
+        assert [v for _, v in dialog.combo._rows if v] == ["if_window"]
+        dialog.combo._hide_popup()
+        # 输入分组名能看到该组全部类型
+        dialog.combo._show_popup("执行组")
+        values = {v for _, v in dialog.combo._rows if v}
+        assert values == {"call", "if_image", "if_not_image", "if_else",
+                          "if_window"}, values
+        dialog.combo._choose("if_else")
+        app.update()
+        assert dialog.var_type.get() == "条件：二选一"
+        assert dialog._type_key() == "if_else"
+        assert dialog.combo.value == "if_else"
+    finally:
+        if dialog is not None and dialog.winfo_exists():
+            dialog.combo._hide_popup()
+            dialog.cancel()
+        gui_module.StepDialog = fake
+    mark("指令类型分组与模糊搜索")
+
+
+def test_type_combo_closes_on_outside_click():
+    """下拉打开后点对话框别处要自动收起，且这次点击不能被打断。"""
+    fake = gui_module.StepDialog
+    gui_module.StepDialog = _RealStepDialog
+    dialog = None
+    try:
+        dialog = _RealStepDialog(app, app.project, Step("click", "a.png"))
+        app.update()
+        combo = dialog.combo
+        combo._show_popup("")
+        app.update()
+        assert combo._popup is not None
+        # 点下拉自己（输入框 / 箭头）不算「点外面」，否则按钮一按就关、
+        # 松开又立刻弹开
+        combo.entry.event_generate(
+            "<Button-1>", x=5, y=5,
+            rootx=combo.entry.winfo_rootx() + 5,
+            rooty=combo.entry.winfo_rooty() + 5)
+        app.update()
+        assert combo._popup is not None, "点下拉自身不应收起面板"
+        target = dialog.note_entry
+        x = target.winfo_rootx() + 12
+        y = target.winfo_rooty() + target.winfo_height() // 2
+        left = combo._popup.winfo_rootx()
+        top = combo._popup.winfo_rooty()
+        assert not (left <= x < left + combo._popup.winfo_width()
+                    and top <= y < top + combo._popup.winfo_height()), \
+            "备注输入框被下拉面板挡住了，换一个目标控件"
+        target.event_generate("<Button-1>", x=12,
+                              y=target.winfo_height() // 2,
+                              rootx=x, rooty=y)
+        app.update()
+        assert combo._popup is None, "点击对话框其它位置后下拉应自动收起"
+        assert app.focus_get() is target, "这一下点击还应正常落到目标控件"
+    finally:
+        if dialog is not None and dialog.winfo_exists():
+            dialog.combo._hide_popup()
+            dialog.cancel()
+        gui_module.StepDialog = fake
+    mark("点击下拉外自动收起")
+
+
+def test_switch_widget():
+    """运行设置用的开关：点击 / 外部改值都能同步，主题色可重画。"""
+    flag = tk.BooleanVar(value=False)
+    switch = gui_module.uikit.Switch(app, flag)
+    switch.pack()
+    app.update()
+    try:
+        assert switch.get() is False
+        switch._toggle()
+        assert flag.get() is True and switch.get() is True
+        flag.set(False)
+        app.update()
+        assert switch._on is False, "外部改值后应同步重画"
+        switch.set(True)
+        assert flag.get() is True
+        switch.set_bg(gui_module.CARD)      # 主题切换路径不应报错
+    finally:
+        switch.destroy()
+    mark("开关控件")
 
 
 def test_capture_overlay_from_modal_dialog():
@@ -1675,7 +1788,7 @@ def test_theme_switch():
     assert str(app.log_card.cget("bg")) == "#1D1B18", "卡片底色应跟上"
     assert str(app.status_var.get()) != ""      # 界面还活着
     assert gui_module.TYPE_COLORS["click"] == "#FDAD63", "类型图标应提亮"
-    assert str(app.btn_run["bg"]) == "#12110F", "按钮底色应跟上"
+    assert str(app.btn_run["bg"]) == "#1D1B18", "顶栏按钮底色应跟卡片色"
     assert str(app.step_title.cget("fg")) == "#F5F2ED", "正文应换成暖白"
     assert str(app.log_text.cget("fg")) == "#F7F4EF", "日志正文保持暖白"
     # Canvas 小猫跟随主题重绘（图片版：按暗色重新量化像素图）
@@ -1697,7 +1810,7 @@ def test_theme_switch():
     assert gui_module.BG == light_bg
     assert gui_module.CARD == light_card
     assert app.cget("bg") == light_bg
-    assert str(app.btn_run["bg"]) == light_bg
+    assert str(app.btn_run["bg"]) == light_card
     assert gui_module.TYPE_COLORS["click"] == "#E8861F"
     assert str(app.step_title.cget("fg")) == "#080806", "正文应还原成墨黑"
     assert str(app.log_text.cget("fg")) == "#F5F2ED", "日志正文仍保持暖白"
@@ -2233,6 +2346,9 @@ def finish():
         test_log_level_coloring()
         test_shortcuts_dialog()
         test_step_dialog_types()
+        test_searchable_type_combo()
+        test_type_combo_closes_on_outside_click()
+        test_switch_widget()
         test_capture_overlay_from_modal_dialog()
         test_type_icons_cover_all()
         test_step_dialog_new_types()

@@ -344,8 +344,10 @@ def main(argv=None) -> int:
     log(f"MeowGo 跨平台打包  [{platform_label()} / {platform.machine()}]")
     check_python()
     python_exe = resolve_interpreter(args)
-    check_runtime(python_exe, args)
+    # 先装依赖再检查：新建的虚拟环境里 PIL/cv2 等一开始肯定不存在，
+    # 反过来检查会把「还没装」误判成「装完仍缺」，导致全新环境永远打不了包。
     install_deps(python_exe, args)
+    check_runtime(python_exe, args)
     icon = prepare_icon(python_exe, args)
     if args.clean:
         clean_artifacts()

@@ -30,6 +30,7 @@ tests/*.png
 
 # ---- 虚拟环境 ----
 .venv/
+.venv.broken-*/
 venv/
 env/
 ENV/

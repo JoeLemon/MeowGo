@@ -149,6 +149,11 @@ TYPE_ICONS = {
 # 条件步骤里「图片 | 组名」两段式的类型（对话框用图形化双输入框）
 PIPE_CONDITION_TYPES = ("if_image", "if_not_image", "if_window")
 
+# 新增步骤对话框里「执行组」分类：这些类型会调用 / 进入其它执行组。
+# 其余类型统一归入「基础」，方便在下拉里按分组浏览。
+TYPE_GROUP_EXEC = {"call", "if_image", "if_not_image", "if_else",
+                   "if_window"}
+
 # 每种步骤类型的图标色调：遵循「墨黑为主、暖橙点睛、语义色克制」。
 # 鼠标 / 操作类用暖橙，输入类用信息蓝，等待类用警告黄，键盘类用成功绿，
 # 条件类用错误红；其余使用暖中性灰，避免界面出现彩虹色。
@@ -536,7 +541,6 @@ class App(tk.Tk):
         self._build_style()
         self._set_icon()
         self._build_header()
-        self._build_toolbar()
         self._build_statusbar()
         self._build_log()
         self._build_body()
@@ -946,10 +950,15 @@ class App(tk.Tk):
 
         self._build_menubar(left)
 
+        # 右侧操作区：设置 / 撤销重做 / 单步 / 运行控制（原工具栏合并到菜单栏右侧）
+        actions = tk.Frame(header, bg=CARD)
+        actions.pack(side="right", padx=(0, self.s(18)))
+        self._build_header_actions(actions)
+
         self.autosave_label = tk.Label(
             header, text="执行组自动保存", bg=CARD, fg=MUTED,
             font=(UI_FONT, 9))
-        self.autosave_label.pack(side="right", padx=self.s(24))
+        self.autosave_label.pack(side="right", padx=(self.s(10), self.s(6)))
 
     def _refresh_brand_logo(self) -> None:
         """主题切换后重新取 Logo（深色主题用暖白反白版本）。"""
@@ -963,41 +972,45 @@ class App(tk.Tk):
             label.configure(image="", text=APP_TITLE, fg=TEXT,
                             font=(UI_FONT, 13, "bold"))
 
-    def _build_toolbar(self) -> None:
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=self.s(24), pady=(self.s(12), self.s(6)))
+    def _build_header_actions(self, bar) -> None:
+        """顶栏右侧的操作按钮：设置 / 撤销重做 / 单步 / 运行控制。"""
 
-        def add(text, icon, cmd, kind="solid", pad=self.s(4), side="left",
-                tooltip=""):
+        def add(text, icon, cmd, kind="ghost", pad=self.s(8), tooltip="",
+                icon_size=15, height=30):
             button = uikit.RoundButton(bar, text, icon, cmd, kind=kind,
-                                       scale=self.scale, bg=BG, tooltip=tooltip)
-            button.pack(side=side, padx=pad)
+                                       scale=self.scale, bg=CARD, height=height,
+                                       pad=pad, icon_size=icon_size,
+                                       tooltip=tooltip)
+            button.pack(side="left", padx=self.s(1))
             return button
 
-        # 导入 / 导出 Excel 走菜单栏「文件」，工具栏不再重复放按钮
-        self.btn_settings = add("设置", "sliders", self.open_settings,
-                                kind="ghost", tooltip="运行设置")
-        self.btn_new_group = add("＋ 新建组", "add", self.add_group,
-                                 kind="ghost", tooltip="新建执行组（Ctrl+G）")
-        self.btn_undo = add("", "undo", self.undo, kind="ghost",
-                            pad=self.s(2), tooltip="撤销（Ctrl+Z）")
-        self.btn_redo = add("", "redo", self.redo, kind="ghost",
-                            pad=self.s(2), tooltip="重做（Ctrl+Y）")
+        def separator() -> None:
+            tk.Frame(bar, bg=BORDER, width=1, height=self.s(20)).pack(
+                side="left", padx=self.s(8))
+
+        self.btn_settings = add("", "sliders", self.open_settings,
+                                pad=self.s(5), tooltip="运行设置")
+        self.btn_undo = add("", "undo", self.undo, pad=self.s(5),
+                            tooltip="撤销（Ctrl+Z）")
+        self.btn_redo = add("", "redo", self.redo, pad=self.s(5),
+                            tooltip="重做（Ctrl+Y）")
         self.btn_undo.set_enabled(False)
         self.btn_redo.set_enabled(False)
-        self.btn_debug = add("单步", "debug", self.toggle_debug, kind="ghost",
+        separator()
+        self.btn_debug = add("单步", "debug", self.toggle_debug,
+                             pad=self.s(8),
                              tooltip="单步调试：每步执行前确认（F8）")
         if self.debug_mode:
             self.btn_debug.set_kind("accent")
-
-        self.btn_stop = add("停止", "stop", self.stop_run, kind="danger",
-                            side="right", tooltip="停止（全局热键 F9）")
-        self.btn_pause = add("暂停", "pause", self.toggle_pause, side="right",
-                             tooltip="暂停 / 继续")
-        self.btn_loop = add("循环", "loop", self.run_loop, side="right",
-                            tooltip="循环运行当前组")
+        separator()
         self.btn_run = add("运行组", "run", self.run_group, kind="accent",
-                           side="right", tooltip="运行当前组 F5")
+                           pad=self.s(10), tooltip="运行当前组 F5")
+        self.btn_loop = add("循环", "loop", self.run_loop, pad=self.s(8),
+                            tooltip="循环运行当前组")
+        self.btn_pause = add("暂停", "pause", self.toggle_pause, pad=self.s(8),
+                             tooltip="暂停 / 继续")
+        self.btn_stop = add("停止", "stop", self.stop_run, kind="danger",
+                            pad=self.s(9), tooltip="停止（全局热键 F9）")
         self.btn_stop.set_enabled(False)
         self.btn_pause.set_enabled(False)
 
@@ -1091,7 +1104,7 @@ class App(tk.Tk):
                  fg=MUTED, font=(UI_FONT, 9)).pack(
             side="left", padx=(self.s(12), 0))
         self.btn_add_step = uikit.RoundButton(
-            head, "＋ 步骤", "add", self.add_step, kind="ghost",
+            head, "新增步骤", "add", self.add_step, kind="ghost",
             scale=self.scale, bg=CARD, height=28, pad=self.s(8),
             font_size=9, tooltip="新增步骤（Ctrl+Enter）")
         self.btn_add_step.pack(side="right")
@@ -1140,16 +1153,21 @@ class App(tk.Tk):
         self.step_tree.column("#0", width=self.s(30), stretch=False)
         for key, (text, width, stretch) in {
                 "no": ("#", 44, False), "type": ("类型", 140, False),
-                "content": ("内容", 320, True), "repeat": ("重复", 60, False),
-                "note": ("备注", 180, True)}.items():
+                "content": ("内容", 340, False), "repeat": ("重复", 64, False),
+                "note": ("备注", 200, False)}.items():
             self.step_tree.heading(key, text=text)
             self.step_tree.column(key, width=self.s(width), anchor="w",
-                                  stretch=stretch)
-        self.step_tree.pack(side="left", fill="both", expand=True)
+                                  minwidth=self.s(40), stretch=stretch)
+        # 列宽固定后，窗口变窄时用横向滚动条查看被挡住的列
+        scroll_x = ttk.Scrollbar(wrap, orient="horizontal",
+                                 command=self.step_tree.xview)
+        scroll_x.pack(side="bottom", fill="x")
         scroll2 = ttk.Scrollbar(wrap, orient="vertical",
                                 command=self.step_tree.yview)
         scroll2.pack(side="right", fill="y")
-        self.step_tree.configure(yscrollcommand=scroll2.set)
+        self.step_tree.pack(side="left", fill="both", expand=True)
+        self.step_tree.configure(yscrollcommand=scroll2.set,
+                                 xscrollcommand=scroll_x.set)
         # 标签创建顺序即优先级（先建的赢）：运行染色必须建在斑马纹之前，
         # 否则 executing/done/failed 会被斑马纹盖掉。
         self.step_tree.tag_configure("running", background=MARK_RUNNING)
@@ -1476,6 +1494,9 @@ class App(tk.Tk):
                 accent=fg_map.get(widget.accent, widget.accent),
                 nose=fg_map.get(widget.nose, widget.nose))
         elif isinstance(widget, uikit.RoundButton):
+            bg = _get(widget, "bg")
+            widget.set_bg(bg_map.get(bg, bg))
+        elif isinstance(widget, uikit.Switch):
             bg = _get(widget, "bg")
             widget.set_bg(bg_map.get(bg, bg))
         elif isinstance(widget, uikit.RoundedCard):
@@ -4217,14 +4238,16 @@ class StepDialog(BaseDialog):
 
         self.label("指令类型", 0)
         self._type_labels = [info[0] for info in STEP_TYPES.values()]
+        self._type_by_label = {info[0]: key
+                               for key, info in STEP_TYPES.items()}
         self.var_type = tk.StringVar()
-        self.combo = ttk.Combobox(
-            self, textvariable=self.var_type, state="readonly",
-            values=self._type_labels,
-            font=("Microsoft YaHei UI", 9))
+        # 分组 + 模糊搜索：基础指令与会调用执行组的指令分开展示
+        self.combo = uikit.SearchableCombo(
+            self, self._type_options(), variable=self.var_type,
+            command=self._sync, scale=parent.scale, bg=CARD,
+            font_size=9, width=18)
         self.combo.grid(row=0, column=1, sticky="ew", padx=(0, parent.s(16)),
                         pady=parent.s(5))
-        self.combo.bind("<<ComboboxSelected>>", lambda e: self._sync())
 
         self.label("内容", 1)
         content = tk.Frame(self, bg=CARD)
@@ -4484,6 +4507,7 @@ class StepDialog(BaseDialog):
             on_cancel=self._record_cancelled,
             on_hint=lambda text: self._show_hint(text))
         self.var_type.set(editing.label())
+        self.combo.set(editing.type)
         self._sync()
         self.entry.focus_set()
         self.center()
@@ -4586,12 +4610,23 @@ class StepDialog(BaseDialog):
         self.after(350, run)
 
     # -- 辅助 -------------------------------------------------------------
+    @staticmethod
+    def _type_options() -> list[tuple[str, str, str]]:
+        """指令类型下拉项：(内部值, 显示名, 分组)。"""
+        return [(key, info[0],
+                 "执行组" if key in TYPE_GROUP_EXEC else "基础")
+                for key, info in STEP_TYPES.items()]
+
     def _type_key(self) -> str:
-        try:
-            return list(STEP_TYPES)[self._type_labels.index(
-                self.var_type.get())]
-        except (ValueError, IndexError):
-            return "click"
+        text = self.var_type.get().strip()
+        if "·" in text:                # 兼容旧格式「3 · 左键单击」
+            text = text.split("·", 1)[1].strip()
+        if text in self._type_by_label:
+            return self._type_by_label[text]
+        if text in STEP_TYPES:
+            return text
+        # 输入框里是搜索词而不是完整类型名：仍按上次真正选中的类型走
+        return self.combo.value or "click"
 
     def _sync(self) -> None:
         if self._recorder.active:
@@ -5632,21 +5667,21 @@ class SettingsDialog(BaseDialog):
         self.label("运行时显示迷你进度条", 3)
         self.var_mini = tk.BooleanVar(
             value=bool(settings.get("show_mini_bar", True)))
-        ttk.Checkbutton(self, variable=self.var_mini).grid(
+        uikit.Switch(self, self.var_mini, scale=parent.scale, bg=CARD).grid(
             row=3, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
         self.label("失败时保存截图", 4)
         self.var_shot = tk.BooleanVar(
             value=bool(settings.get("shot_on_fail", True)))
-        ttk.Checkbutton(self, variable=self.var_shot).grid(
+        uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
             row=4, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
         self.label("数据跑完写结果文件", 5)
         self.var_results = tk.BooleanVar(
             value=bool(settings.get("save_results", True)))
-        ttk.Checkbutton(self, variable=self.var_results).grid(
+        uikit.Switch(self, self.var_results, scale=parent.scale, bg=CARD).grid(
             row=5, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 

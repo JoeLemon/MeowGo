@@ -10,7 +10,7 @@ import math
 import random
 import sys
 import tkinter as tk
-from tkinter import font as tkfont
+from tkinter import font as tkfont, ttk
 from typing import Optional
 
 from PIL import Image, ImageDraw, ImageTk
@@ -1253,3 +1253,517 @@ class RoundButton(tk.Canvas):
     def refresh(self) -> None:
         """主题切换后按新配色重画（ ghost 按钮的底色取自父容器）。"""
         self._rebuild()
+
+
+# ---------------------------------------------------------------------------
+# 开关（switch）：替代 ttk.Checkbutton，视觉更贴近现代设置面板
+# ---------------------------------------------------------------------------
+
+class Switch(tk.Canvas):
+    """圆角开关：点击切换绑定的 BooleanVar，也可由外部改值自动重画。"""
+
+    def __init__(self, master, variable: tk.BooleanVar, command=None,
+                 scale: float = 1.0, bg: str = "#FFFFFF",
+                 tooltip: str = ""):
+        self.scale = scale
+        self.variable = variable
+        self.command = command
+        self.track_w = max(30, int(round(42 * scale)))
+        self.track_h = max(18, int(round(24 * scale)))
+        super().__init__(master, width=self.track_w + 2,
+                         height=self.track_h + 2, bg=bg,
+                         highlightthickness=0, bd=0, cursor="hand2",
+                         takefocus=True)
+        self._on = bool(variable.get())
+        self._hover = False
+        self._trace = variable.trace_add("write", self._on_variable)
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<space>", self._toggle)
+        self.bind("<Return>", self._toggle)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Destroy>", self._on_destroy)
+        if tooltip:
+            self._tip = Tooltip(self, tooltip)
+        self._draw()
+
+    # -- 绘制 -------------------------------------------------------------
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = self.track_w, self.track_h
+        dark = _DARK_MODE["on"]
+        if self._on:
+            track = "#E8861F" if self._hover else "#FDAD63"
+        elif dark:
+            track = "#4A443C" if self._hover else "#35312B"
+        else:
+            track = "#D4CFC6" if self._hover else "#E6E2DB"
+        round_rect(self, 1, 1, w + 1, h + 1, h / 2, fill=track, outline="")
+        pad = max(2, int(round(2.5 * self.scale)))
+        knob = (h - pad * 2) / 2
+        cx = (w + 1 - pad - knob) if self._on else (1 + pad + knob)
+        cy = (h + 2) / 2
+        self.create_oval(cx - knob, cy - knob, cx + knob, cy + knob,
+                         fill="#FFFFFF", outline="")
+
+    # -- 交互 -------------------------------------------------------------
+    def _toggle(self, _event=None) -> str:
+        self.variable.set(not bool(self.variable.get()))
+        return "break"
+
+    def _on_variable(self, *_args) -> None:
+        on = bool(self.variable.get())
+        if on != self._on:
+            self._on = on
+            self._draw()
+
+    def _on_enter(self, _event=None) -> None:
+        self._hover = True
+        self._draw()
+
+    def _on_leave(self, _event=None) -> None:
+        self._hover = False
+        self._draw()
+
+    def _on_destroy(self, event=None) -> None:
+        if event is not None and event.widget is not self:
+            return
+        try:
+            self.variable.trace_remove("write", self._trace)
+        except (tk.TclError, ValueError):
+            pass
+
+    # -- 外部接口 ---------------------------------------------------------
+    def get(self) -> bool:
+        return bool(self.variable.get())
+
+    def set(self, value: bool) -> None:
+        self.variable.set(bool(value))
+
+    def set_bg(self, color: str) -> None:
+        """主题切换：换底色后重画（轨道颜色取自全局暗色开关）。"""
+        self.configure(bg=color)
+        self._draw()
+
+
+# ---------------------------------------------------------------------------
+# 可搜索的下拉选择器（分组 + 模糊匹配）
+# ---------------------------------------------------------------------------
+
+class _ComboOption:
+    """下拉选项：value 是内部值，label 是显示文字，group 是分组名。"""
+
+    __slots__ = ("value", "label", "group")
+
+    def __init__(self, value: str, label: str, group: str = ""):
+        self.value = value
+        self.label = label
+        self.group = group
+
+
+def _fuzzy_match(query: str, text: str) -> bool:
+    """模糊匹配：先看子串，再按顺序逐个字符找（支持跳字）。"""
+    q = query.strip().lower()
+    if not q:
+        return True
+    hay = text.lower()
+    if q in hay:
+        return True
+    pos = -1
+    for char in q:
+        pos = hay.find(char, pos + 1)
+        if pos < 0:
+            return False
+    return True
+
+
+class SearchableCombo(tk.Frame):
+    """既可下拉选择、又能输入关键词过滤的输入框（支持分组标题）。
+
+    用法：
+        combo = SearchableCombo(master, [(key, label, "基础"), ...],
+                                variable=var, command=on_select)
+        combo.get()        # 当前显示文字
+        combo.value        # 当前选中项的内部值（未选过为空）
+        combo.set(key)     # 按内部值 / 显示文字选中
+    """
+
+    def __init__(self, master, options, variable: tk.StringVar | None = None,
+                 command=None, scale: float = 1.0, bg: str = "#FFFFFF",
+                 font_size: int = 9, width: int = 22):
+        super().__init__(master, bg=bg)
+        self.scale = scale
+        self.bg = bg
+        self.command = command
+        self.font = tkfont.Font(family="Microsoft YaHei UI", size=font_size)
+        self.font_size = font_size
+        self._items = [_ComboOption(*item) if isinstance(item, tuple) else item
+                       for item in options]
+        self._group_order: list[str] = []
+        for option in self._items:
+            if option.group and option.group not in self._group_order:
+                self._group_order.append(option.group)
+        if any(not option.group for option in self._items):
+            self._group_order.insert(0, "")
+        self.var = variable if variable is not None else tk.StringVar()
+        self._value = ""
+        self._popup: tk.Frame | None = None
+        self._listbox: tk.Listbox | None = None
+        self._rows: list[tuple[str, str | None]] = []
+        self._enabled = True
+        self._height = max(24, int(round(32 * scale)))
+        self._suppress_focus = False
+        self._outside_bind: str | None = None
+
+        self.entry = ttk.Entry(self, textvariable=self.var,
+                               width=width,
+                               font=("Microsoft YaHei UI", font_size))
+        self.entry.pack(side="left", fill="x", expand=True)
+        self.btn = RoundButton(self, "", "chevron_down", self._toggle_popup,
+                               kind="ghost", scale=scale, bg=bg,
+                               height=self._height, pad=4, icon_size=12,
+                               tooltip="展开 / 收起指令类型")
+        self.btn.pack(side="right", padx=(2, 0))
+        self.entry.bind("<KeyRelease>", self._on_key)
+        self.entry.bind("<Down>", self._on_down)
+        self.entry.bind("<Up>", self._on_up)
+        self.entry.bind("<Return>", self._on_return)
+        self.entry.bind("<KP_Enter>", self._on_return)
+        self.entry.bind("<Escape>", self._on_escape)
+        self.entry.bind("<FocusIn>", self._on_focus_in)
+        self.entry.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<Destroy>", self._on_destroy)
+
+    # -- 兼容 Combobox 的常用接口 ------------------------------------------
+    def set(self, value: str) -> None:
+        """按内部值或显示文字选中；带「1 · 」旧编号前缀也能识别。"""
+        text = str(value).strip()
+        if "·" in text:
+            text = text.split("·", 1)[1].strip()
+        for option in self._items:
+            if text in (option.value, option.label):
+                self._value = option.value
+                self.var.set(option.label)
+                return
+        self.var.set(text)
+
+    def get(self) -> str:
+        return self.var.get()
+
+    @property
+    def value(self) -> str:
+        return self._value
+
+    def cget(self, key: str):
+        if key == "values":
+            return [option.label for option in self._items]
+        if key == "state":
+            return "normal" if self._enabled else "disabled"
+        return super().cget(key)
+
+    def configure(self, **kwargs):
+        state = kwargs.pop("state", None)
+        if state is not None:
+            self._enabled = str(state) != "disabled"
+            self.entry.configure(state="normal" if self._enabled else "disabled")
+            self.btn.set_enabled(self._enabled)
+            if not self._enabled:
+                self._hide_popup()
+        if kwargs:
+            super().configure(**kwargs)
+
+    config = configure
+
+    def focus_set(self) -> None:  # type: ignore[override]
+        self.entry.focus_set()
+
+    # -- 下拉列表 ----------------------------------------------------------
+    def _label_of(self, value: str) -> str:
+        for option in self._items:
+            if option.value == value:
+                return option.label
+        return ""
+
+    def _rows_for(self, query: str) -> list[tuple[str, str | None]]:
+        """按分组生成行；分组标题的 value 为 None（不可选）。"""
+        rows: list[tuple[str, str | None]] = []
+        for group in self._group_order:
+            matched = [option for option in self._items
+                       if option.group == group
+                       and _fuzzy_match(query,
+                                        f"{option.label} {option.group} "
+                                        f"{option.value}")]
+            if not matched:
+                continue
+            if group:
+                rows.append((group, None))
+            rows.extend((option.label, option.value) for option in matched)
+        if not rows:                    # 没有分组的兜底 / 无匹配提示
+            rows.append(("没有匹配的指令类型", None))
+        return rows
+
+    def _toggle_popup(self) -> None:
+        if self._popup is not None:
+            self._hide_popup()
+        else:
+            # 点下拉箭头后把焦点放到输入框：接着打字就能模糊搜索
+            self._suppress_focus = True
+            try:
+                self.entry.focus_set()
+                self.entry.select_range(0, "end")
+            except tk.TclError:
+                pass
+            self._show_popup("")
+            self.after(150, self._release_focus_guard)
+
+    def _popup_geometry(self) -> tuple[int, int, int, int]:
+        """计算下拉面板在宿主窗口内的位置与高度（放不下就向上展开）。"""
+        host = self.winfo_toplevel()
+        line = self.font.metrics("linespace")
+        row_h = line + 2
+        width = max(self.winfo_width(), int(round(200 * self.scale)))
+        desired = min(len(self._rows), 10) * row_h + 6
+        x = self.winfo_rootx() - host.winfo_rootx()
+        below = self.winfo_rooty() - host.winfo_rooty() \
+            + self.winfo_height() + 2
+        above = self.winfo_rooty() - host.winfo_rooty() - 2
+        host_h = host.winfo_height()
+        if below + desired <= host_h:
+            y, height = below, desired
+        elif above - desired >= 0:
+            y, height = above - desired, desired
+        else:
+            y = below
+            height = max(row_h + 6, host_h - y - 4)
+        return x, y, width, height
+
+    def _show_popup(self, query: str) -> None:
+        if not self._enabled:
+            return
+        self._rows = self._rows_for(query)
+        self._destroy_popup()
+        # 下拉面板做成对话框里的内嵌 Frame（不是独立 Toplevel）：
+        # 这样不会抢 grab，点界面其它地方能正常触发点击并顺手收起。
+        host = self.winfo_toplevel()
+        x, y, width, height = self._popup_geometry()
+        row_h = self.font.metrics("linespace") + 2
+        visible = max(1, (height - 6) // row_h)
+        frame = tk.Frame(host, bg=MENU_BORDER, bd=0, highlightthickness=0)
+        inner = tk.Frame(frame, bg=MENU_CARD)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        self._popup = frame
+        self._listbox = tk.Listbox(
+            inner, bd=0, highlightthickness=0, relief="flat",
+            bg=MENU_CARD, fg=MENU_TEXT, selectbackground=MENU_HOVER,
+            selectforeground=MENU_TEXT, activestyle="none",
+            font=self.font, exportselection=False, takefocus=0)
+        self._listbox.pack(side="left", fill="both", expand=True)
+        if len(self._rows) > visible:
+            scroll = ttk.Scrollbar(inner, orient="vertical",
+                                   command=self._listbox.yview)
+            scroll.pack(side="right", fill="y")
+            self._listbox.configure(yscrollcommand=scroll.set)
+        for text, value in self._rows:
+            self._listbox.insert("end", f"  {text}" if value is None else
+                                 f"   {text}")
+            if value is None:
+                self._listbox.itemconfigure(
+                    "end", foreground=MENU_MUTED,
+                    background=_mix(MENU_CARD, MENU_TEXT, 0.05),
+                    selectbackground=_mix(MENU_CARD, MENU_TEXT, 0.05),
+                    selectforeground=MENU_MUTED)
+        # 当前值预高亮，打开就能看到上次选的类型；搜索后若原值不匹配，
+        # 默认落在第一条结果上，直接回车即可选中
+        active = self._index_of(self._value)
+        if active is None:
+            active = next((i for i, (_text, value) in enumerate(self._rows)
+                           if value is not None), None)
+        if active is not None:
+            self._listbox.selection_set(active)
+            self._listbox.activate(active)
+            self._listbox.see(active)
+            if active > 0 and self._row_value(active - 1) is None:
+                self._listbox.see(active - 1)   # 分组标题不要被滚出去
+        self._listbox.bind("<Button-1>", self._on_click)
+        self._listbox.bind("<Motion>", self._on_motion)
+        self._listbox.bind("<MouseWheel>", self._on_wheel)
+        frame.place(x=x, y=y, width=width, height=height)
+        frame.lift()
+        # 点面板之外的地方：先让点击照常落到目标控件，再收起下拉
+        self._outside_bind = host.bind("<Button-1>", self._on_any_click,
+                                       add="+")
+
+    def _destroy_popup(self) -> None:
+        bind_id = self._outside_bind
+        self._outside_bind = None
+        if bind_id:
+            try:
+                self.winfo_toplevel().unbind("<Button-1>", bind_id)
+            except tk.TclError:
+                pass
+        popup, self._popup = self._popup, None
+        self._listbox = None
+        if popup is None:
+            return
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+
+    def _hide_popup(self) -> None:
+        """收起下拉并恢复成上次真正选中的类型名。"""
+        if self._popup is None:
+            return
+        self._destroy_popup()
+        label = self._label_of(self._value)
+        if label:
+            self.var.set(label)
+
+    def _on_any_click(self, event) -> None:
+        """点击下拉面板以外的地方时自动收起。"""
+        popup = self._popup
+        if popup is None:
+            return
+        # 点自己（输入框 / 箭头）或面板内部都不算「点外面」：箭头要留给
+        # 自己的 toggle 处理，否则按下先收起、松开又立刻弹开。
+        widget = event.widget
+        while widget is not None:
+            if widget is self or widget is popup:
+                return
+            widget = getattr(widget, "master", None)
+        self._hide_popup()
+
+    def _on_wheel(self, event) -> str:
+        if self._listbox is not None:
+            self._listbox.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _index_of(self, value: str) -> int | None:
+        for index, (_text, row_value) in enumerate(self._rows):
+            if row_value == value:
+                return index
+        return None
+
+    def _row_value(self, index: int) -> str | None:
+        if 0 <= index < len(self._rows):
+            return self._rows[index][1]
+        return None
+
+    # -- 交互 -------------------------------------------------------------
+    def _on_key(self, event) -> None:
+        if event.keysym in ("Down", "Up", "Return", "KP_Enter", "Escape",
+                            "Tab", "Left", "Right", "Home", "End",
+                            "Prior", "Next", "Shift_L", "Shift_R",
+                            "Control_L", "Control_R", "Alt_L", "Alt_R",
+                            "Caps_Lock", "Num_Lock"):
+            return
+        self._show_popup(self.var.get())
+
+    def _on_down(self, _event=None) -> str:
+        self._step(1)
+        return "break"
+
+    def _on_up(self, _event=None) -> str:
+        self._step(-1)
+        return "break"
+
+    def _step(self, delta: int) -> None:
+        if self._popup is None:
+            self._show_popup("")
+        if self._listbox is None or not self._rows:
+            return
+        current = self._current_index()
+        index = current
+        for _ in range(len(self._rows)):
+            index = (index + delta) % len(self._rows)
+            if self._row_value(index) is not None:
+                break
+        self._listbox.selection_clear(0, "end")
+        self._listbox.selection_set(index)
+        self._listbox.activate(index)
+        self._listbox.see(index)
+
+    def _current_index(self) -> int:
+        if self._listbox is None:
+            return -1
+        selection = self._listbox.curselection()
+        return int(selection[0]) if selection else -1
+
+    def _on_return(self, _event=None) -> str:
+        if self._popup is not None:
+            index = self._current_index()
+            value = self._row_value(index)
+            if value is not None:
+                self._choose(value)
+                return "break"
+        return "break"
+
+    def _on_escape(self, _event=None) -> str:
+        self._hide_popup()
+        return "break"
+
+    def _on_click(self, event) -> str:
+        index = self._listbox.nearest(event.y) if self._listbox else -1
+        value = self._row_value(index)
+        if value is not None:
+            self._choose(value)
+        return "break"
+
+    def _on_motion(self, event) -> None:
+        if self._listbox is None:
+            return
+        index = self._listbox.nearest(event.y)
+        if self._row_value(index) is None:
+            return
+        self._listbox.selection_clear(0, "end")
+        self._listbox.selection_set(index)
+
+    def _choose(self, value: str) -> None:
+        self._value = value
+        self.var.set(self._label_of(value))
+        self._hide_popup()
+        self._suppress_focus = True
+        try:
+            self.entry.focus_set()
+        except tk.TclError:
+            pass
+        self.after(150, self._release_focus_guard)
+        if self.command:
+            self.command()
+
+    def _release_focus_guard(self) -> None:
+        self._suppress_focus = False
+
+    def _on_focus_in(self, _event=None) -> None:
+        try:
+            self.entry.select_range(0, "end")
+        except tk.TclError:
+            pass
+        if not self._suppress_focus:
+            self._show_popup("")
+
+    def _on_focus_out(self, _event=None) -> None:
+        self.after(80, self._close_if_focus_left)
+
+    def _close_if_focus_left(self) -> None:
+        if self._popup is None:
+            return
+        try:
+            focus = self.focus_get()
+        except KeyError:                # 焦点控件刚好被销毁
+            focus = None
+        widget = focus
+        while widget is not None:
+            if widget is self or widget is self._popup:
+                return
+            widget = getattr(widget, "master", None)
+        self._hide_popup()
+
+    def _on_destroy(self, event=None) -> None:
+        if event is not None and event.widget is not self:
+            return
+        self._destroy_popup()
+
+    def destroy(self) -> None:  # noqa: D401 - tkinter override
+        self._destroy_popup()
+        super().destroy()
