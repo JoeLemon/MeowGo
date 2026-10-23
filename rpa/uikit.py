@@ -343,9 +343,9 @@ def icon(name: str, size: int, color: str) -> ImageTk.PhotoImage:
 class CatCanvas(tk.Canvas):
     """空状态用的猫猫插画：Canvas 绘制，只画上半身。
 
-    参考掘金「使用 canvas 绘制一只超萌小黑猫」的造型，用椭圆、平滑多边形
-    和圆头线条重画成 Tk Canvas 版本。坐标按 140×122 设计，scale 负责按
-    DPI 缩放；颜色由调用方传入，主题切换时用 set_colors() 重绘。
+    参考黑猫参考图的尖耳、杏仁眼、倒三角鼻、Y 嘴与项圈造型，用椭圆、
+    平滑多边形和圆头线条重画成 Tk Canvas 版本。坐标按 140×122 设计，
+    scale 负责按 DPI 缩放；颜色由调用方传入，主题切换时用 set_colors() 重绘。
     """
 
     DESIGN_W = 140
@@ -402,46 +402,6 @@ class CatCanvas(tk.Canvas):
     def _line(self, value: float) -> int:
         return max(1, int(round(value * self._k)))
 
-    @staticmethod
-    def _rounded_tip(base1, tip, base2, radius: float):
-        """把三角形耳尖换成指定半径的圆角，保留两条直边。
-
-        返回 base1 → 切点 → 圆弧 → 切点 → base2 的多边形点列。
-        Tk 的 smooth 多边形会把整只耳朵都揉圆，这里用几何圆弧只处理耳尖。
-        """
-        def unit(x, y):
-            length = math.hypot(x, y) or 1.0
-            return x / length, y / length
-
-        u1 = unit(base1[0] - tip[0], base1[1] - tip[1])
-        u2 = unit(base2[0] - tip[0], base2[1] - tip[1])
-        dot = max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1]))
-        half = max(0.08, math.acos(dot) / 2)          # 耳尖夹角的一半
-        r = max(0.5, float(radius))
-        dist = r / math.sin(half)                     # 圆心到耳尖的距离
-        bis = unit(u1[0] + u2[0], u1[1] + u2[1])      # 指向耳朵内部
-        # 把顶点往外多走一点，圆角最外侧正好落在原耳尖位置。
-        ex = tip[0] - bis[0] * (dist - r)
-        ey = tip[1] - bis[1] * (dist - r)
-        cx = ex + bis[0] * dist
-        cy = ey + bis[1] * dist
-        tangent = r / math.tan(half)
-        p1 = (ex + u1[0] * tangent, ey + u1[1] * tangent)
-        p2 = (ex + u2[0] * tangent, ey + u2[1] * tangent)
-        a1 = math.atan2(p1[1] - cy, p1[0] - cx)
-        a2 = math.atan2(p2[1] - cy, p2[0] - cx)
-        at = math.atan2(tip[1] - cy, tip[0] - cx)
-        span = (a2 - a1) % (2 * math.pi)
-        if (at - a1) % (2 * math.pi) > span:
-            span -= 2 * math.pi                      # 走经过耳尖的那一侧
-        points = [base1, p1]
-        for index in range(1, 10):
-            angle = a1 + span * index / 10
-            points.append((cx + r * math.cos(angle),
-                           cy + r * math.sin(angle)))
-        points += [p2, base2]
-        return points
-
     # ------------------------------------------------------- 空状态小动画
     def _cancel_after(self, attr: str) -> None:
         job = getattr(self, attr, None)
@@ -481,7 +441,7 @@ class CatCanvas(tk.Canvas):
         self._bob_after = self.after(1500, self._bob)
 
     def _blink(self) -> None:
-        """把圆眼藏起来，画两条小弧线，再在 130ms 后睁开。"""
+        """把杏仁眼藏起来，画两条小弧线，再在 130ms 后睁开。"""
         self._cancel_after("_blink_after")
         if not self.winfo_exists() or self._eyes_hidden:
             return
@@ -491,11 +451,11 @@ class CatCanvas(tk.Canvas):
             except tk.TclError:
                 pass
         self._blink_items = []
-        for x1, y1, x2, y2 in ((50, 56, 66, 68), (74, 56, 90, 68)):
+        for x1, y1, x2, y2 in ((43, 47, 64, 61), (76, 47, 97, 61)):
             item = self.create_arc(
                 *self._box([x1, y1, x2, y2]),
                 start=200, extent=140, style=tk.ARC,
-                outline=self.paper, width=self._line(2.2),
+                outline=self.paper, width=self._line(1.8),
                 tags=("blink",))
             if self._bob_offset:
                 self.move(item, 0, self._bob_offset)
@@ -530,75 +490,108 @@ class CatCanvas(tk.Canvas):
         super().destroy()
 
     def redraw(self) -> None:
-        """按当前颜色重画整只猫（从后往前：身体 → 围脖 → 耳朵 → 头）。"""
+        """按当前颜色重画整只猫（从后往前：身体 → 项圈 → 耳朵 → 胡须 → 头 → 五官）。"""
         self._stop_animation()
         self.delete("all")
         inner = _mix(self.accent, self.paper, 0.55)
+        cheek = _mix(self.ink, self.accent, 0.16)
+        mouth = _mix(self.ink, self.accent, 0.30)
 
-        # 上半身：肩膀和胸口，画到画布底边为止（不画腿和尾巴）
+        # 上半身：宽肩和胸口，画到画布底边为止（不画腿和尾巴）
         body = [
-            (46, 84), (38, 90), (32, 99), (30, 109), (34, 118),
-            (42, 122), (98, 122), (106, 118), (110, 109),
-            (108, 99), (102, 90), (94, 84), (82, 89), (70, 91),
-            (58, 89),
+            (48, 88), (38, 92), (31, 100), (29, 109), (32, 118),
+            (40, 122), (100, 122), (108, 118), (111, 109),
+            (109, 100), (102, 92), (92, 88), (82, 93), (70, 95),
+            (58, 93),
         ]
         self.create_polygon(
             self._points(body), fill=self.ink, outline="", smooth=True,
             splinesteps=24)
 
-        # 围脖：暖橙色的平滑横带
-        scarf = [(46, 88), (54, 95), (70, 98), (86, 95), (94, 88)]
+        # 项圈：暖橙色横带，把头部和身体明确分开
+        collar = [(44, 92), (55, 96), (70, 98), (85, 96), (96, 92)]
         self.create_line(
-            self._points(scarf), fill=self.accent, width=self._line(9),
+            self._points(collar), fill=self.accent, width=self._line(10),
             capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
             splinesteps=24)
 
-        # 双耳：先画外耳，再画浅色内耳；耳根由后面的头盖住。
-        # 耳朵更短更圆，耳尖用较大的几何圆角，保留三角耳的大致轮廓。
-        for outer, inner_ear, outer_r, inner_r in (
-                (((42, 57), (21, 14), (68, 33)),
-                 ((45, 50), (32, 22), (61, 33)), 9.0, 6.8),
-                (((98, 57), (119, 14), (72, 33)),
-                 ((95, 50), (108, 22), (79, 33)), 9.0, 6.8)):
+        # 尖耳朵：外耳黑色，内耳暖白；耳根由后面的头盖住
+        for outer, inner_ear in (
+                ([(44, 58), (19, 2), (65, 31)],
+                 [(43, 48), (31, 15), (58, 31)]),
+                ([(96, 58), (121, 2), (75, 31)],
+                 [(97, 48), (109, 15), (82, 31)])):
             self.create_polygon(
-                self._points(self._rounded_tip(*outer, outer_r)),
-                fill=self.ink, outline="")
+                self._points(outer), fill=self.ink, outline="")
             self.create_polygon(
-                self._points(self._rounded_tip(*inner_ear, inner_r)),
-                fill=inner, outline="")
+                self._points(inner_ear), fill=inner, outline="")
 
-        # 胡须：画在头后面，只露出脸两侧的部分
+        # 胡须：从腮帮子向外放射，长短交错；根部由头盖住
         for x1, y1, x2, y2 in (
-                (36, 59, 12, 57), (38, 68, 14, 72),
-                (104, 59, 128, 57), (102, 68, 126, 72)):
+                (41, 55, 8, 46), (41, 62, 12, 59),
+                (41, 69, 9, 74), (41, 76, 20, 85),
+                (99, 55, 132, 46), (99, 62, 128, 59),
+                (99, 69, 131, 74), (99, 76, 120, 85)):
             self.create_line(
                 *self._points([(x1, y1), (x2, y2)]),
-                fill=self.ink, width=self._line(2.2),
+                fill=self.ink, width=self._line(1.6),
                 capstyle=tk.ROUND)
 
-        # 头：大圆脸，盖住耳根、胡须根和围脖上沿
-        self.create_oval(*self._box([30, 27, 110, 93]),
-                         fill=self.ink, outline="")
-
-        # 眼睛：眼白跟主题底色一致，深色主题下自然变成「反色猫」
-        left_eye = self.create_oval(*self._box([47, 49, 69, 71]),
-                                    fill=self.paper, outline="")
-        right_eye = self.create_oval(*self._box([71, 49, 93, 71]),
-                                     fill=self.paper, outline="")
-        # 瞳孔以眼睛中心为基准，左右取完全相同的尺寸，避免视觉大小不一。
-        pupil_w, pupil_h = 10, 12
-        pupils = [
-            self.create_oval(
-                *self._box([cx - pupil_w / 2, 60 - pupil_h / 2,
-                            cx + pupil_w / 2, 60 + pupil_h / 2]),
-                fill=self.ink, outline="")
-            for cx in (58, 82)
+        # 头：带腮帮子的鹅蛋脸，上窄下宽、下巴收圆
+        head = [
+            (70, 21), (52, 24), (38, 34), (31, 48), (28, 61),
+            (31, 74), (40, 86), (54, 92), (70, 94), (86, 92),
+            (100, 86), (109, 74), (112, 61), (109, 48),
+            (102, 34), (88, 24),
         ]
-        self._eye_items = [left_eye, right_eye, *pupils]
+        self.create_polygon(
+            self._points(head), fill=self.ink, outline="", smooth=True,
+            splinesteps=24)
 
-        # 鼻子：暖橙色小椭圆（参考图的「嘴巴」也是这颗圆鼻子）
-        self.create_oval(*self._box([66, 73, 74, 80]),
-                         fill=self.nose, outline="")
+        # 腮帮子：极淡的暖色阴影，让鹅蛋脸更饱满
+        for x1, y1, x2, y2 in ((40, 66, 56, 78), (84, 66, 100, 78)):
+            self.create_oval(
+                *self._box([x1, y1, x2, y2]), fill=cheek, outline="")
+
+        # 杏仁眼：眼白跟主题底色一致，左右分开一些
+        left_eye = self.create_polygon(
+            self._points([(40, 49), (48, 44), (57, 45), (64, 54),
+                          (55, 63), (45, 60)]),
+            fill=self.paper, outline="", smooth=True, splinesteps=24)
+        right_eye = self.create_polygon(
+            self._points([(100, 49), (92, 44), (83, 45), (76, 54),
+                          (85, 63), (95, 60)]),
+            fill=self.paper, outline="", smooth=True, splinesteps=24)
+
+        # 瞳孔：左右同尺寸，配一颗小高光，像在看向前方
+        pupil_w, pupil_h = 10, 13
+        pupil_cy = 54.5
+        pupils = []
+        highlights = []
+        for cx in (52, 88):
+            pupils.append(self.create_oval(
+                *self._box([cx - pupil_w / 2, pupil_cy - pupil_h / 2,
+                            cx + pupil_w / 2, pupil_cy + pupil_h / 2]),
+                fill=self.ink, outline=""))
+            highlights.append(self.create_oval(
+                *self._box([cx - 2.8, pupil_cy - 3.4,
+                            cx - 0.6, pupil_cy - 0.6]),
+                fill=self.paper, outline=""))
+        self._eye_items = [left_eye, right_eye, *pupils, *highlights]
+
+        # 鼻子：暖橙色倒三角
+        self.create_polygon(
+            self._points([(66, 68), (74, 68), (70, 76)]),
+            fill=self.nose, outline="")
+
+        # 嘴巴：一条短竖线 + 两条斜线组成的 Y 字
+        self.create_line(
+            *self._points([(70, 76), (70, 82)]),
+            fill=mouth, width=self._line(1.5), capstyle=tk.ROUND)
+        self.create_line(
+            *self._points([(66, 87), (70, 82), (74, 87)]),
+            fill=mouth, width=self._line(1.5),
+            capstyle=tk.ROUND, joinstyle=tk.ROUND)
 
         # 统一打标签，浮动动画只移动猫本身，不碰眨眼临时弧线。
         for item in self.find_all():

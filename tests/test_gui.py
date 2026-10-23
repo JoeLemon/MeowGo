@@ -1583,9 +1583,10 @@ def test_canvas_cat_empty_state():
     """空状态用 Canvas 小猫上半身，不依赖 PIL 图片，并带眨眼动画。"""
     for cat in (app.step_empty_icon, app.group_empty_icon):
         assert isinstance(cat, gui_module.uikit.CatCanvas), type(cat)
-        # 身体 / 围脖 / 双耳内外 / 胡须 ×4 / 头 / 眼 ×2 / 瞳 ×2 / 鼻子
+        # 身体 / 项圈 / 双耳内外 ×4 / 胡须 ×8 / 头 / 腮帮 ×2 /
+        # 杏仁眼 ×2 / 瞳孔 ×2 / 高光 ×2 / 倒三角鼻 / Y 嘴 ×2
         items = cat.find_withtag("cat")
-        assert len(items) == 16, len(items)
+        assert len(items) == 26, len(items)
         fills = {str(cat.itemcget(item, "fill")) for item in items}
         assert gui_module.TEXT in fills, fills
         assert gui_module.ACCENT in fills, fills
