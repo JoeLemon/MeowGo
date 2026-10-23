@@ -1579,27 +1579,88 @@ def test_settings_dialog_preserves_keys():
     mark("设置对话框保留其它配置")
 
 
+def _photo_pixel(cat, photo, gx: int, gy: int) -> tuple:
+    """按 191×160 网格坐标采样渲染图像素，返回 RGB 三元组。"""
+    k = cat._k
+    px = min(photo.width() - 1, max(0, int(round(gx * k))))
+    py = min(photo.height() - 1, max(0, int(round(gy * k))))
+    return tuple(int(v) for v in cat.tk.call(str(photo), "get", px, py))
+
+
 def test_canvas_cat_empty_state():
-    """空状态用 Canvas 小猫上半身，不依赖 PIL 图片，并带眨眼动画。"""
+    """空状态用像素猫图片（数据来自 images/像素猫-canvas绘制.html），带眨眼动画。"""
+    from rpa import pixel_cat
+
     for cat in (app.step_empty_icon, app.group_empty_icon):
         assert isinstance(cat, gui_module.uikit.CatCanvas), type(cat)
-        # 身体 / 项圈 / 双耳内外 ×4 / 胡须 ×8 / 头 / 腮帮 ×2 /
-        # 杏仁眼 ×2 / 瞳孔 ×2 / 高光 ×2 / 倒三角鼻 / Y 嘴 ×2
+        # 先停掉定时动画并复位到睁眼帧：整套测试要跑几分钟，眨眼定时
+        # 随时可能触发，不能让它把断言中间的图片换成闭眼帧
+        cat._cancel_after("_blink_after")
+        cat._cancel_after("_open_after")
+        if cat._eyes_hidden:
+            cat._open_eyes()
+            cat._cancel_after("_blink_after")
+        # 整只猫就是一张像素图：191×160 网格按 scale 缩放后贴上 Canvas
         items = cat.find_withtag("cat")
-        assert len(items) == 26, len(items)
-        fills = {str(cat.itemcget(item, "fill")) for item in items}
-        assert gui_module.TEXT in fills, fills
-        assert gui_module.ACCENT in fills, fills
-        assert gui_module.ACCENT_STRONG in fills, fills
-        # 手动走一次眨眼，确认临时弧线出现又消失
+        assert len(items) == 1, items
+        assert cat.type(items[0]) == "image"
+        assert str(cat.itemcget(items[0], "image")), "应贴上像素猫图片"
+        k = cat._k
+        assert (int(cat["width"]), int(cat["height"])) == (
+            round(pixel_cat.GRID_W * k), round(pixel_cat.GRID_H * k))
+        # 睁眼帧采样：脸是墨黑、角落是卡片底色、项圈落在暖橙色系
+        photo = cat._photo_for(False)
+        assert cat.itemcget(items[0], "image") == str(photo)
+        fur = _photo_pixel(cat, photo, 95, 80)
+        corner = _photo_pixel(cat, photo, 2, 2)
+        assert max(fur) < 60, fur
+        assert corner == (255, 255, 255), corner
+        # 眨眼：整图换 BLINK_MAP 帧 → 恢复睁眼帧
         cat._cancel_after("_blink_after")
         cat._blink()
         assert cat._eyes_hidden
-        assert len(cat.find_withtag("blink")) == 2
+        assert cat._photos[True] is not photo
+        assert cat.itemcget(items[0], "image") == str(cat._photos[True])
         cat._open_eyes()
         assert not cat._eyes_hidden
-        assert not cat.find_withtag("blink")
-    mark("Canvas 小猫空状态")
+        assert cat.itemcget(items[0], "image") == str(photo)
+        # 换主题：像素图按新颜色重新量化，图片句柄随之变化
+        cat.set_colors(ink="#F5F2ED", bg="#1D1B18",
+                       accent="#FDAD63", nose="#FFB86F")
+        assert cat._photos[False] is not photo
+        items = cat.find_withtag("cat")      # redraw 重建画布项，需重新取
+        assert cat.itemcget(items[0], "image") == str(cat._photos[False])
+        assert min(_photo_pixel(cat, cat._photos[False], 95, 80)) > 200
+        # 每只猫都要还原，不能只还原循环变量最后那只
+        cat.set_colors(ink=gui_module.TEXT, bg=gui_module.CARD,
+                       accent=gui_module.ACCENT, nose=gui_module.ACCENT_STRONG)
+    mark("像素猫空状态")
+
+
+def test_pixel_cat_transparent_background():
+    """像素猫外圈背景透明，眼白 / 高光 / 猫身仍不透明；默认仍返回 RGB。"""
+    from rpa import pixel_cat
+
+    size = (pixel_cat.GRID_W, pixel_cat.GRID_H)
+    img = pixel_cat.render("#080806", "#FFFFFF", size, transparent=True)
+    assert img.mode == "RGBA", img.mode
+    # 外圈背景（与画布边缘连通的 index-0 区域）alpha = 0
+    for point in ((2, 2), (95, 5), (3, 80), (185, 150)):
+        assert img.getpixel(point)[3] == 0, point
+    # 眼白 / 猫身 alpha = 255，不会被透明背景掏空
+    for point in ((78, 59), (119, 73), (95, 80)):
+        assert img.getpixel(point)[3] == 255, point
+    assert img.getpixel((78, 59))[:3] == (255, 255, 255), "眼白仍是纸色"
+    # 眨眼帧同一份掩码：外圈透明、闭眼弧线不透明
+    blink = pixel_cat.render("#080806", "#FFFFFF", size, blink=True,
+                             transparent=True)
+    assert blink.getpixel((2, 2))[3] == 0
+    assert blink.getpixel((77, 66))[3] == 255
+    # 不传 transparent 时保持旧的 RGB 行为（向后兼容）
+    assert pixel_cat.render("#080806", "#FFFFFF", size).mode == "RGB"
+    # 掩码与索引图同步：透明像素数 = 边缘连通块大小
+    assert sum(1 for b in pixel_cat.BG_MASK if b) == 18785
+    mark("像素猫透明背景")
 
 
 def test_theme_switch():
@@ -1617,14 +1678,15 @@ def test_theme_switch():
     assert str(app.btn_run["bg"]) == "#12110F", "按钮底色应跟上"
     assert str(app.step_title.cget("fg")) == "#F5F2ED", "正文应换成暖白"
     assert str(app.log_text.cget("fg")) == "#F7F4EF", "日志正文保持暖白"
-    # Canvas 小猫跟随主题重绘（不是 PIL 图片，不能靠 configure(image) 换色）
+    # Canvas 小猫跟随主题重绘（图片版：按暗色重新量化像素图）
     assert app.step_empty_icon.paper == gui_module.CARD
     assert app.step_empty_icon.ink == gui_module.TEXT
     assert app.step_empty_icon.accent == gui_module.ACCENT
     assert str(app.step_empty_icon.cget("bg")) == gui_module.CARD
-    fills = {str(app.step_empty_icon.itemcget(item, "fill"))
-             for item in app.step_empty_icon.find_all()}
-    assert gui_module.TEXT in fills and gui_module.ACCENT in fills, fills
+    # 脸部（墨黑→暖白）和角落（白→暖黑）都应跟着主题翻过来
+    photo = app.step_empty_icon._photo_for(False)
+    assert min(_photo_pixel(app.step_empty_icon, photo, 95, 80)) > 200
+    assert max(_photo_pixel(app.step_empty_icon, photo, 2, 2)) < 60
     # 树标签重配（tag_configure 返回的是 Tk string 包装对象，要 str() 一下）
     assert str(app.step_tree.tag_configure("odd", "background")) == "#25221E"
     assert str(app.step_tree.tag_configure("failed", "background")) == \
@@ -2181,6 +2243,7 @@ def finish():
         test_zebra_and_type_colors()
         test_settings_dialog_preserves_keys()
         test_canvas_cat_empty_state()
+        test_pixel_cat_transparent_background()
         test_theme_switch()
         test_batch_step_ops()
         test_drag_indicator_line()

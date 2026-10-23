@@ -15,6 +15,8 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageTk
 
+from . import pixel_cat
+
 GRID = 24          # 图标设计网格
 SUPER = 4          # 超采样倍数
 _cache: dict[tuple, ImageTk.PhotoImage] = {}
@@ -341,15 +343,14 @@ def icon(name: str, size: int, color: str) -> ImageTk.PhotoImage:
 
 
 class CatCanvas(tk.Canvas):
-    """空状态用的猫猫插画：Canvas 绘制，只画上半身。
+    """空状态猫猫：像素猫图片版。
 
-    参考黑猫参考图的尖耳、杏仁眼、倒三角鼻、Y 嘴与项圈造型，用椭圆、
-    平滑多边形和圆头线条重画成 Tk Canvas 版本。坐标按 140×122 设计，
-    scale 负责按 DPI 缩放；颜色由调用方传入，主题切换时用 set_colors() 重绘。
+    像素数据来自 images/像素猫-canvas绘制.html（191×160 网格 / 130 色），
+    由 rpa.pixel_cat 内联解码：中性色按主题在 paper→ink 间重映射，暖色
+    （项圈 / 内耳 / 鼻子）移入 accent / nose 色系；眨眼切换 BLINK_MAP
+    重绘，呼吸浮动整体平移。外圈背景透明，透出 Canvas 底色。接口与旧
+    矢量版一致：set_colors() 换主题、redraw() 重画、destroy() 停动画。
     """
-
-    DESIGN_W = 140
-    DESIGN_H = 122
 
     def __init__(self, parent, scale: float = 1.0, bg: str = "#FFFFFF",
                  ink: str = "#080806", accent: str = "#FDAD63",
@@ -359,10 +360,12 @@ class CatCanvas(tk.Canvas):
         self.nose = nose
         self.paper = bg
         self._k = max(0.2, float(scale))
+        self._photos: dict[bool, ImageTk.PhotoImage] = {}
+        self._image_item: Optional[int] = None
         super().__init__(
             parent,
-            width=max(1, int(round(self.DESIGN_W * self._k))),
-            height=max(1, int(round(self.DESIGN_H * self._k))),
+            width=max(1, int(round(pixel_cat.GRID_W * self._k))),
+            height=max(1, int(round(pixel_cat.GRID_H * self._k))),
             bg=bg, highlightthickness=0, bd=0, **kwargs)
         # 空状态小动画：轻微呼吸浮动 + 定时眨眼。after 任务在重绘 /
         # 销毁时取消，避免主题切换后叠加多个循环。
@@ -370,8 +373,6 @@ class CatCanvas(tk.Canvas):
         self._blink_after: Optional[str] = None
         self._open_after: Optional[str] = None
         self._bob_offset = 0
-        self._eye_items: list[int] = []
-        self._blink_items: list[int] = []
         self._eyes_hidden = False
         self.bind("<Destroy>", self._on_destroy, add="+")
         self.redraw()
@@ -379,7 +380,7 @@ class CatCanvas(tk.Canvas):
     def set_colors(self, *, bg: Optional[str] = None,
                    ink: Optional[str] = None, accent: Optional[str] = None,
                    nose: Optional[str] = None) -> None:
-        """换主题时更新颜色并重绘。"""
+        """换主题时更新颜色并重绘（像素图按新主题重新量化）。"""
         if bg is not None:
             self.paper = bg
             self.configure(bg=bg)
@@ -390,17 +391,6 @@ class CatCanvas(tk.Canvas):
         if nose is not None:
             self.nose = nose
         self.redraw()
-
-    def _points(self, points):
-        k = self._k
-        return [coord * k for point in points for coord in point]
-
-    def _box(self, box):
-        k = self._k
-        return [value * k for value in box]
-
-    def _line(self, value: float) -> int:
-        return max(1, int(round(value * self._k)))
 
     # ------------------------------------------------------- 空状态小动画
     def _cancel_after(self, attr: str) -> None:
@@ -418,7 +408,6 @@ class CatCanvas(tk.Canvas):
             self._cancel_after(attr)
         self._bob_offset = 0
         self._eyes_hidden = False
-        self._blink_items = []
 
     def _start_animation(self) -> None:
         if not self.winfo_exists():
@@ -436,30 +425,15 @@ class CatCanvas(tk.Canvas):
         target = 0 if self._bob_offset else -step
         delta = target - self._bob_offset
         self.move("cat", 0, delta)
-        self.move("blink", 0, delta)
         self._bob_offset = target
         self._bob_after = self.after(1500, self._bob)
 
     def _blink(self) -> None:
-        """把杏仁眼藏起来，画两条小弧线，再在 130ms 后睁开。"""
+        """闭眼：整图换成 BLINK_MAP 帧，130ms 后睁开。"""
         self._cancel_after("_blink_after")
         if not self.winfo_exists() or self._eyes_hidden:
             return
-        for item in self._eye_items:
-            try:
-                self.itemconfigure(item, state="hidden")
-            except tk.TclError:
-                pass
-        self._blink_items = []
-        for x1, y1, x2, y2 in ((43, 47, 64, 61), (76, 47, 97, 61)):
-            item = self.create_arc(
-                *self._box([x1, y1, x2, y2]),
-                start=200, extent=140, style=tk.ARC,
-                outline=self.paper, width=self._line(1.8),
-                tags=("blink",))
-            if self._bob_offset:
-                self.move(item, 0, self._bob_offset)
-            self._blink_items.append(item)
+        self._set_frame(blink=True)
         self._eyes_hidden = True
         self._open_after = self.after(130, self._open_eyes)
 
@@ -467,19 +441,18 @@ class CatCanvas(tk.Canvas):
         self._cancel_after("_open_after")
         if not self.winfo_exists():
             return
-        for item in self._blink_items:
-            try:
-                self.delete(item)
-            except tk.TclError:
-                pass
-        self._blink_items = []
-        for item in self._eye_items:
-            try:
-                self.itemconfigure(item, state="normal")
-            except tk.TclError:
-                pass
+        self._set_frame(blink=False)
         self._eyes_hidden = False
         self._blink_after = self.after(random.randint(3600, 6200), self._blink)
+
+    def _set_frame(self, blink: bool) -> None:
+        """把猫图换成睁眼 / 闭眼帧（尺寸不变，只换 image）。"""
+        if self._image_item is None:
+            return
+        try:
+            self.itemconfigure(self._image_item, image=self._photo_for(blink))
+        except tk.TclError:
+            pass                    # 控件已销毁 / 任务已执行完
 
     def _on_destroy(self, event=None) -> None:
         if event is None or getattr(event, "widget", None) is self:
@@ -489,113 +462,30 @@ class CatCanvas(tk.Canvas):
         self._stop_animation()
         super().destroy()
 
+    def _photo_for(self, blink: bool) -> ImageTk.PhotoImage:
+        """按当前主题色渲染一帧像素猫（眨眼帧换 BLINK_MAP），带缓存防 GC。
+
+        外圈背景置为透明（RGBA），透出下层 Canvas 底色；眼白 / 高光保留
+        不透明，不会把眼睛掏空。
+        """
+        photo = self._photos.get(blink)
+        if photo is None:
+            size = (max(1, int(round(pixel_cat.GRID_W * self._k))),
+                    max(1, int(round(pixel_cat.GRID_H * self._k))))
+            image = pixel_cat.render(self.ink, self.paper, size, blink=blink,
+                                     accent=self.accent, nose=self.nose,
+                                     transparent=True)
+            photo = ImageTk.PhotoImage(image)
+            self._photos[blink] = photo
+        return photo
+
     def redraw(self) -> None:
-        """按当前颜色重画整只猫（从后往前：身体 → 项圈 → 耳朵 → 胡须 → 头 → 五官）。"""
+        """按当前主题色重画整只猫：一张像素图，眨眼/浮动动画都在它上面做。"""
         self._stop_animation()
         self.delete("all")
-        inner = _mix(self.accent, self.paper, 0.55)
-        cheek = _mix(self.ink, self.accent, 0.16)
-        mouth = _mix(self.ink, self.accent, 0.30)
-
-        # 上半身：宽肩和胸口，画到画布底边为止（不画腿和尾巴）
-        body = [
-            (48, 88), (38, 92), (31, 100), (29, 109), (32, 118),
-            (40, 122), (100, 122), (108, 118), (111, 109),
-            (109, 100), (102, 92), (92, 88), (82, 93), (70, 95),
-            (58, 93),
-        ]
-        self.create_polygon(
-            self._points(body), fill=self.ink, outline="", smooth=True,
-            splinesteps=24)
-
-        # 项圈：暖橙色横带，把头部和身体明确分开
-        collar = [(44, 92), (55, 96), (70, 98), (85, 96), (96, 92)]
-        self.create_line(
-            self._points(collar), fill=self.accent, width=self._line(10),
-            capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
-            splinesteps=24)
-
-        # 尖耳朵：外耳黑色，内耳暖白；耳根由后面的头盖住
-        for outer, inner_ear in (
-                ([(44, 58), (19, 2), (65, 31)],
-                 [(43, 48), (31, 15), (58, 31)]),
-                ([(96, 58), (121, 2), (75, 31)],
-                 [(97, 48), (109, 15), (82, 31)])):
-            self.create_polygon(
-                self._points(outer), fill=self.ink, outline="")
-            self.create_polygon(
-                self._points(inner_ear), fill=inner, outline="")
-
-        # 胡须：从腮帮子向外放射，长短交错；根部由头盖住
-        for x1, y1, x2, y2 in (
-                (41, 55, 8, 46), (41, 62, 12, 59),
-                (41, 69, 9, 74), (41, 76, 20, 85),
-                (99, 55, 132, 46), (99, 62, 128, 59),
-                (99, 69, 131, 74), (99, 76, 120, 85)):
-            self.create_line(
-                *self._points([(x1, y1), (x2, y2)]),
-                fill=self.ink, width=self._line(1.6),
-                capstyle=tk.ROUND)
-
-        # 头：带腮帮子的鹅蛋脸，上窄下宽、下巴收圆
-        head = [
-            (70, 21), (52, 24), (38, 34), (31, 48), (28, 61),
-            (31, 74), (40, 86), (54, 92), (70, 94), (86, 92),
-            (100, 86), (109, 74), (112, 61), (109, 48),
-            (102, 34), (88, 24),
-        ]
-        self.create_polygon(
-            self._points(head), fill=self.ink, outline="", smooth=True,
-            splinesteps=24)
-
-        # 腮帮子：极淡的暖色阴影，让鹅蛋脸更饱满
-        for x1, y1, x2, y2 in ((40, 66, 56, 78), (84, 66, 100, 78)):
-            self.create_oval(
-                *self._box([x1, y1, x2, y2]), fill=cheek, outline="")
-
-        # 杏仁眼：眼白跟主题底色一致，左右分开一些
-        left_eye = self.create_polygon(
-            self._points([(40, 49), (48, 44), (57, 45), (64, 54),
-                          (55, 63), (45, 60)]),
-            fill=self.paper, outline="", smooth=True, splinesteps=24)
-        right_eye = self.create_polygon(
-            self._points([(100, 49), (92, 44), (83, 45), (76, 54),
-                          (85, 63), (95, 60)]),
-            fill=self.paper, outline="", smooth=True, splinesteps=24)
-
-        # 瞳孔：左右同尺寸，配一颗小高光，像在看向前方
-        pupil_w, pupil_h = 10, 13
-        pupil_cy = 54.5
-        pupils = []
-        highlights = []
-        for cx in (52, 88):
-            pupils.append(self.create_oval(
-                *self._box([cx - pupil_w / 2, pupil_cy - pupil_h / 2,
-                            cx + pupil_w / 2, pupil_cy + pupil_h / 2]),
-                fill=self.ink, outline=""))
-            highlights.append(self.create_oval(
-                *self._box([cx - 2.8, pupil_cy - 3.4,
-                            cx - 0.6, pupil_cy - 0.6]),
-                fill=self.paper, outline=""))
-        self._eye_items = [left_eye, right_eye, *pupils, *highlights]
-
-        # 鼻子：暖橙色倒三角
-        self.create_polygon(
-            self._points([(66, 68), (74, 68), (70, 76)]),
-            fill=self.nose, outline="")
-
-        # 嘴巴：一条短竖线 + 两条斜线组成的 Y 字
-        self.create_line(
-            *self._points([(70, 76), (70, 82)]),
-            fill=mouth, width=self._line(1.5), capstyle=tk.ROUND)
-        self.create_line(
-            *self._points([(66, 87), (70, 82), (74, 87)]),
-            fill=mouth, width=self._line(1.5),
-            capstyle=tk.ROUND, joinstyle=tk.ROUND)
-
-        # 统一打标签，浮动动画只移动猫本身，不碰眨眼临时弧线。
-        for item in self.find_all():
-            self.addtag_withtag("cat", item)
+        self._photos = {}                # 颜色变了，旧帧全部作废
+        self._image_item = self.create_image(
+            0, 0, anchor="nw", image=self._photo_for(False), tags=("cat",))
         self._start_animation()
 
 

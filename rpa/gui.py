@@ -1054,10 +1054,10 @@ class App(tk.Tk):
         self.group_tree.bind("<Button-3>", self._group_menu)
         enable_tree_drag(self.group_tree, self._on_group_drop)
 
-        # 空状态：Canvas 小猫上半身 + 说明 + 主按钮（不用先右键就能新建）
+        # 空状态：像素猫 + 说明 + 主按钮（不用先右键就能新建）
         self.group_empty_box = tk.Frame(panel, bg=CARD)
         self.group_empty_icon = uikit.CatCanvas(
-            self.group_empty_box, scale=self.scale * 0.86, bg=CARD, ink=TEXT,
+            self.group_empty_box, scale=self.scale * 0.60, bg=CARD, ink=TEXT,
             accent=ACCENT, nose=ACCENT_STRONG)
         self.group_empty_icon.pack(pady=(0, self.s(10)))
         self.group_empty = tk.Label(
@@ -1165,10 +1165,10 @@ class App(tk.Tk):
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_select)
         enable_tree_drag(self.step_tree, self._on_step_drop)
 
-        # 空状态：Canvas 小猫上半身 + 标题 + 说明 + 主按钮
+        # 空状态：像素猫 + 标题 + 说明 + 主按钮
         self.step_empty_box = tk.Frame(wrap, bg=CARD)
         self.step_empty_icon = uikit.CatCanvas(
-            self.step_empty_box, scale=self.scale, bg=CARD, ink=TEXT,
+            self.step_empty_box, scale=self.scale * 0.7, bg=CARD, ink=TEXT,
             accent=ACCENT, nose=ACCENT_STRONG)
         self.step_empty_icon.pack(pady=(0, self.s(8)))
         self.step_empty = tk.Label(

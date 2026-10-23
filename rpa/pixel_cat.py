@@ -2,13 +2,17 @@
 """像素猫素材：从 images/像素猫-canvas绘制.html 内联的调色板/索引图生成。
 
 191×160 网格、130 色。地图用 zlib + base64 压缩，渲染时再按主题
-把中性色映射到 ink / paper；耳朵、项圈、鼻子等暖色保留参考图原色。
+把中性色映射到 ink / paper；耳朵、项圈、鼻子等暖色保留参考图原色，
+也可传入 accent / nose 整体移入主题色系（见 themed_palette）。
+外圈背景默认随 paper 着色，render(transparent=True) 可把与画布边缘
+连通的那片背景置为透明（BG_MASK），眼白 / 高光不受影响。
 """
 from __future__ import annotations
 
 import base64
 import colorsys
 import zlib
+from collections import deque
 from functools import lru_cache
 
 from PIL import Image, ImageDraw
@@ -138,6 +142,44 @@ def _build_blink_map():
 BLINK_MAP = _build_blink_map()
 
 
+def _surround_mask() -> bytes:
+    """外圈背景掩码：与画布边缘连通的 index-0 像素记 255，其余记 0。
+
+    眼白 / 瞳孔高光也可能取 index 0，但它们是猫脸上与边缘不连通的小块，
+    记 0 保留不透明——把外圈置透明时不会把眼睛掏空。眨眼帧的外圈与
+    睁眼帧是同一片连通区域，两个帧共用这一份掩码。
+    """
+    width, height = GRID_W, GRID_H
+    mask = bytearray(width * height)
+    queue = deque()
+    for x in range(width):
+        for y in (0, height - 1):
+            index = y * width + x
+            if MAP[index] == 0 and not mask[index]:
+                mask[index] = 255
+                queue.append((x, y))
+    for y in range(height):
+        for x in (0, width - 1):
+            index = y * width + x
+            if MAP[index] == 0 and not mask[index]:
+                mask[index] = 255
+                queue.append((x, y))
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                       (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                index = ny * width + nx
+                if not mask[index] and MAP[index] == 0:
+                    mask[index] = 255
+                    queue.append((nx, ny))
+    return bytes(mask)
+
+
+BG_MASK = _surround_mask()
+
+
 def _hex_rgb(color: str):
     value = color.lstrip("#")
     if len(value) == 3:
@@ -152,29 +194,60 @@ def _mix(a, b, amount):
     )
 
 
-@lru_cache(maxsize=16)
-def themed_palette(ink: str, paper: str):
-    """中性色按亮度在 ink / paper 之间重映射，暖色保留参考图原色。"""
+@lru_cache(maxsize=32)
+def themed_palette(ink: str, paper: str,
+                   accent: str | None = None, nose: str | None = None):
+    """按主题重映射调色板。
+
+    中性色按亮度在 paper→ink 之间渐变（暗部近 ink、亮部近 paper）。
+    暖色（项圈 / 内耳 / 鼻子 / 腮红）默认保留参考图原色；传入 accent 后
+    改按亮度移入主题色系：项圈一档用 accent，鼻子 / 内耳等最亮的暖色用
+    nose 向 paper 提亮，暗部暖色混一点 ink——冷暖分档各自连续，参考图的
+    深浅结构不会丢。accent 为 None 时暖色原样保留（兼容旧调用）。
+    """
     ink_rgb = _hex_rgb(ink)
     paper_rgb = _hex_rgb(paper)
+    accent_rgb = _hex_rgb(accent) if accent else None
+    nose_rgb = _hex_rgb(nose) if nose else accent_rgb
+    warm_dark = _mix(ink_rgb, accent_rgb, 0.30) if accent_rgb else None
     result = []
     for rgb in PALETTE:
         r, g, b = rgb
         _h, sat, _v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-        if sat < 0.15 or max(rgb) - min(rgb) < 12:
-            lum = 0.299 * r + 0.587 * g + 0.114 * b
-            result.append(_mix(paper_rgb, ink_rgb, 1 - lum / 255))
-        else:
+        lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        if sat < 0.15 or max(rgb) - min(rgb) < 12:      # 中性色
+            result.append(_mix(paper_rgb, ink_rgb, 1 - lum))
+        elif accent_rgb is None:                        # 未传 accent：暖色留原色
             result.append(rgb)
+        elif lum >= 0.78:                               # 鼻子 / 内耳 / 暖高光
+            result.append(_mix(
+                nose_rgb, paper_rgb, min(1.0, (lum - 0.78) / 0.22) * 0.85))
+        elif lum >= 0.50:                               # 项圈及其明暗过渡
+            result.append(_mix(warm_dark, accent_rgb, (lum - 0.50) / 0.28))
+        else:                                           # 暗部暖色：混一点 ink
+            result.append(warm_dark)
     return tuple(result)
 
 
-def render(ink: str, paper: str, size: tuple[int, int], blink: bool = False):
-    """生成指定主题、指定显示尺寸的像素猫 RGB 图片。"""
-    palette = themed_palette(ink, paper)
+def render(ink: str, paper: str, size: tuple[int, int], blink: bool = False,
+           accent: str | None = None, nose: str | None = None,
+           transparent: bool = False):
+    """生成指定主题、指定显示尺寸的像素猫图片。
+
+    ink / paper 负责中性色（猫身 / 眼白 / 背景），accent / nose 负责暖色
+    （项圈 / 内耳 / 鼻子）；blink=True 换闭眼索引图；transparent=True 时
+    外圈背景置为透明（返回 RGBA，眼白 / 高光仍不透明），默认返回 RGB。
+    """
+    palette = themed_palette(ink, paper, accent, nose)
     image = Image.frombytes(
         "P", (GRID_W, GRID_H), BLINK_MAP if blink else MAP)
     flat = [value for rgb in palette for value in rgb]
     flat.extend([0] * (768 - len(flat)))
     image.putpalette(flat)
-    return image.convert("RGB").resize(size, Image.Resampling.NEAREST)
+    rgb = image.convert("RGB").resize(size, Image.Resampling.NEAREST)
+    if not transparent:
+        return rgb
+    alpha = Image.frombytes("L", (GRID_W, GRID_H), BG_MASK).point(
+        lambda v: 255 - v).resize(size, Image.Resampling.NEAREST)
+    rgb.putalpha(alpha)
+    return rgb

@@ -22,6 +22,7 @@ htmlcov/
 dist/
 build/
 *.manifest
+build_assets/
 
 # ---- 测试 / 自检生成的预览图（README 引用的 gui_preview.png 除外）----
 tests/*.png
@@ -69,5 +70,8 @@ $RECYCLE.BIN/
 
 backups/
 reports/
+dist_verify/
 tests/_shot_preview_dir/
 tests/*.png
+.creative-design/
+meowgo-cat-idle/

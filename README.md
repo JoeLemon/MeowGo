@@ -38,7 +38,7 @@ python start-app.py
 
 顶部品牌 Logo 用重新抠图的 `meowgo_logo_transparent.png`（透明背景；深色主题自动反白，保留橙色圆点）；窗口 / 任务栏图标仍用 `main.png`，`main.svg` 保留为矢量源文件。
 
-主面板、运行日志、图片预览和搜索框统一为圆角卡片；配色、间距、圆角、字号与按钮层级按 `MeowGo_界面视觉规范.md` 的 Design Tokens 落地：暖白 / 墨黑 / 暖橙三色为主，语义色只用于成功、警告、失败和信息提示。空状态使用 Canvas 绘制的黑猫上半身插画（尖耳 / 杏仁眼 / 倒三角鼻 / Y 嘴 / 放射长短胡须 / 暖橙项圈），带轻微呼吸浮动和定时眨眼；Windows 11 下窗口本身也使用原生圆角，并跟随主题切换深色标题栏。
+主面板、运行日志、图片预览和搜索框统一为圆角卡片；配色、间距、圆角、字号与按钮层级按 `MeowGo_界面视觉规范.md` 的 Design Tokens 落地：暖白 / 墨黑 / 暖橙三色为主，语义色只用于成功、警告、失败和信息提示。空状态使用像素猫插画（191×160 网格 / 130 色，源自 `images/像素猫-canvas绘制.html`，由 `rpa/pixel_cat.py` 内联解码；桃色内耳、暖橙项圈，中性色随主题在 paper↔ink 间重映射，暖色移入品牌暖橙），带轻微呼吸浮动和定时眨眼；Windows 11 下窗口本身也使用原生圆角，并跟随主题切换深色标题栏。
 
 组和步骤的增删改移**都放在右键菜单里**（自绘的圆角菜单，与界面同风格，
 带图标、快捷键提示；当前不可用的项会自动变灰）：
@@ -477,7 +477,10 @@ tests/preview_uikit.py 图标与按钮外观自检（生成 tests/uikit_preview.
 tests/preview_menu.py  右键菜单外观自检（生成 tests/menu_preview.png）
 tests/preview_menubar.py 菜单栏下拉与“点别处关闭”自检（生成 tests/menubar_preview.png）
 tests/verify_exe.py    打包产物自检（启动 exe / 找到窗口 / 截图）
-MeowGo.spec           PyInstaller 打包配置
+MeowGo.spec           PyInstaller 打包配置（跨平台，可由 build.py 驱动）
+build.py             跨平台一键打包脚本（Windows PowerShell / macOS / Linux）
+build.ps1            Windows PowerShell 打包入口（自动找 Python 3.9+ 转交 build.py）
+build.sh             macOS / Linux 打包入口（自动找 Python 3.9+ 转交 build.py）
 excel执行喵.py        旧版命令行程序（保留，未改动）
 ```
 
@@ -486,8 +489,47 @@ excel执行喵.py        旧版命令行程序（保留，未改动）
 
 ## 打包成 exe
 
+一键打包脚本（Windows PowerShell / macOS / Linux 通用，自动建虚拟环境、装依赖、转平台图标）：
+
 ```bat
-pip install pyinstaller
+:: Windows（PowerShell / CMD 均可）
+python build.py
+
+:: macOS / Linux
+python3 build.py
+```
+
+也可以用各平台原生入口脚本（自动寻找 Python 3.9+，参数原样透传，效果同上）：
+
+```powershell
+# Windows PowerShell（项目根目录）
+.\build.ps1                        # 等价于 python build.py
+.\build.ps1 --onefile --verify     # 单文件 + 打包后自检
+
+:: 首次运行如提示"禁止运行脚本"，先执行：
+:: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+:: 或临时绕过：powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+```bash
+# macOS / Linux
+./build.sh                         # 首次如无执行权限：bash build.sh
+./build.sh --onefile --launcher    # 单文件 + 生成双击启动脚本
+```
+
+常用选项：`--onefile` 单文件、`--clean` 清场重打、`--no-venv` 用当前环境、
+`--skip-deps` 跳过装依赖、`--verify` 打包后冒烟自检、`--launcher` 生成双击启动脚本
+（macOS `.command` / Linux `.sh`）、`--name 名称` 改产物名、`--mirror 地址` 换 pip 镜像。
+
+产物：Windows 得到 `dist\MeowGo\MeowGo.exe`（单文件夹，约 170MB，含 OpenCV）；
+macOS 额外得到 `dist\MeowGo.app`（Finder 双击；`MEOWGO_NO_APP=1` 可关闭）；
+Linux 得到 `dist\MeowGo\MeowGo`。执行组与截图会写到 exe 同目录下的
+`rpa_settings.json` 和 `images\`。
+
+也可以完全手动（旧方式）：
+
+```bat
+pip install -r requirements.txt pyinstaller
 python -m PyInstaller --noconfirm "MeowGo.spec"
 :: 结果：dist\MeowGo\MeowGo.exe（单文件夹，约 170MB，含 OpenCV）
 :: 执行组与截图会写到 exe 同目录下的 rpa_settings.json 和 images\
