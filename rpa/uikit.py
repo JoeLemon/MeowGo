@@ -557,9 +557,9 @@ class CatCanvas(tk.Canvas):
         # 耳朵整体比旧版更大，耳尖用很小的几何圆角，保留三角耳的直边。
         for outer, inner_ear, outer_r, inner_r in (
                 (((42, 57), (21, 4), (68, 33)),
-                 ((45, 50), (32, 15), (61, 33)), 3.2, 2.4),
+                 ((45, 50), (32, 15), (61, 33)), 6.5, 4.8),
                 (((98, 57), (119, 4), (72, 33)),
-                 ((95, 50), (108, 15), (79, 33)), 3.2, 2.4)):
+                 ((95, 50), (108, 15), (79, 33)), 6.5, 4.8)):
             self.create_polygon(
                 self._points(self._rounded_tip(*outer, outer_r)),
                 fill=self.ink, outline="")
