@@ -19,7 +19,7 @@ from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
-from . import assets
+from . import assets, theme
 
 try:  # 窗口操作只在 Windows 上有意义；其它平台导入 engine 不应失败
     import ctypes
@@ -48,10 +48,10 @@ STEP_TYPES = {
     "input":   ("输入文本", "要输入的文字（默认粘贴，可在高级里改逐字）", False, ""),
     "wait":    ("等待",     "等待秒数，如 1.5", False, ""),
     "scroll":  ("滚轮",     "滚动距离，正数向上 / 负数向下，如 -200", False, ""),
-    "hotkey":  ("热键组合", "用英文逗号分隔，如 ctrl,s 或 win,r", True, "重复次数（-1 无限）"),
+    "hotkey":  ("热键组合", "用英文逗号分隔，如 ctrl,s 或 win,r", True, "（-1 表示无限）"),
     "time":    ("粘贴当前时间", "固定填 当前时间 即可", False, ""),
     "cmd":     ("系统命令", "CMD 命令，如 start notepad", False, ""),
-    "call":    ("调用执行组", "要调用的组名（实现步骤复用）", True, "调用次数（-1 无限）"),
+    "call":    ("调用执行组", "要调用的组名（实现步骤复用）", True, "（-1 表示无限）"),
     # ---- 新版扩展类型 ----
     "if_image": ("条件：出现图片则执行", "图片名|组名，如 弹窗.png|关闭弹窗", True, "执行次数"),
     "window":  ("窗口操作", "activate:标题 / wait:标题|秒 / close:标题", False, ""),
@@ -1998,9 +1998,9 @@ def write_report_index(directory: str, keep: int = 100) -> str:
             "<tr>"
             f"<td>{html.escape(stamp)}</td>"
             f"<td><span class=\"pill {css}\">{html.escape(label)}</span></td>"
-            f"<td>{html.escape(steps)}</td>"
-            f"<td>{html.escape(failed)}</td>"
-            f"<td>{html.escape(seconds)}</td>"
+            f"<td class=\"num\">{html.escape(steps)}</td>"
+            f"<td class=\"num\">{html.escape(failed)}</td>"
+            f"<td class=\"num\">{html.escape(seconds)}</td>"
             f"<td><a href=\"{html.escape(os.path.basename(path))}\">"
             "查看报告</a></td>"
             "</tr>")
@@ -2020,44 +2020,60 @@ def write_report_index(directory: str, keep: int = 100) -> str:
 
     body = "\n".join(rows) if rows else (
         "<tr><td colspan=\"6\" class=\"empty\">还没有运行报告</td></tr>")
+    # 报告页是产品界面的一部分：色值、圆角、字号一律取自 rpa/theme.py 的
+    # 设计令牌（浅色暖白板），与桌面端保持同一套视觉规范，不再另维护配色。
+    p = theme.LIGHT_PALETTE
     document = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MeowGo 运行报告</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='{theme.INK}'/%3E%3Ccircle cx='43' cy='21' r='8' fill='{p['ACCENT']}'/%3E%3C/svg%3E">
 <style>
-  body {{ margin: 0; padding: 32px 20px; background: #f4f6fa;
-         color: #22262e; font: 14px/1.6 "Microsoft YaHei UI", system-ui, sans-serif; }}
-  main {{ max-width: 900px; margin: 0 auto; }}
-  h1 {{ margin: 0 0 4px; font-size: 22px; }}
-  p.muted {{ margin: 0 0 20px; color: #7a8290; font-size: 12px; }}
-  table {{ width: 100%; border-collapse: collapse; background: #fff;
-           border: 1px solid #e2e7f0; border-radius: 10px; overflow: hidden; }}
-  th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #eef2f8; }}
-  th {{ background: #eef2f8; color: #66708a; font-weight: 600; font-size: 12px; }}
-  tr:last-child td {{ border-bottom: 0; }}
-  a {{ color: #3b6ff5; text-decoration: none; }}
+  body {{ margin: 0; padding: 40px 20px; background: {p['BG']};
+         color: {p['TEXT']};
+         font: 14px/1.6 "{theme.FONT_FAMILY}", system-ui, sans-serif; }}
+  main {{ max-width: 920px; margin: 0 auto; }}
+  .head {{ display: flex; align-items: baseline; gap: 8px; }}
+  h1 {{ margin: 0; font-size: 22px; font-weight: 700; }}
+  .dot {{ color: {p['ACCENT']}; font-weight: 800; }}
+  p.muted {{ margin: 2px 0 20px; color: {p['MUTED']}; font-size: 12px; }}
+  .table-wrap {{ background: {p['CARD']}; border: 1px solid {p['BORDER']};
+                 border-radius: {theme.RADIUS_M}px;
+                 box-shadow: 0 1px 2px rgba(8, 8, 6, 0.04);
+                 overflow: hidden; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  th, td {{ padding: 10px 14px; text-align: left; white-space: nowrap; }}
+  thead th {{ background: {p['HEADING_BG']}; color: {p['HEADING_FG']};
+              font-weight: 600; font-size: 12px; }}
+  tbody tr:nth-child(even) {{ background: {p['ZEBRA']}; }}
+  tbody tr:hover {{ background: {p['ACCENT_MIST']}; }}
+  td.num {{ font-variant-numeric: tabular-nums; }}
+  a {{ color: {p['ACCENT_STRONG']}; text-decoration: none; font-weight: 500; }}
   a:hover {{ text-decoration: underline; }}
-  .pill {{ display: inline-block; padding: 1px 8px; border-radius: 99px;
-           font-size: 12px; background: #eef2f8; }}
-  .pill.ok {{ background: #e7f6ec; color: #2e7d32; }}
-  .pill.bad {{ background: #fdecec; color: #c62828; }}
-  .pill.warn {{ background: #fff4e5; color: #b06a00; }}
-  .empty {{ color: #7a8290; text-align: center; }}
+  .pill {{ display: inline-block; padding: 1px 10px; border-radius: 999px;
+           font-size: 12px; background: {p['HEADING_BG']};
+           color: {p['MUTED']}; }}
+  .pill.ok {{ background: {p['MARK_DONE']}; color: {p['SUCCESS_TEXT']}; }}
+  .pill.bad {{ background: {p['MARK_FAILED']}; color: {p['DANGER_TEXT']}; }}
+  .pill.warn {{ background: {p['MARK_RUNNING']}; color: {p['WARNING_TEXT']}; }}
+  .empty {{ color: {p['TEXT_WEAK']}; text-align: center; padding: 40px 0; }}
 </style>
 </head>
 <body>
 <main>
-  <h1>MeowGo 运行报告</h1>
-  <p class="muted">最近 {keep} 次运行 · 自动刷新 · 点击「查看报告」打开详情</p>
-  <table>
-    <thead><tr><th>时间</th><th>结果</th><th>步骤</th><th>失败</th>
-    <th>耗时(秒)</th><th>报告</th></tr></thead>
-    <tbody>
+  <div class="head"><h1>MeowGo</h1><span class="dot">·</span></div>
+  <p class="muted">运行报告 · 最近 {keep} 次 · 自动刷新 · 点击「查看报告」打开详情</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>时间</th><th>结果</th><th>步骤</th><th>失败</th>
+      <th>耗时(秒)</th><th>报告</th></tr></thead>
+      <tbody>
 {body}
-    </tbody>
-  </table>
+      </tbody>
+    </table>
+  </div>
 </main>
 </body>
 </html>

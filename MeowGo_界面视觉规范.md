@@ -1,6 +1,10 @@
 # MeowGo 软件界面视觉规范（Design Tokens）
 
-> 版本：v1.0 ｜ 适用：MeowGo 系列桌面端 / 移动端界面 ｜ 依据：MeowGo 品牌 Logo（黑色圆润字标 + 黑猫剪影 + 暖橙点缀）
+> 版本：v1.2 ｜ 适用：MeowGo 系列桌面端 / 移动端界面 / HTML 运行报告页 ｜ 依据：MeowGo 品牌 Logo（黑色圆润字标 + 黑猫剪影 + 暖橙点缀）
+>
+> v1.1 起，桌面端的实际色值、字号、间距、圆角、控件高度与图标尺寸统一收敛到 `rpa/theme.py`；本文档描述设计意图与 token 语义，代码不得再各自维护一套色值。
+>
+> v1.2：新增语义色深变体令牌（`*-text`，用于浅色底上的小字），并把 HTML 运行报告页纳入规范（§12），报告页色值同样只从 `rpa/theme.py` 取。
 
 ---
 
@@ -21,6 +25,18 @@
 **圆润 · 亲和 · 极简 · 黑与橙的克制碰撞**
 
 Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界面顶部品牌位）
+
+### 1.3 桌面端落地方式（v1.1）
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 设计令牌 | `rpa/theme.py` | 浅/暗色板、字体阶梯、间距、圆角、控件高度、图标尺寸、按钮配色 |
+| 基础控件 | `rpa/uikit.py` | `RoundButton` / `RoundedCard` / `Switch` / `SearchableCombo`，只读令牌 |
+| 主界面 | `rpa/gui.py` | 顶栏、执行组面板、步骤表、日志、状态栏与全部对话框 |
+| 报告页（HTML） | `rpa/engine.py` | 运行报告索引页，色值同样注入自 `rpa/theme.py` |
+| 校验 | `tests/test_theme.py` | 色板键名一致、HEX 合法、文本对比度、尺寸阶梯、按钮配色、语义文字对比度 |
+
+> 桌面端用逻辑像素布局，再乘 `App.scale`（当前 150% DPI ≈ 1.4985）。不要把物理像素写死到控件里。
 
 ---
 
@@ -66,7 +82,12 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 | `--mg-warning` | 警告 | `#E0A33C` | 警告提示、待处理 |
 | `--mg-danger` | 错误 | `#D9534F` | 错误提示、删除操作 |
 | `--mg-info` | 信息 | `#5B8DEF` | 信息提示、链接 |
+| `--mg-success-text` | 成功-文字 | `#2C7755` | 浅色底（Tag / pill）上的成功文字，对比度 ≥ 4.5:1 |
+| `--mg-warning-text` | 警告-文字 | `#8F5600` | 浅色底上的警告文字 |
+| `--mg-danger-text` | 错误-文字 | `#B03B37` | 浅色底上的错误文字 |
 | 各语义色浅底 | 提示底色 | 同色 12% 透明度 | Tag 底 / Toast 底 |
+
+> 语义色直接作文字对比度不足（如 `#3E9B6F` 仅 3.9:1）；小字（≤12px）一律使用上面的 `*-text` 深变体。暗色模式下 `*-text` 改用提亮后的语义色本身（深色浅底上对比度已 ≥ 6:1）。
 
 ### 2.5 暗色模式
 
@@ -211,7 +232,7 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 
 ### 8.5 标签 / 徽章 Tag
 
-- 胶囊圆角，底色用语义色 12% 透明，文字用语义色深变体（如成功 `#2E7D5A`）。
+- 胶囊圆角，底色用语义色 12% 透明，文字用语义色深变体（成功 `#2C7755` / 警告 `#8F5600` / 错误 `#B03B37`，即 `--mg-*-text`）。
 - 选中 / 活跃 Tag：`--mg-orange-tint` 底 + `#E8861F` 文字。
 
 ### 8.6 提示 Toast / 弹窗 Modal
@@ -266,6 +287,23 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 
 ---
 
+## 12. HTML 运行报告页（ reports/index.html ）
+
+运行报告索引是产品界面在浏览器里的延伸，**同样只允许使用本规范的令牌**（色值由 `rpa/theme.py` 注入，代码不得另写一套）：
+
+| 元素 | 规范 |
+|---|---|
+| 整体基调 | 恒为浅色暖白板（`--mg-bg` / `--mg-surface`），不跟随桌面端暗色主题 |
+| 标题区 | 「MeowGo」字标 + 暖橙圆点（`--mg-orange`），与桌面端品牌位一致；favicon 用墨黑圆角方 + 暖橙圆点 |
+| 表格容器 | 白底卡片、1px `--mg-border`、圆角 12px（`--mg-radius-m`）、阴影 `--mg-shadow-1` |
+| 表头 | `--mg-surface-2` 底 + `--mg-text-2` 字，12px SemiBold |
+| 行 | 隔行 `--mg-zebra`；Hover `--mg-orange-mist`；数字列等宽字形（tabular-nums） |
+| 链接 | `--mg-orange-strong`（保证对比度），Hover 下划线 |
+| 结果 pill | 成功 `--mg-mark-done` 底 + `--mg-success-text` 字；失败 `--mg-mark-failed` + `--mg-danger-text`；已停止 `--mg-mark-running` + `--mg-warning-text`；胶囊圆角 |
+| 空状态 | `--mg-text-3` 居中文案 |
+
+---
+
 ## 附：Token 速查表
 
 | 分类 | 关键 Token |
@@ -273,6 +311,7 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 | 品牌 | `--mg-ink #080806`、`--mg-orange #FDAD63`、`--mg-white #FFFFFF` |
 | 背景 | `--mg-bg #FAF9F7`、`--mg-surface #FFFFFF`、`--mg-surface-2 #F3F1ED` |
 | 文本 | `--mg-text-1 #080806`、`-2 #6B655E`、`-3 #A8A29A` |
+| 语义文字 | 成功 `--mg-success-text #2C7755`、警告 `--mg-warning-text #8F5600`、错误 `--mg-danger-text #B03B37` |
 | 边框 | `--mg-border #E6E2DB`、`-strong #D4CFC6` |
 | 圆角 | 8 / 12 / 16 / 24 / 999 |
 | 间距 | 4 / 8 / 12 / 16 / 24 / 32 / 48 / 64 |

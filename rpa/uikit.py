@@ -15,7 +15,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageTk
 
-from . import pixel_cat
+from . import pixel_cat, theme
 
 GRID = 24          # 图标设计网格
 SUPER = 4          # 超采样倍数
@@ -44,15 +44,6 @@ def _mix(color: str, other: str, amount: float) -> str:
     except (ValueError, IndexError):
         return color        # Tk 颜色名（如 white）无法直接解析时放弃阴影
     return _rgb_to_hex(tuple(a[i] + (b[i] - a[i]) * amount for i in range(3)))
-
-
-def _is_dark_color(color: str) -> bool:
-    """判断底色是否偏暗：ghost 按钮据此决定用亮字还是暗字。"""
-    try:
-        r, g, b = _hex_to_rgb(color)
-    except (ValueError, IndexError):
-        return False
-    return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 128
 
 
 class _ScaledDraw:
@@ -94,6 +85,14 @@ class _ScaledDraw:
         self._d.rounded_rectangle(self._box(box), radius=radius * self._k,
                                   fill=fill, outline=outline,
                                   width=self._width(width))
+
+    def pieslice(self, box, start, end, fill=None, outline=None, width=1):
+        box = self._box(box)
+        if hasattr(self._d, "pieslice"):     # Pillow ≥ 8.2
+            self._d.pieslice(box, start, end, fill=fill, outline=outline,
+                             width=self._width(width))
+        else:                                 # 旧版：chord 只支持填充
+            self._d.chord(box, start, end, fill=fill, outline=outline)
 
 
 def _polyline(draw: "_ScaledDraw", points, color, width):
@@ -352,9 +351,14 @@ class CatCanvas(tk.Canvas):
     矢量版一致：set_colors() 换主题、redraw() 重画、destroy() 停动画。
     """
 
-    def __init__(self, parent, scale: float = 1.0, bg: str = "#FFFFFF",
-                 ink: str = "#080806", accent: str = "#FDAD63",
-                 nose: str = "#E8861F", **kwargs):
+    def __init__(self, parent, scale: float = 1.0,
+                 bg: str | None = None, ink: str | None = None,
+                 accent: str | None = None, nose: str | None = None,
+                 **kwargs):
+        bg = bg or theme.token("CARD")
+        ink = ink or theme.token("TEXT")
+        accent = accent or theme.token("ACCENT")
+        nose = nose or theme.token("ACCENT_STRONG")
         self.ink = ink
         self.accent = accent
         self.nose = nose
@@ -510,14 +514,17 @@ class RoundedCard(tk.Frame):
     因此可以直接替换原来的 tk.Frame，不需要改成固定尺寸。
     """
 
-    def __init__(self, master, radius: int = 16, bg: str = "#FFFFFF",
-                 border: str = "#E6E2DB", outer_bg: str | None = None,
-                 padding: int = 6, shadow: bool = True, **kwargs):
+    def __init__(self, master, radius: int = theme.RADIUS_L,
+                 bg: str | None = None, border: str | None = None,
+                 outer_bg: str | None = None, padding: int = 6,
+                 shadow: bool = True, **kwargs):
+        bg = bg or theme.token("CARD")
+        border = border or theme.token("BORDER")
         if outer_bg is None:
             try:
                 outer_bg = str(master.cget("bg"))
             except tk.TclError:
-                outer_bg = "#FAF9F7"
+                outer_bg = theme.token("BG")
         super().__init__(master, bg=bg, bd=0, highlightthickness=0, **kwargs)
         self.radius = int(radius)
         self.card_bg = bg
@@ -540,7 +547,7 @@ class RoundedCard(tk.Frame):
         self._canvas.delete("card")
         # 低饱和柔和阴影：Tk 没有 alpha，用外侧底色混一点墨黑模拟 shadow-1。
         if self.shadow:
-            shadow = _mix(self.outer_bg, "#080806", 0.08)
+            shadow = _mix(self.outer_bg, theme.INK, 0.08)
             round_rect(
                 self._canvas, 3, 3, width - 1, height - 1,
                 min(self.radius, (width - 4) / 2, (height - 4) / 2),
@@ -607,9 +614,9 @@ class Tooltip:
         self.tip = tk.Toplevel(self.widget)
         self.tip.overrideredirect(True)
         self.tip.attributes("-topmost", True)
-        label = tk.Label(self.tip, text=self.text, bg="#080806", fg="#F5F2ED",
-                         padx=9, pady=5, font=("Microsoft YaHei UI", 9),
-                         bd=0)
+        label = tk.Label(self.tip, text=self.text,
+                         bg=theme.token("LOG_BG"), fg=theme.token("LOG_FG"),
+                         padx=9, pady=5, font=theme.FONT_NOTE, bd=0)
         label.pack()
         x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
@@ -630,35 +637,38 @@ class Tooltip:
 # 自绘右键菜单（与界面同风格：圆角卡片 + 图标 + 悬停高亮）
 # ---------------------------------------------------------------------------
 
-MENU_CARD = "#FFFFFF"
-MENU_BORDER = "#E6E2DB"
-MENU_HOVER = "#FFF6EC"
-MENU_HOVER_DANGER = "#FBEAE9"
-MENU_TEXT = "#080806"
-MENU_MUTED = "#A8A29A"
-MENU_DANGER = "#D9534F"
-MENU_ACCENT = "#E8861F"
+MENU_CARD = theme.token("CARD")
+MENU_BORDER = theme.token("BORDER")
+MENU_HOVER = theme.token("ACCENT_MIST")
+MENU_HOVER_DANGER = theme.token("MARK_FAILED")
+MENU_TEXT = theme.token("TEXT")
+MENU_MUTED = theme.token("TEXT_WEAK")
+MENU_DANGER = theme.token("DANGER")
+MENU_ACCENT = theme.token("ACCENT_STRONG")
 
-# 暗色模式开关：自绘控件（圆角按钮 / 菜单）的配色随此切换。
-# 菜单是即用即建的，改全局常量即可；按钮要存活过切换，故 _palette 现读现算。
-_DARK_MODE = {"on": False}
+
+def _refresh_menu_tokens() -> None:
+    """把主题令牌同步到菜单模块常量（菜单是即用即建，改常量即可）。"""
+    dark = theme.is_dark()
+    globals().update(
+        MENU_CARD=theme.token("CARD"),
+        MENU_BORDER=theme.token("BORDER"),
+        MENU_HOVER=theme.token("ACCENT_MIST"),
+        MENU_HOVER_DANGER=theme.token("MARK_FAILED"),
+        MENU_TEXT=theme.token("TEXT"),
+        MENU_MUTED=theme.token("TEXT_WEAK"),
+        MENU_DANGER=theme.token("DANGER"),
+        MENU_ACCENT=theme.token("ACCENT") if dark
+        else theme.token("ACCENT_STRONG"),
+    )
 
 
 def set_dark_mode(on: bool) -> None:
     """切换暗色配色（全局生效；已有控件需各自 refresh 才会重画）。"""
-    dark = bool(on)
-    if dark == _DARK_MODE["on"]:
-        return
-    _DARK_MODE["on"] = dark
-    globals().update(
-        MENU_CARD="#1D1B18" if dark else "#FFFFFF",
-        MENU_BORDER="#35312B" if dark else "#E6E2DB",
-        MENU_HOVER="#2A2118" if dark else "#FFF6EC",
-        MENU_HOVER_DANGER="#352322" if dark else "#FBEAE9",
-        MENU_TEXT="#F5F2ED" if dark else "#080806",
-        MENU_MUTED="#A8A29A" if dark else "#A8A29A",
-        MENU_ACCENT="#FDAD63" if dark else "#E8861F",
-    )
+    theme.set_dark(bool(on))
+    _refresh_menu_tokens()
+
+
 TRANSPARENT_KEY = "#ff00fe"   # 用于抠掉圆角外的区域
 
 # 多屏坐标：菜单必须落在鼠标所在的那块屏幕里（副屏在主屏左边时是负坐标，
@@ -673,8 +683,9 @@ def _load_monitor_api():
         try:
             import ctypes
 
-            class POINT(ctypes.Structure):
-                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            # 用 wintypes.POINT：自定义同名结构体虽字段一致，但 ctypes 按
+            # 类型对象比对 argtypes，会和别处（pyautogui / tray）冲突
+            POINT = ctypes.wintypes.POINT
 
             class RECT(ctypes.Structure):
                 _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
@@ -789,7 +800,7 @@ class ContextMenu(tk.Toplevel):
                 self.items.append(item)
             elif isinstance(item, str):
                 self.items.append(MenuItem(item))
-        self.font = tkfont.Font(family="Microsoft YaHei UI", size=font_size)
+        self.font = tkfont.Font(family=theme.FONT_FAMILY, size=font_size)
 
         self.row_h = s(31)
         self.pad_y = s(6)
@@ -1068,11 +1079,13 @@ class RoundButton(tk.Canvas):
 
     def __init__(self, master, text: str = "", icon_name: str | None = None,
                  command=None, kind: str = SOLID, scale: float = 1.0,
-                 height: int = 36, pad: tuple[int, int] = (14, 14),
-                 icon_size: int = 16, radius: int = 12, tooltip: str = "",
-                 font_size: int = 9, bg: str = "#FAF9F7", bold: bool = False):
+                 height: int = theme.CONTROL_MD, pad: tuple[int, int] = (14, 14),
+                 icon_size: int = theme.ICON_MD, radius: int = theme.RADIUS_M,
+                 tooltip: str = "", font_size: int = theme.FONT_SIZE_NOTE,
+                 bg: str | None = None, bold: bool = False):
         if isinstance(pad, (int, float)):
             pad = (pad, pad)
+        bg = bg or theme.token("BG")
         self.scale = scale
         self.kind = kind
         self.command = command
@@ -1083,7 +1096,7 @@ class RoundButton(tk.Canvas):
         self.pad = (int(round(pad[0] * scale)), int(round(pad[1] * scale)))
         self.icon_size = int(round(icon_size * scale))
         self.gap = int(round(6 * scale)) if (icon_name and text) else 0
-        self.font = tkfont.Font(family="Microsoft YaHei UI",
+        self.font = tkfont.Font(family=theme.FONT_FAMILY,
                                 size=font_size, weight="bold" if bold else "normal")
         self._enabled = True
         self._hover = False
@@ -1107,59 +1120,23 @@ class RoundButton(tk.Canvas):
         self._tip = Tooltip(self, tooltip or text)
 
     # -- 配色 -------------------------------------------------------------
-    def _palette(self) -> tuple[str, str]:
-        """返回 (背景色, 前景色)。"""
-        dark = _DARK_MODE["on"]
-        bg = str(self["bg"])
-        dark_bg = _is_dark_color(bg)
-        if self.kind == "accent":
-            base, fg = "#FDAD63", "#080806"
-            hover, active = "#E8861F", "#D97712"
-        elif self.kind == "danger":
-            base, fg = "#D9534F", "#FFFFFF"
-            hover, active = "#C74642", "#B03B37"
-        elif self.kind == "outline":
-            if dark:
-                base, fg = "#1D1B18", "#F5F2ED"
-                hover, active = "#26231F", "#302B26"
-            else:
-                base, fg = "#FFFFFF", "#080806"
-                hover, active = "#F3F1ED", "#FFE9D2"
-        elif self.kind == "ghost":
-            base = bg
-            if dark or dark_bg:
-                # 深色底（如日志标题栏）上的 ghost：暖白文字 + 深色悬停
-                fg = "#F5F2ED"
-                hover = "#2A2118" if dark else "#26231F"
-                active = "#3A2D20" if dark else "#302B26"
-            else:
-                fg, hover, active = "#080806", "#FFF6EC", "#FFE9D2"
-        else:
-            if dark:
-                base, fg = "#26231F", "#F5F2ED"
-                hover, active = "#302B26", "#3A342C"
-            else:
-                base, fg = "#F3F1ED", "#080806"
-                hover, active = "#E9E5DE", "#DFDAD2"
-        if not self._enabled:
-            if self.kind in ("accent", "danger"):
-                if dark:
-                    return "#2A2622", "#6B655E"
-                return "#E6E2DB", "#A8A29A"
-            if dark or (self.kind == "ghost" and dark_bg):
-                return "#26231F", "#6B655E"
-            return "#E6E2DB", "#A8A29A"
-        if self._pressed:
-            return active, fg
-        if self._hover:
-            return hover, fg
-        return base, fg
+    def _palette(self) -> tuple[str, str, str]:
+        """返回 (背景色, 前景色, 描边色)；颜色全部来自 rpa.theme。"""
+        return theme.button_colors(
+            self.kind, str(self["bg"]), enabled=self._enabled,
+            hover=self._hover, pressed=self._pressed)
 
     def _rebuild(self) -> None:
-        fill, fg = self._palette()
-        border = ("#35312B" if _DARK_MODE["on"] else "#E6E2DB") \
-            if (self.kind == "outline" and self._enabled) else ""
+        fill, fg, border = self._palette()
         self.itemconfigure(self._shape, fill=fill, outline=border)
+        # 纯图标 ghost 按钮静默时用次级文字色，悬停再回到主文字色：
+        # 顶栏一排黑色图标会抢标题的注意力，弱化后层级更清楚。
+        icon_fg = fg
+        if (self.kind == "ghost" and not self.text and self._enabled
+                and not self._hover and not self._pressed):
+            icon_fg = (theme.token("LOG_HEAD_MUTED")
+                       if theme.is_dark_color(str(self["bg"]))
+                       else theme.token("MUTED"))
         for item in self._content:
             self.delete(item)
         self._content = []
@@ -1167,7 +1144,7 @@ class RoundButton(tk.Canvas):
         width = int(self["width"])
         x = self.pad[0]
         if self.icon_name:
-            image = icon(self.icon_name, self.icon_size, fg)
+            image = icon(self.icon_name, self.icon_size, icon_fg)
             self._content.append(self.create_image(x, self.height // 2,
                                                    image=image, anchor="w"))
             self._icon_ref = image
@@ -1263,8 +1240,9 @@ class Switch(tk.Canvas):
     """圆角开关：点击切换绑定的 BooleanVar，也可由外部改值自动重画。"""
 
     def __init__(self, master, variable: tk.BooleanVar, command=None,
-                 scale: float = 1.0, bg: str = "#FFFFFF",
+                 scale: float = 1.0, bg: str | None = None,
                  tooltip: str = ""):
+        bg = bg or theme.token("CARD")
         self.scale = scale
         self.variable = variable
         self.command = command
@@ -1276,6 +1254,7 @@ class Switch(tk.Canvas):
                          takefocus=True)
         self._on = bool(variable.get())
         self._hover = False
+        self._enabled = True
         self._trace = variable.trace_add("write", self._on_variable)
         self.bind("<Button-1>", self._toggle)
         self.bind("<space>", self._toggle)
@@ -1291,23 +1270,32 @@ class Switch(tk.Canvas):
     def _draw(self) -> None:
         self.delete("all")
         w, h = self.track_w, self.track_h
-        dark = _DARK_MODE["on"]
-        if self._on:
-            track = "#E8861F" if self._hover else "#FDAD63"
-        elif dark:
-            track = "#4A443C" if self._hover else "#35312B"
+        if not self._enabled:
+            track = theme.token("BORDER")
+        elif self._on:
+            track = (theme.token("ACCENT_STRONG") if self._hover
+                     else theme.token("ACCENT"))
         else:
-            track = "#D4CFC6" if self._hover else "#E6E2DB"
+            track = (theme.token("BORDER_STRONG") if self._hover
+                     else theme.token("BORDER"))
         round_rect(self, 1, 1, w + 1, h + 1, h / 2, fill=track, outline="")
         pad = max(2, int(round(2.5 * self.scale)))
         knob = (h - pad * 2) / 2
         cx = (w + 1 - pad - knob) if self._on else (1 + pad + knob)
         cy = (h + 2) / 2
         self.create_oval(cx - knob, cy - knob, cx + knob, cy + knob,
-                         fill="#FFFFFF", outline="")
+                         fill=(theme.token("CARD") if self._enabled
+                               else theme.token("HEADING_BG")), outline="")
 
     # -- 交互 -------------------------------------------------------------
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        self.configure(cursor="hand2" if self._enabled else "arrow")
+        self._draw()
+
     def _toggle(self, _event=None) -> str:
+        if not self._enabled:
+            return "break"
         self.variable.set(not bool(self.variable.get()))
         return "break"
 
@@ -1318,6 +1306,8 @@ class Switch(tk.Canvas):
             self._draw()
 
     def _on_enter(self, _event=None) -> None:
+        if not self._enabled:
+            return
         self._hover = True
         self._draw()
 
@@ -1389,13 +1379,14 @@ class SearchableCombo(tk.Frame):
     """
 
     def __init__(self, master, options, variable: tk.StringVar | None = None,
-                 command=None, scale: float = 1.0, bg: str = "#FFFFFF",
-                 font_size: int = 9, width: int = 22):
+                 command=None, scale: float = 1.0, bg: str | None = None,
+                 font_size: int = theme.FONT_SIZE_NOTE, width: int = 22):
+        bg = bg or theme.token("CARD")
         super().__init__(master, bg=bg)
         self.scale = scale
         self.bg = bg
         self.command = command
-        self.font = tkfont.Font(family="Microsoft YaHei UI", size=font_size)
+        self.font = tkfont.Font(family=theme.FONT_FAMILY, size=font_size)
         self.font_size = font_size
         self._items = [_ComboOption(*item) if isinstance(item, tuple) else item
                        for item in options]
@@ -1411,17 +1402,19 @@ class SearchableCombo(tk.Frame):
         self._listbox: tk.Listbox | None = None
         self._rows: list[tuple[str, str | None]] = []
         self._enabled = True
-        self._height = max(24, int(round(32 * scale)))
+        self._height = max(theme.CONTROL_XS,
+                           int(round(theme.CONTROL_SM * scale)))
         self._suppress_focus = False
         self._outside_bind: str | None = None
 
         self.entry = ttk.Entry(self, textvariable=self.var,
-                               width=width,
-                               font=("Microsoft YaHei UI", font_size))
+                               width=width, style="Combo.TEntry",
+                               font=(theme.FONT_FAMILY, font_size))
         self.entry.pack(side="left", fill="x", expand=True)
         self.btn = RoundButton(self, "", "chevron_down", self._toggle_popup,
                                kind="ghost", scale=scale, bg=bg,
-                               height=self._height, pad=4, icon_size=12,
+                               height=self._height, pad=theme.SPACE_4,
+                               icon_size=theme.ICON_XS,
                                tooltip="展开 / 收起指令类型")
         self.btn.pack(side="right", padx=(2, 0))
         self.entry.bind("<KeyRelease>", self._on_key)

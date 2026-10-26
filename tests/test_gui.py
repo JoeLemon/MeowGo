@@ -25,15 +25,6 @@ gui_module.enable_dpi_awareness()
 
 app = gui_module.App()
 print(f"  INFO  DPI 缩放系数 = {app.scale}")
-# DEBUG: 抓合成按键来源
-_REAL_EG = tk.Misc.event_generate
-def _dbg_eg(self, sequence=None, **kw):
-    if "space" in str(sequence).lower() or kw.get("keysym") == "space":
-        import traceback
-        print("DEBUG EG", self, sequence, kw)
-        traceback.print_stack()
-    return _REAL_EG(self, sequence, **kw)
-tk.Misc.event_generate = _dbg_eg
 # App 初始化时会预置默认组；seed() 随后会覆盖项目，先留一份快照做断言
 _INITIAL_GROUPS = [(group.name,
                     [(step.type, step.content) for step in group.steps])
@@ -923,33 +914,34 @@ def test_run_with_data():
             if not app.running and "执行完成" in text:
                 break
             time.sleep(0.05)
+        text = app.log_text.get("1.0", "end")
+        assert "数据驱动：共 2 行" in text, text
+        assert "第 2/2 行" in text, text
+        report = app.executor.report()
+        assert report["rows"] == 2, report
+        assert len(report["detail"]) == 4, report["detail"]   # 2 行 × 2 步
+        # 统计里记的是渲染后的内容
+        contents = [d["content"] for d in report["detail"]]
+        assert "你好甲" in contents and "你好乙" in contents, contents
+
+        # 普通运行后 data 必须清空：不会残留上一次的数据。
+        # 第二次运行也必须用输入替身，否则会把空格粘到后续测试的窗口里。
+        app.executor.data = [{"名字": "残留"}]
+        app.clear_log()
+        app.run_group()
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            app.update()
+            if not app.running:
+                break
+            time.sleep(0.05)
+        assert app.executor.data is None, "普通运行不应残留数据"
+        text = app.log_text.get("1.0", "end")
+        assert "数据驱动" not in text, text
     finally:
         gui_module.filedialog.askopenfilename = real_ask
         gui_module.DataPreviewDialog = real_preview
         app.executor._input_text = real_input_text
-    text = app.log_text.get("1.0", "end")
-    assert "数据驱动：共 2 行" in text, text
-    assert "第 2/2 行" in text, text
-    report = app.executor.report()
-    assert report["rows"] == 2, report
-    assert len(report["detail"]) == 4, report["detail"]   # 2 行 × 2 步
-    # 统计里记的是渲染后的内容
-    contents = [d["content"] for d in report["detail"]]
-    assert "你好甲" in contents and "你好乙" in contents, contents
-
-    # 普通运行后 data 必须清空：不会残留上一次的数据
-    app.executor.data = [{"名字": "残留"}]
-    app.clear_log()
-    app.run_group()
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        app.update()
-        if not app.running:
-            break
-        time.sleep(0.05)
-    assert app.executor.data is None, "普通运行不应残留数据"
-    text = app.log_text.get("1.0", "end")
-    assert "数据驱动" not in text, text
     mark("带数据运行")
 
 
@@ -2054,6 +2046,29 @@ def test_step_dialog_advanced_roundtrip():
     mark("高级选项回显与保存")
 
 
+def test_top_menus_buildable():
+    """每个顶部菜单都要能完整构建出下拉菜单，图标一个不能少。
+
+    回归：「视图」菜单的 moon 图标调了 _ScaledDraw 没有实现的 pieslice，
+    图标渲染抛 AttributeError，整个菜单创建失败、点开是空的。
+    """
+    seen_icons = set()
+    for name, builder in app._menu_defs():
+        items = builder()
+        assert items, f"{name} 菜单不应该为空"
+        menu = app._menu(items)
+        assert len(menu.items) == len(items), f"{name} 菜单行数对不上"
+        for row in menu._rows:
+            item = row["item"]
+            if item.icon:
+                seen_icons.add(item.icon)
+                assert row["image"] is not None, \
+                    f"{name} 菜单「{item.label}」的图标 {item.icon} 没画出来"
+        menu.destroy()
+    assert "moon" in seen_icons, "视图菜单应包含主题切换的 moon 图标"
+    mark("顶部菜单可完整构建")
+
+
 def test_settings_dialog_result_flags():
     """设置里可以关掉失败截图 / 结果回写，且不冲掉其它键。"""
     dialog = _RealSettingsDialog(
@@ -2069,6 +2084,217 @@ def test_settings_dialog_result_flags():
     assert dialog.result["save_results"] is False
     assert dialog.result["schedule"] == {"enabled": True}, "定时配置应保留"
     mark("截图/结果开关")
+
+
+def test_settings_dialog_tray():
+    """设置对话框：两个托盘开关默认关闭，可随保存写进结果。"""
+    dialog = _RealSettingsDialog(app, {}, app.image_dir)
+    app.update()
+    assert dialog.var_tray_min.get() is False, "默认不启动到托盘"
+    assert dialog.var_tray_close.get() is False, "默认不关窗到托盘"
+    dialog.var_tray_min.set(True)
+    dialog.var_tray_close.set(True)
+    dialog.ok()
+    assert dialog.result["tray_start_minimized"] is True
+    assert dialog.result["tray_on_close"] is True
+    # 已有设置回显
+    dialog2 = _RealSettingsDialog(app, {"tray_on_close": True}, app.image_dir)
+    app.update()
+    assert dialog2.var_tray_close.get() is True, "应回显已保存的开关"
+    assert dialog2.var_tray_min.get() is False
+    dialog2.destroy()
+    mark("托盘开关保存与回显")
+
+
+def test_app_tray_lifecycle():
+    """App 层：设置保存后按托盘开关创建 / 移除图标（打桩，不弹真托盘）。"""
+    module = gui_module.tray
+    created: list[dict] = []
+
+    class FakeTray:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+            self.stopped = False
+
+        def start(self, source="", dark=False):
+            return True
+
+        def stop(self):
+            self.stopped = True
+
+        def set_icon(self, dark):
+            pass
+
+        def notify(self, *args, **kwargs):
+            pass
+
+    real = module.TrayIcon
+    module.TrayIcon = FakeTray
+    saved = dict(app.settings)
+    saved_tray = app.tray
+    try:
+        app.settings.pop("tray_on_close", None)
+        app.settings.pop("tray_start_minimized", None)
+        app._apply_tray_settings()
+        assert app.tray is None, "两个开关都关：不应有托盘图标"
+        app.settings["tray_on_close"] = True
+        app._apply_tray_settings()
+        assert app.tray is not None, "开启关窗到托盘：应创建图标"
+        assert created and created[-1]["tip"] == gui_module.APP_TITLE
+        assert len(created) == 1, "重复应用设置不应重复创建图标"
+        # 关掉一个、留着另一个：图标保持
+        app.settings["tray_on_close"] = False
+        app.settings["tray_start_minimized"] = True
+        app._apply_tray_settings()
+        assert app.tray is not None, "仍有一个开关开着：图标保持"
+        # 两个都关：移除
+        app.settings["tray_start_minimized"] = False
+        app._apply_tray_settings()
+        assert app.tray is None, "两个开关都关：应移除图标"
+    finally:
+        if app.tray is not None:
+            app.tray.stop()
+        app.tray = saved_tray
+        app.settings.clear()
+        app.settings.update(saved)
+        module.TrayIcon = real
+    mark("托盘图标随设置启停")
+
+
+def test_close_to_tray_behavior():
+    """关窗到托盘：勾选时收起窗口发气泡，托盘双击恢复；会话结束不躲托盘。"""
+    class FakeTray:
+        def __init__(self):
+            self.notified: list[str] = []
+
+        def start(self, source="", dark=False):
+            return True
+
+        def stop(self):
+            pass
+
+        def set_icon(self, dark):
+            pass
+
+        def notify(self, title, text="", on_click=None):
+            self.notified.append(title)
+
+    fake = FakeTray()
+    saved = dict(app.settings)
+    saved_tray = app.tray
+    try:
+        app.tray = fake
+        app.settings["tray_on_close"] = True
+        app._tray_window_visible = True
+        assert app._close_hides_to_tray() is True
+        app.on_close()
+        app.update()
+        assert app._tray_window_visible is False, "关窗应记下窗口已隐藏"
+        assert fake.notified == ["MeowGo 还在运行"], fake.notified
+        assert app.state() == "withdrawn", app.state()
+        assert app.winfo_exists(), "收进托盘不是退出，窗口还在"
+        # 托盘双击恢复
+        app._tray_show_window()
+        app.update()
+        assert app._tray_window_visible is True
+        assert app.state() == "normal", app.state()
+        # 会话结束（关机/注销）中：即使勾了也不躲托盘
+        app._session_ending = True
+        assert app._close_hides_to_tray() is False
+        app._session_ending = False
+        # 没勾选：不躲托盘（走退出分支，只验证判定）
+        app.settings["tray_on_close"] = False
+        assert app._close_hides_to_tray() is False
+    finally:
+        app.settings.clear()
+        app.settings.update(saved)
+        app.tray = saved_tray
+        app._tray_window_visible = True
+        if app.state() != "normal":
+            app.deiconify()
+        app.update()
+    mark("关窗到托盘与恢复")
+
+
+def test_settings_dialog_autostart():
+    """设置对话框：开机自启开关与注册表操作联动（打桩，不碰真注册表）。"""
+    dialog = _RealSettingsDialog(app, {}, app.image_dir)
+    app.update()
+    assert dialog.var_autostart.get() is False, "默认未开启"
+
+    module = gui_module.autostart
+    real = (module.is_enabled, module.current_command,
+            module.enable, module.disable)
+    state = {"enabled": False, "command": ""}
+    calls = []
+
+    def fake_is_enabled(*_a, **_k):
+        return state["enabled"]
+
+    def fake_current_command(*_a, **_k):
+        return state["command"]
+
+    def fake_enable(*_a, **_k):
+        calls.append("enable")
+        state["enabled"] = True
+        state["command"] = module.launch_command()
+        return True, ""
+
+    def fake_disable(*_a, **_k):
+        calls.append("disable")
+        state["enabled"] = False
+        state["command"] = ""
+        return True, ""
+
+    module.is_enabled = fake_is_enabled
+    module.current_command = fake_current_command
+    module.enable = fake_enable
+    module.disable = fake_disable
+    try:
+        # 1) 开启：保存时调用 enable，结果里记录开关
+        dialog.var_autostart.set(True)
+        dialog.ok()
+        assert calls == ["enable"], calls
+        assert dialog.result["autostart"] is True
+        assert not dialog.winfo_exists(), "成功后对话框应关闭"
+
+        # 2) 已开启时再开会话：开关回显为 True；关掉 → disable
+        dialog2 = _RealSettingsDialog(app, {}, app.image_dir)
+        app.update()
+        assert dialog2.var_autostart.get() is True, "应回显注册表实况"
+        dialog2.var_autostart.set(False)
+        dialog2.ok()
+        assert calls == ["enable", "disable"], calls
+        assert dialog2.result["autostart"] is False
+
+        # 3) 自愈：已开启但命令过期（程序搬家）→ 重新注册一次
+        state["enabled"] = True
+        state["command"] = '"C:\\旧路径\\MeowGo.exe"'
+        dialog3 = _RealSettingsDialog(app, {}, app.image_dir)
+        app.update()
+        dialog3.ok()
+        assert calls[-1] == "enable", "过期命令应被重写"
+
+        # 4) 开启失败：弹错误框且对话框不关闭
+        state["enabled"] = False
+        state["command"] = ""
+
+        def fake_enable_fail(*_a, **_k):
+            calls.append("enable")
+            return False, "写入注册表失败：测试"
+
+        module.enable = fake_enable_fail
+        dialog4 = _RealSettingsDialog(app, {}, app.image_dir)
+        app.update()
+        dialog4.var_autostart.set(True)
+        dialog4.ok()
+        assert dialog4.result is None, "失败不应产生结果"
+        assert dialog4.winfo_exists(), "失败时应留在对话框里"
+        dialog4.destroy()
+    finally:
+        (module.is_enabled, module.current_command,
+         module.enable, module.disable) = real
+    mark("开机自启开关")
 
 
 def test_schedule_task_command():
@@ -2358,6 +2584,7 @@ def finish():
         test_image_preview_pane()
         test_zebra_and_type_colors()
         test_settings_dialog_preserves_keys()
+        test_top_menus_buildable()
         test_canvas_cat_empty_state()
         test_pixel_cat_transparent_background()
         test_theme_switch()
@@ -2368,6 +2595,10 @@ def finish():
         test_settings_dialog_mini_bar()
         test_step_dialog_advanced_roundtrip()
         test_settings_dialog_result_flags()
+        test_settings_dialog_autostart()
+        test_settings_dialog_tray()
+        test_app_tray_lifecycle()
+        test_close_to_tray_behavior()
         test_schedule_task_command()
         test_result_writeback_from_gui()
         test_resume_retries_failed_tail()

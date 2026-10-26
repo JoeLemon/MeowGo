@@ -1229,6 +1229,35 @@ def test_write_report_index_retention():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_report_index_uses_brand_tokens():
+    """报告索引页必须走 MeowGo 设计令牌（暖白板），不允许再出现冷蓝色板。"""
+    from rpa import theme
+    from rpa.engine import write_report_index
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_index_brand_")
+    try:
+        path = os.path.join(tmp, "run_20240101_120000.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# 运行报告\n\n- 结果：finished\n"
+                     "- 步骤数：3，失败：0\n- 总耗时：1.5 秒\n")
+        page = write_report_index(tmp, keep=5)
+        text = open(page, encoding="utf-8").read()
+
+        p = theme.LIGHT_PALETTE
+        for color in (p["BG"], p["CARD"], p["BORDER"], p["ACCENT"],
+                      p["ACCENT_STRONG"], p["HEADING_BG"], p["ZEBRA"],
+                      p["MARK_DONE"], p["SUCCESS_TEXT"]):
+            assert color in text, f"报告页缺少品牌色 {color}"
+        # 旧版冷蓝色板不应残留
+        for stale in ("#f4f6fa", "#3b6ff5", "#eef2f8", "#22262e", "#e2e7f0"):
+            assert stale not in text.lower(), f"报告页残留旧配色 {stale}"
+        # 圆角 / 层级走令牌阶梯（12px 卡片圆角，而非任意值）
+        assert f"border-radius: {theme.RADIUS_M}px" in text
+        assert "MeowGo" in text and "运行报告" in text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
