@@ -13,6 +13,7 @@ from tkinter import ttk
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa import gui as gui_module  # noqa: E402
+from rpa import i18n  # noqa: E402
 from rpa.engine import (STEP_TYPES, Group, Project, Step,  # noqa: E402
                         import_excel, validate_project)
 
@@ -731,6 +732,109 @@ def test_schedule_dialog_and_tick():
     mark("运行报告")
 
 
+def test_schedule_multiple_tasks_and_history():
+    """多定时任务：列表编辑、保存结果、执行记录与倒计时浮窗。"""
+    import time as _time
+
+    from rpa.gui import (ScheduleDialog, ScheduleHistoryDialog,
+                         SchedulePopover, schedule_tasks)
+
+    saved_settings = dict(app.settings)
+    saved_groups = app.project.groups
+    saved_index = app.group_index
+    saved_fired = app._schedule_fired
+    saved_pending = app._schedule_pending
+    saved_active = app._active_schedule
+    saved_run = app.run_group_for
+    try:
+        app.project.groups = [Group("甲", [Step("wait", "0.1")]),
+                              Group("乙", [Step("wait", "0.1")])]
+        app.group_index = 0
+        app._refresh_all()
+
+        settings = {
+            "schedules": [
+                {"id": "a", "enabled": True, "time": "08:00", "group": "甲"},
+                {"id": "b", "enabled": False, "time": "09:30", "group": "乙"},
+            ],
+            "sound": False, "webhook": "",
+        }
+        tasks = schedule_tasks(settings)
+        assert [task["id"] for task in tasks] == ["a", "b"], tasks
+
+        dialog = ScheduleDialog(app, settings, app.project.names())
+        app.update()
+        assert len(dialog._tasks) == 2, "应加载多条定时任务"
+        assert len(dialog._task_rows) == 2, "左侧应列出每一条任务"
+        dialog._select(1)
+        dialog.var_enabled.set(True)
+        dialog.var_hour.set("10")
+        dialog.var_minute.set("15")
+        dialog.var_group.set("乙")
+        dialog.ok()
+        result = dialog.result
+        assert len(result["schedules"]) == 2, result
+        assert result["schedules"][1] == {
+            "id": "b", "enabled": True, "time": "10:15", "group": "乙"}
+        assert result["schedule"] == {"enabled": True, "time": "08:00",
+                                      "group": "甲"}, "旧版单任务镜像应指向第一条"
+
+        # 新增 / 删除保持列表数量正确
+        dialog2 = ScheduleDialog(app, result, app.project.names())
+        app.update()
+        count = len(dialog2._tasks)
+        dialog2._add_task()
+        assert len(dialog2._tasks) == count + 1
+        assert dialog2._selected == count
+        dialog2._delete_task()
+        assert len(dialog2._tasks) == count
+        dialog2.cancel()
+
+        # 到点触发写入历史，结束后补上结论
+        now = _time.strftime("%H:%M")
+        app.settings = {"schedules": [
+            {"id": "h", "enabled": True, "time": now, "group": "甲"}]}
+        fired = []
+        app.run_group_for = lambda name: (fired.append(name) or True)
+        app._schedule_fired = set()
+        app._schedule_pending = False
+        app._active_schedule = None
+        app.running = False
+        app._schedule_tick()
+        assert fired == ["甲"], fired
+        record = app.settings["schedule_history"][0]
+        assert record["status"] == "running", record
+
+        app.executor.stats = [{"group": "甲", "index": 1, "type": "wait",
+                               "content": "0.1", "note": "", "seconds": 0.1,
+                               "ok": True, "row": 1}]
+        app._finish_schedule_history("finished")
+        record = app.settings["schedule_history"][0]
+        assert record["status"] == "finished" and record["steps"] == 1, record
+
+        history = ScheduleHistoryDialog(app, app.settings)
+        app.update()
+        assert len(history.tree.get_children()) >= 1, "历史弹窗应显示记录"
+        history.destroy()
+
+        # 浮窗：有启用任务时应显示倒计时
+        popover = SchedulePopover(app).popup()
+        app.update()
+        assert popover._rows, "浮窗应列出即将执行的任务"
+        assert popover._rows[0]["countdown"].cget("text")
+        popover.close()
+    finally:
+        app.settings = saved_settings
+        app.project.groups = saved_groups
+        app.group_index = saved_index
+        app._refresh_all()
+        app._schedule_fired = saved_fired
+        app._schedule_pending = saved_pending
+        app._active_schedule = saved_active
+        app.run_group_for = saved_run
+    mark("多定时任务与执行历史")
+
+
 def test_editing_features():
     """撤销重做、拖拽移动、图片管家、配置备份。"""
     import json
@@ -1270,24 +1374,89 @@ def test_type_combo_closes_on_outside_click():
 
 
 def test_switch_widget():
-    """运行设置用的开关：点击 / 外部改值都能同步，主题色可重画。"""
+    """运行设置用的开关：点击 / 外部改值都能同步，主题色可重画，回调只触发一次。"""
     flag = tk.BooleanVar(value=False)
-    switch = gui_module.uikit.Switch(app, flag)
+    fired = []
+    switch = gui_module.uikit.Switch(
+        app, flag, command=lambda: fired.append(bool(flag.get())))
     switch.pack()
     app.update()
     try:
         assert switch.get() is False
         switch._toggle()
         assert flag.get() is True and switch.get() is True
+        assert fired == [True], fired
         flag.set(False)
         app.update()
         assert switch._on is False, "外部改值后应同步重画"
+        assert fired == [True], "外部改值不应触发行内回调"
         switch.set(True)
         assert flag.get() is True
+        switch.set_enabled(False)
+        switch._toggle()
+        assert flag.get() is True, "禁用后点击不应改值"
+        switch.set_enabled(True)
+        switch._on_focus_in()
+        assert switch._focused is True
+        switch._on_focus_out()
+        assert switch._focused is False
         switch.set_bg(gui_module.CARD)      # 主题切换路径不应报错
     finally:
         switch.destroy()
     mark("开关控件")
+
+
+def test_language_switch():
+    """界面语言：中文 / English 即时切换，设置对话框读写语言键。"""
+    saved_language = i18n.get_language()
+    try:
+        app.set_language("en", save=False)
+        app.update()
+        assert app.btn_run.text == "Run group", app.btn_run.text
+        assert app.btn_debug.text == "Step", app.btn_debug.text
+        assert app._top_buttons["文件"].text == "File"
+        assert app.status_var.get().startswith("Current group:"), \
+            app.status_var.get()
+        assert app.group_empty.cget("text") == "No groups yet"
+        assert "Set variable" in app._step_summary(
+            gui_module.Step("set", "x=1"), 0)
+
+        step_dialog = _RealStepDialog(
+            app, app.project, gui_module.Step("click", "a.png"))
+        app.update()
+        try:
+            assert step_dialog.combo_fail.cget("values") == (
+                "Skip this step", "Stop the run")
+            step_dialog.var_on_fail.set("停止执行")
+            assert step_dialog.combo_fail.get() == "Stop the run"
+            assert step_dialog.combo_input.cget("values")[0].startswith(
+                "Paste")
+        finally:
+            step_dialog.destroy()
+
+        dialog = _RealSettingsDialog(app, app.settings, app.image_dir)
+        app.update()
+        try:
+            assert dialog.var_language.get() == "English"
+            dialog.var_language.set("简体中文")
+            dialog._apply_autostart = lambda: True
+            dialog.ok()
+            assert dialog.result["language"] == "zh"
+        finally:
+            if dialog.winfo_exists():
+                dialog.destroy()
+
+        app.set_language("zh", save=False)
+        app.update()
+        assert app.btn_run.text == "运行组"
+        assert app._top_buttons["文件"].text == "文件"
+        assert app.status_var.get().startswith("当前组：")
+        assert "设置变量" in app._step_summary(
+            gui_module.Step("set", "x=1"), 0)
+    finally:
+        app.set_language(saved_language, save=False)
+        app.update()
+    mark("界面语言切换")
 
 
 def test_capture_overlay_from_modal_dialog():
@@ -2560,6 +2729,7 @@ def finish():
         checks()
         test_default_groups()
         test_schedule_dialog_and_tick()
+        test_schedule_multiple_tasks_and_history()
         test_editing_features()
         test_macro_recorder()
         test_macro_wheel_accumulate()
@@ -2575,6 +2745,7 @@ def finish():
         test_searchable_type_combo()
         test_type_combo_closes_on_outside_click()
         test_switch_widget()
+        test_language_switch()
         test_capture_overlay_from_modal_dialog()
         test_type_icons_cover_all()
         test_step_dialog_new_types()

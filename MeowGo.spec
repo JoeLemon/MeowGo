@@ -53,7 +53,8 @@ a = Analysis(
     binaries=[],
     datas=[('main.png', '.'), ('meowgo_logo_transparent.png', '.')],
     hiddenimports=[
-        'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.lock',
+        'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.i18n',
+        'rpa.lock',
         'pyautogui', 'pyperclip', 'PIL', 'PIL.ImageGrab', 'PIL.ImageTk',
         'cv2', 'xlrd', 'openpyxl',
     ],

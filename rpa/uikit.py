@@ -15,7 +15,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageTk
 
-from . import pixel_cat, theme
+from . import i18n, pixel_cat, theme
 
 GRID = 24          # 图标设计网格
 SUPER = 4          # 超采样倍数
@@ -602,11 +602,23 @@ class Tooltip:
 
     def __init__(self, widget: tk.Widget, text: str):
         self.widget = widget
-        self.text = text
+        self._source_text = text
+        self.text = i18n.tr(text)
         self.tip: tk.Toplevel | None = None
         widget.bind("<Enter>", self._show, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def refresh_language(self) -> None:
+        """语言切换后按源文案重新翻译（提示条可能正显示，先收起再更新）。"""
+        self.text = i18n.tr(self._source_text)
+        self._hide()
+
+    def set_source(self, text: str) -> None:
+        """按钮文字变化时同步提示条源文案。"""
+        self._source_text = text
+        self.text = i18n.tr(text)
+        self._hide()
 
     def _show(self, _event=None) -> None:
         if self.tip or not self.text:
@@ -814,7 +826,7 @@ class ContextMenu(tk.Toplevel):
             if item.is_separator:
                 continue
             need = self.pad_x * 2 + self.icon_size + self.gap + \
-                self.font.measure(item.label)
+                self.font.measure(i18n.tr(item.label))
             if item.shortcut:
                 need += self.gap * 2 + self.font.measure(item.shortcut)
             width = max(width, need)
@@ -865,7 +877,7 @@ class ContextMenu(tk.Toplevel):
             image = icon(item.icon, self.icon_size, color) if item.icon else None
             text_id = self.canvas.create_text(
                 self.pad_x + self.icon_size + self.gap, middle,
-                text=item.label, anchor="w", fill=color, font=self.font)
+                text=i18n.tr(item.label), anchor="w", fill=color, font=self.font)
             icon_id = None
             if image is not None:
                 icon_id = self.canvas.create_image(
@@ -1090,7 +1102,8 @@ class RoundButton(tk.Canvas):
         self.kind = kind
         self.command = command
         self.icon_name = icon_name
-        self.text = text
+        self._mg_i18n_source = text
+        self.text = i18n.tr(text)
         self.height = int(round(height * scale))
         self.radius = int(round(radius * scale))
         self.pad = (int(round(pad[0] * scale)), int(round(pad[1] * scale)))
@@ -1102,7 +1115,7 @@ class RoundButton(tk.Canvas):
         self._hover = False
         self._pressed = False
 
-        text_w = self.font.measure(text) if text else 0
+        text_w = self.font.measure(self.text) if self.text else 0
         width = self.pad[0] * 2 + text_w
         if icon_name:
             width += self.icon_size + (self.gap if text else 0)
@@ -1117,7 +1130,8 @@ class RoundButton(tk.Canvas):
         self.bind("<Leave>", self._on_leave)
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
-        self._tip = Tooltip(self, tooltip or text)
+        self._tip = Tooltip(self, tooltip or self._mg_i18n_source)
+        self._tip_auto = not tooltip
 
     # -- 配色 -------------------------------------------------------------
     def _palette(self) -> tuple[str, str, str]:
@@ -1195,13 +1209,16 @@ class RoundButton(tk.Canvas):
         return self._enabled
 
     def set_text(self, text: str, icon_name: str | None = None) -> None:
-        self.text = text
+        self._mg_i18n_source = text
+        self.text = i18n.tr(text)
+        if getattr(self, "_tip_auto", False):
+            self._tip.set_source(text)
         if icon_name is not None:
             self.icon_name = icon_name
-        text_w = self.font.measure(text) if text else 0
+        text_w = self.font.measure(self.text) if self.text else 0
         width = self.pad[0] * 2 + text_w
         if self.icon_name:
-            self.gap = int(round(6 * self.scale)) if text else 0
+            self.gap = int(round(6 * self.scale)) if self.text else 0
             width += self.icon_size + self.gap
         self.configure(width=width)
         self.coords(self._shape, *self._shape_points(width))
@@ -1237,7 +1254,11 @@ class RoundButton(tk.Canvas):
 # ---------------------------------------------------------------------------
 
 class Switch(tk.Canvas):
-    """圆角开关：点击切换绑定的 BooleanVar，也可由外部改值自动重画。"""
+    """圆角开关：点击切换绑定的 BooleanVar，也可由外部改值自动重画。
+
+    视觉层级：轨道 + 描边 + 滑块 + 焦点环；开 / 关切换带短动画。
+    尺寸按逻辑像素计算，DPI 缩放后仍保持一致的圆角和边距。
+    """
 
     def __init__(self, master, variable: tk.BooleanVar, command=None,
                  scale: float = 1.0, bg: str | None = None,
@@ -1246,50 +1267,136 @@ class Switch(tk.Canvas):
         self.scale = scale
         self.variable = variable
         self.command = command
-        self.track_w = max(30, int(round(42 * scale)))
-        self.track_h = max(18, int(round(24 * scale)))
-        super().__init__(master, width=self.track_w + 2,
-                         height=self.track_h + 2, bg=bg,
-                         highlightthickness=0, bd=0, cursor="hand2",
-                         takefocus=True)
+        self.track_w = max(32, int(round(44 * scale)))
+        self.track_h = max(19, int(round(24 * scale)))
+        self._margin = max(3, int(round(3 * scale)))
+        self._pad = max(2, int(round(2.6 * scale)))
+        super().__init__(master,
+                         width=self.track_w + self._margin * 2,
+                         height=self.track_h + self._margin * 2,
+                         bg=bg, highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=True)
         self._on = bool(variable.get())
         self._hover = False
+        self._focused = False
         self._enabled = True
+        self._anim_pos = 1.0 if self._on else 0.0
+        self._anim_after: str | None = None
         self._trace = variable.trace_add("write", self._on_variable)
         self.bind("<Button-1>", self._toggle)
         self.bind("<space>", self._toggle)
         self.bind("<Return>", self._toggle)
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
         self.bind("<Destroy>", self._on_destroy)
         if tooltip:
             self._tip = Tooltip(self, tooltip)
         self._draw()
 
     # -- 绘制 -------------------------------------------------------------
+    def _geometry(self) -> tuple[float, float, float, float, float, float]:
+        """返回轨道左上 / 右下坐标与滑块半径、中心 Y。"""
+        m = self._margin
+        w, h = self.track_w, self.track_h
+        left, top = m, m
+        right, bottom = m + w, m + h
+        knob = max(1.0, (h - self._pad * 2) / 2)
+        cy = (top + bottom) / 2
+        return left, top, right, bottom, knob, cy
+
     def _draw(self) -> None:
         self.delete("all")
-        w, h = self.track_w, self.track_h
+        left, top, right, bottom, knob, cy = self._geometry()
+        dark = theme.is_dark()
+
         if not self._enabled:
-            track = theme.token("BORDER")
+            track = theme.token("HEADING_BG")
+            border = theme.token("BORDER")
+            knob_fill = theme.token("BORDER")
+            knob_border = theme.token("BORDER_STRONG")
         elif self._on:
             track = (theme.token("ACCENT_STRONG") if self._hover
                      else theme.token("ACCENT"))
+            border = theme.token("ACCENT_STRONG")
+            knob_fill = "#FFF9F1" if not dark else "#F5F2ED"
+            knob_border = "#F2C38C" if not dark else "#FFD6A8"
         else:
-            track = (theme.token("BORDER_STRONG") if self._hover
-                     else theme.token("BORDER"))
-        round_rect(self, 1, 1, w + 1, h + 1, h / 2, fill=track, outline="")
-        pad = max(2, int(round(2.5 * self.scale)))
-        knob = (h - pad * 2) / 2
-        cx = (w + 1 - pad - knob) if self._on else (1 + pad + knob)
-        cy = (h + 2) / 2
+            track = (theme.token("ACCENT_TINT") if self._hover
+                     else theme.token("HEADING_BG"))
+            border = (theme.token("ACCENT") if self._hover
+                      else theme.token("BORDER_STRONG"))
+            knob_fill = "#FFFFFF" if not dark else "#F5F2ED"
+            knob_border = theme.token("BORDER_STRONG")
+
+        # 轨道：先描边再填充，避免 1px 圆角边缘发虚
+        radius = self.track_h / 2
+        round_rect(self, left, top, right, bottom, radius,
+                   fill=border, outline="")
+        inset = 1.0
+        round_rect(self, left + inset, top + inset,
+                   right - inset, bottom - inset, max(1, radius - inset),
+                   fill=track, outline="")
+
+        # 焦点环：键盘 Tab 到达时显示，鼠标点击后由 FocusIn 同步
+        if self._focused and self._enabled:
+            ring = max(1, int(round(1 * self.scale)))
+            round_rect(self, 0.5, 0.5,
+                       self.track_w + self._margin * 2 - 0.5,
+                       self.track_h + self._margin * 2 - 0.5,
+                       min(radius + 2, (self.track_h + 2) / 2),
+                       fill="", outline=theme.token("ACCENT_STRONG"),
+                       width=ring)
+
+        # 滑块：位置由动画进度决定，0 = 左，1 = 右
+        travel = self.track_w - self._pad * 2 - knob * 2
+        cx = left + self._pad + knob + travel * self._anim_pos
+        shadow = max(1, int(round(1 * self.scale)))
+        self.create_oval(cx - knob, cy - knob + shadow,
+                         cx + knob, cy + knob + shadow,
+                         fill=theme.token("BORDER") if self._enabled
+                         else theme.token("BORDER"),
+                         outline="")
         self.create_oval(cx - knob, cy - knob, cx + knob, cy + knob,
-                         fill=(theme.token("CARD") if self._enabled
-                               else theme.token("HEADING_BG")), outline="")
+                         fill=knob_fill, outline=knob_border,
+                         width=max(1, int(round(1 * self.scale))))
+
+    # -- 动画 -------------------------------------------------------------
+    def _animate_to(self, target: float) -> None:
+        if self._anim_after is not None:
+            try:
+                self.after_cancel(self._anim_after)
+            except (tk.TclError, ValueError):
+                pass
+            self._anim_after = None
+        start = self._anim_pos
+        steps = 6
+
+        def tick(step: int = 1) -> None:
+            self._anim_after = None
+            progress = min(1.0, step / steps)
+            # ease-out cubic：快速起步，末尾收稳
+            eased = 1 - (1 - progress) ** 3
+            self._anim_pos = start + (target - start) * eased
+            self._draw()
+            if step < steps and self.winfo_exists():
+                self._anim_after = self.after(14, lambda: tick(step + 1))
+            else:
+                self._anim_pos = target
+                self._draw()
+
+        if abs(target - start) < 0.01:
+            self._anim_pos = target
+            self._draw()
+            return
+        tick()
 
     # -- 交互 -------------------------------------------------------------
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
+        if not self._enabled:
+            self._hover = self._focused = False
         self.configure(cursor="hand2" if self._enabled else "arrow")
         self._draw()
 
@@ -1297,13 +1404,16 @@ class Switch(tk.Canvas):
         if not self._enabled:
             return "break"
         self.variable.set(not bool(self.variable.get()))
+        if self.command:
+            self.command()
         return "break"
 
     def _on_variable(self, *_args) -> None:
         on = bool(self.variable.get())
-        if on != self._on:
-            self._on = on
-            self._draw()
+        if on == self._on:
+            return
+        self._on = on
+        self._animate_to(1.0 if on else 0.0)
 
     def _on_enter(self, _event=None) -> None:
         if not self._enabled:
@@ -1315,9 +1425,25 @@ class Switch(tk.Canvas):
         self._hover = False
         self._draw()
 
+    def _on_focus_in(self, _event=None) -> None:
+        if not self._enabled:
+            return
+        self._focused = True
+        self._draw()
+
+    def _on_focus_out(self, _event=None) -> None:
+        self._focused = False
+        self._draw()
+
     def _on_destroy(self, event=None) -> None:
         if event is not None and event.widget is not self:
             return
+        if self._anim_after is not None:
+            try:
+                self.after_cancel(self._anim_after)
+            except (tk.TclError, ValueError):
+                pass
+            self._anim_after = None
         try:
             self.variable.trace_remove("write", self._trace)
         except (tk.TclError, ValueError):
@@ -1343,12 +1469,14 @@ class Switch(tk.Canvas):
 class _ComboOption:
     """下拉选项：value 是内部值，label 是显示文字，group 是分组名。"""
 
-    __slots__ = ("value", "label", "group")
+    __slots__ = ("value", "label", "group", "source_label")
 
-    def __init__(self, value: str, label: str, group: str = ""):
+    def __init__(self, value: str, label: str, group: str = "",
+                 source_label: str | None = None):
         self.value = value
         self.label = label
         self.group = group
+        self.source_label = source_label if source_label is not None else label
 
 
 def _fuzzy_match(query: str, text: str) -> bool:
@@ -1388,8 +1516,12 @@ class SearchableCombo(tk.Frame):
         self.command = command
         self.font = tkfont.Font(family=theme.FONT_FAMILY, size=font_size)
         self.font_size = font_size
-        self._items = [_ComboOption(*item) if isinstance(item, tuple) else item
-                       for item in options]
+        self._items = []
+        for item in options:
+            option = _ComboOption(*item) if isinstance(item, tuple) else item
+            self._items.append(_ComboOption(
+                option.value, i18n.tr(option.label), i18n.tr(option.group),
+                source_label=option.label))
         self._group_order: list[str] = []
         for option in self._items:
             if option.group and option.group not in self._group_order:
@@ -1434,7 +1566,7 @@ class SearchableCombo(tk.Frame):
         if "·" in text:
             text = text.split("·", 1)[1].strip()
         for option in self._items:
-            if text in (option.value, option.label):
+            if text in (option.value, option.label, option.source_label):
                 self._value = option.value
                 self.var.set(option.label)
                 return
@@ -1492,7 +1624,7 @@ class SearchableCombo(tk.Frame):
                 rows.append((group, None))
             rows.extend((option.label, option.value) for option in matched)
         if not rows:                    # 没有分组的兜底 / 无匹配提示
-            rows.append(("没有匹配的指令类型", None))
+            rows.append((i18n.tr("没有匹配的指令类型"), None))
         return rows
 
     def _toggle_popup(self) -> None:
@@ -1760,3 +1892,67 @@ class SearchableCombo(tk.Frame):
     def destroy(self) -> None:  # noqa: D401 - tkinter override
         self._destroy_popup()
         super().destroy()
+
+
+class LocalizedCombobox(ttk.Combobox):
+    """只读下拉框：显示文字随语言变化，变量中始终保存内部源值。
+
+    业务代码继续读写 ``variable``（例如 ``var_on_fail``）里的中文源值；
+    界面上看到的是当前语言的译文。这样切换语言不会破坏保存逻辑。
+    """
+
+    def __init__(self, master=None, *, values=(), variable=None, **kwargs):
+        self._source_values = [str(value) for value in values]
+        self._source_var = variable if variable is not None else tk.StringVar()
+        self._display_var = tk.StringVar()
+        self._syncing = False
+        kwargs["values"] = [i18n.tr(value) for value in self._source_values]
+        kwargs["textvariable"] = self._display_var
+        super().__init__(master, **kwargs)
+        self._display_trace = self._display_var.trace_add(
+            "write", self._on_display_change)
+        self._source_trace = self._source_var.trace_add(
+            "write", self._on_source_change)
+        self._sync_display()
+
+    def _on_source_change(self, *_args) -> None:
+        if self._syncing:
+            return
+        self._sync_display()
+
+    def _on_display_change(self, *_args) -> None:
+        if self._syncing:
+            return
+        display = self._display_var.get()
+        for source in self._source_values:
+            if display in (source, i18n.tr(source)):
+                if self._source_var.get() != source:
+                    self._syncing = True
+                    try:
+                        self._source_var.set(source)
+                    finally:
+                        self._syncing = False
+                return
+
+    def _sync_display(self) -> None:
+        display = i18n.tr(self._source_var.get())
+        if self._display_var.get() == display:
+            return
+        self._syncing = True
+        try:
+            self._display_var.set(display)
+        finally:
+            self._syncing = False
+
+    def refresh_language(self) -> None:
+        self.configure(values=[i18n.tr(value) for value in self._source_values])
+        self._sync_display()
+
+    def set(self, value: str) -> None:
+        """按源值或当前译文选中。"""
+        text = str(value)
+        for source in self._source_values:
+            if text in (source, i18n.tr(source)):
+                self._source_var.set(source)
+                return
+        self._source_var.set(text)

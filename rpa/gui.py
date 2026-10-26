@@ -15,10 +15,11 @@ import threading
 import time
 import tkinter as tk
 import types
+from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
 
-from . import assets, autostart, theme, tray, uikit
+from . import assets, autostart, i18n, theme, tray, uikit
 from .engine import (CONDITION_TYPES, IMAGE_STEP_TYPES, IMAGE_TYPES,
                      STEP_TYPES, Executor, Group, Project, Step,
                      estimate_steps, export_excel, find_images, import_excel,
@@ -28,9 +29,9 @@ from .theme import (CONTROL_LG, CONTROL_MD, CONTROL_SM, CONTROL_XS,
                     DARK_PALETTE, FONT_BODY, FONT_BODY_BOLD, FONT_CAPTION,
                     FONT_CAPTION_BOLD, FONT_DISPLAY, FONT_HERO, FONT_MONO,
                     FONT_NOTE, FONT_NOTE_BOLD, FONT_SECTION, FONT_TITLE,
-                    FONT_TITLE_LARGE, FONT_SIZE_BODY, FONT_SIZE_NOTE,
-                    ICON_LG, ICON_MD, ICON_SM, ICON_XS, LIGHT_PALETTE,
-                    TABLE_ROW_HEIGHT)
+                    FONT_TITLE_LARGE, FONT_SIZE_BODY, FONT_SIZE_CAPTION,
+                    FONT_SIZE_NOTE, ICON_LG, ICON_MD, ICON_SM, ICON_XS,
+                    LIGHT_PALETTE, TABLE_ROW_HEIGHT)
 
 APP_TITLE = "MeowGo"
 APP_LOGO_FILE = "meowgo_logo_transparent.png"
@@ -72,6 +73,103 @@ LEGACY_BROWSER_SIGNATURE = (
     ("input", "{网址}", 0, "输入网址"),
     ("hotkey", "enter", 0, "打开网址"),
 )
+
+# 定时任务：settings 里的 schedules 是任务列表，schedule 是旧版单任务字段，
+# 现在仍作为第一项镜像保留（老配置 / 老测试都还能读）。
+SCHEDULE_HISTORY_LIMIT = 60
+SCHEDULE_RESULT_TEXT = {
+    "running": "运行中",
+    "finished": "成功",
+    "stopped": "已停止",
+    "error": "出错",
+    "skipped": "已跳过",
+}
+
+
+def make_schedule_task(time_text: str = "09:00", group: str = "",
+                       enabled: bool = True) -> dict:
+    """生成一条新的定时任务（id 只用于区分同一分钟内的多条任务）。"""
+    return {
+        "id": f"task-{time.time_ns()}",
+        "enabled": bool(enabled),
+        "time": _valid_schedule_time(time_text),
+        "group": (group or "").strip(),
+    }
+
+
+def _valid_schedule_time(value) -> str:
+    """把各种输入夹成 HH:MM；非法值退回 09:00。"""
+    match = re.match(r"^\s*(\d{1,2})\s*:\s*(\d{1,2})\s*$", str(value or ""))
+    if not match:
+        return "09:00"
+    hour = min(23, max(0, int(match.group(1))))
+    minute = min(59, max(0, int(match.group(2))))
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_schedule_task(raw, index: int = 0) -> Optional[dict]:
+    """把磁盘上的任务字典补齐成可控结构；明显无效的条目返回 None。"""
+    if not isinstance(raw, dict):
+        return None
+    if not raw.get("time") and not raw.get("group") and not raw.get("enabled"):
+        return None
+    return {
+        "id": str(raw.get("id") or f"task-{index + 1}"),
+        "enabled": bool(raw.get("enabled", True)),
+        "time": _valid_schedule_time(raw.get("time", "09:00")),
+        "group": str(raw.get("group") or "").strip(),
+    }
+
+
+def schedule_tasks(settings: dict) -> list[dict]:
+    """读取定时任务列表，兼容旧版单条 schedule 配置。"""
+    raw = settings.get("schedules")
+    tasks: list[dict] = []
+    if isinstance(raw, list):
+        for index, item in enumerate(raw):
+            task = normalize_schedule_task(item, index)
+            if task is not None:
+                tasks.append(task)
+        return tasks
+    legacy = settings.get("schedule")
+    if isinstance(legacy, dict):
+        task = normalize_schedule_task(legacy, 0)
+        if task is not None:
+            task["id"] = "legacy"
+            tasks.append(task)
+    return tasks
+
+
+def schedule_next_run(task: dict, now: Optional[datetime] = None) -> datetime:
+    """下一次到点时间（每天一次；已过今天的点就算明天）。"""
+    now = now or datetime.now()
+    hour, minute = (int(part) for part in task.get("time", "09:00").split(":"))
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
+
+
+def schedule_countdown_text(target: datetime,
+                            now: Optional[datetime] = None) -> str:
+    """把剩余时间写成 02:13:45 / 1天 02:13:45。"""
+    now = now or datetime.now()
+    seconds = max(0, int((target - now).total_seconds()))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    text = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{days}{i18n.tr('天 ')}{text}" if days else text
+
+
+def schedule_day_text(target: datetime, now: Optional[datetime] = None) -> str:
+    now = now or datetime.now()
+    offset = (target.date() - now.date()).days
+    if offset == 0:
+        return i18n.tr("今天")
+    if offset == 1:
+        return i18n.tr("明天")
+    return i18n.tr("周" + "一二三四五六日"[target.weekday()])
 
 # 配色唯一来源是 rpa.theme；这里把浅色令牌铺成模块常量，既有代码可直接用
 # BG / CARD / ACCENT ...。_apply_theme 切主题时同样整组替换。
@@ -130,6 +228,15 @@ TYPE_COLORS_DARK.update({
 
 # 步骤搜索框的占位文字（失焦为空时显示，不计入过滤条件）
 SEARCH_PLACEHOLDER = "搜索步骤…"
+
+
+def _search_placeholder() -> str:
+    """搜索框占位符的当前语言写法。"""
+    return i18n.tr(SEARCH_PLACEHOLDER)
+
+
+def _is_search_placeholder(text: str) -> bool:
+    return text in i18n.variants(SEARCH_PLACEHOLDER)
 
 
 def _make_no_activate(window) -> None:
@@ -279,28 +386,29 @@ def build_default_groups() -> list[Group]:
             Step("set", "浏览器=chrome",
                  note="chrome / msedge / 完整 exe 路径"),
             Step("set", "窗口标题=Chrome",
-                 note="窗口标题关键词；Edge 填 Edge，Firefox 填 Firefox"),
+                 note="窗口标题关键词；Edge 填写 Edge，Firefox 填写 Firefox。"),
             Step("set", "网址=https://www.baidu.com",
-                 note="要打开的链接"),
+                 note="要打开的链接。"),
             Step("cmd", 'start "" "{浏览器}"',
-                 note="按变量启动浏览器"),
+                 note="按变量启动浏览器。"),
             Step("window", "wait:{窗口标题}|10",
-                 note="等窗口出现并激活；慢就改大秒数"),
-            Step("hotkey", "ctrl,l", note="聚焦地址栏"),
-            Step("input", "{网址}", note="输入网址"),
-            Step("hotkey", "enter", note="打开网址"),
+                 note="等待窗口出现并激活；若等待时间不足，请适当增大。"),
+            Step("hotkey", "ctrl,l", note="聚焦地址栏。"),
+            Step("input", "{网址}", note="输入网址。"),
+            Step("hotkey", "enter", note="打开网址。"),
         ],
-        note="预置模板：改浏览器 / 窗口标题 / 网址；窗口标题填浏览器窗口标题里的关键词。",
+        note="预置模板：请修改「浏览器」「窗口标题」「网址」变量；"
+             "窗口标题填写浏览器窗口标题中的关键词。",
     )
     software = Group(
         "打开软件",
         [
             Step("set", "软件=notepad",
-                 note="exe 名或完整路径，如 notepad / calc"),
+                 note="exe 名称或完整路径，如 notepad / calc。"),
             Step("cmd", 'start "" "{软件}"',
-                 note="按变量启动软件；找不到就填完整路径"),
+                 note="按变量启动软件；若无法找到，请填写完整路径。"),
         ],
-        note="预置模板：把「软件」变量改成要打开的程序名或完整 exe 路径。",
+        note="预置模板：请将「软件」变量修改为要打开的程序名称或完整 exe 路径。",
     )
     batch_urls = Group(
         "批量打开网址",
@@ -308,48 +416,51 @@ def build_default_groups() -> list[Group]:
             Step("set", "浏览器=chrome",
                  note="chrome / msedge / 完整 exe 路径"),
             Step("set", "网址=https://www.baidu.com",
-                 note="默认网址；带数据时由「网址」列覆盖"),
+                 note="默认网址；带数据运行时由「网址」列覆盖。"),
             Step("cmd", 'start "" "{浏览器}" "{网址}"',
-                 note="每个数据行打开一个链接"),
+                 note="每个数据行打开一个链接。"),
             Step("wait", "1",
-                 note="间隔 1 秒，避免一次开太多"),
+                 note="间隔 1 秒，避免一次打开过多页面。"),
         ],
-        note="预置模板：配合 Excel / CSV 的「网址」列带数据运行；没有数据时打开默认网址。",
+        note="预置模板：配合 Excel / CSV 的「网址」列进行数据驱动运行；"
+             "无数据时打开默认网址。",
     )
     upload = Group(
         "上传文件",
         [
             Step("set", "文件路径=C:\\Users\\Public\\Documents\\示例.txt",
-                 note="要上传文件的完整路径"),
+                 note="要上传文件的完整路径。"),
             Step("click", "上传按钮.png",
-                 note="先把页面上的上传按钮截成这个文件名"),
+                 note="请先将页面上的上传按钮截图保存为该文件名。"),
             Step("wait", "0.8",
-                 note="等文件选择框出现"),
+                 note="等待文件选择框出现。"),
             Step("hotkey", "alt,n",
-                 note="把焦点切到文件名输入框"),
+                 note="将焦点切换至文件名输入框。"),
             Step("input", "{文件路径}",
-                 note="粘贴完整路径；也可在数据里给「文件路径」列"),
-            Step("hotkey", "enter", note="确认上传"),
+                 note="粘贴完整路径；也可在数据中提供「文件路径」列。"),
+            Step("hotkey", "enter", note="确认上传。"),
         ],
-        note="预置模板：先截图上传按钮保存为 images/上传按钮.png，再改文件路径变量。",
+        note="预置模板：先将上传按钮截图保存为 images/上传按钮.png，"
+             "再修改「文件路径」变量。",
     )
     workspace = Group(
         "打开工作环境",
         [
             Step("set", "软件=notepad",
-                 note="先打开的程序，如 notepad / calc / 完整路径"),
+                 note="首先打开的程序，如 notepad / calc / 完整路径。"),
             Step("set", "浏览器=chrome",
                  note="chrome / msedge / 完整 exe 路径"),
             Step("set", "网址=https://www.baidu.com",
-                 note="要打开的链接"),
+                 note="要打开的链接。"),
             Step("cmd", 'start "" "{软件}"',
-                 note="启动常用软件"),
+                 note="启动常用软件。"),
             Step("wait", "0.5",
-                 note="给软件一点启动时间"),
+                 note="为软件预留启动时间。"),
             Step("cmd", 'start "" "{浏览器}" "{网址}"',
-                 note="启动浏览器并打开网址"),
+                 note="启动浏览器并打开网址。"),
         ],
-        note="预置模板：改软件 / 浏览器 / 网址，一键进入工作状态；可复制 cmd 步骤添加更多程序。",
+        note="预置模板：修改「软件」「浏览器」「网址」变量，一键进入工作状态；"
+             "可复制 cmd 步骤添加更多程序。",
     )
     return [browser, software, batch_urls, upload, workspace]
 
@@ -423,6 +534,9 @@ class App(tk.Tk):
         self.configure(bg=BG)
 
         self.settings = self._load_settings()
+        # 界面语言：在创建任何控件之前安装翻译层，后面新建的对话框也会自动生效
+        i18n.install()
+        i18n.set_language(str(self.settings.get("language", "zh")))
         # 不再有“项目”概念：执行组直接自动保存到程序目录的状态文件
         self.project = Project.from_dict(self.settings)
         self.image_dir = str(self.settings.get("image_dir", DEFAULT_IMAGE_DIR))
@@ -475,6 +589,10 @@ class App(tk.Tk):
         self._editor: Optional[tk.Widget] = None
         # 定时运行：记录今天已经触发过的安排，避免同一天重复跑
         self._schedule_fired: set[str] = set()
+        # 最近一次由定时任务启动的运行记录（结束时补结果）
+        self._active_schedule: Optional[dict] = None
+        self._schedule_pending = False
+        self._schedule_popover = None
         # 行内编辑时的按键录入（双击热键步骤的内容列）
         self._inline_target: Optional[tk.Widget] = None
         self._inline_record_btn: Optional[tk.Widget] = None
@@ -516,8 +634,9 @@ class App(tk.Tk):
         self.after(2000, self._autosave_tick)
         self.after(1000, self._schedule_tick)
         self._check_dpi_setup()
-        self._log("info", f"欢迎使用 {APP_TITLE}")
-        self._log("muted", "左侧维护执行组，右侧编辑步骤；「调用执行组」指令可复用其它组。")
+        self._log("info", i18n.tr("欢迎使用 MeowGo"))
+        self._log("muted", i18n.tr(
+            "左侧维护执行组，右侧编辑步骤；「调用执行组」指令可复用其它组。"))
 
     def _warm_imports(self) -> None:
         """后台预热重依赖。
@@ -955,6 +1074,9 @@ class App(tk.Tk):
             tk.Frame(bar, bg=BORDER, width=1, height=self.s(20)).pack(
                 side="left", padx=self.s(8))
 
+        self.btn_schedule = add("", "clock", self.open_schedule_popover,
+                                pad=self.s(5),
+                                tooltip="定时任务：查看即将执行与倒计时")
         self.btn_settings = add("", "sliders", self.open_settings,
                                 pad=self.s(5), tooltip="运行设置")
         self.btn_undo = add("", "undo", self.undo, pad=self.s(5),
@@ -1016,7 +1138,7 @@ class App(tk.Tk):
                                     font=FONT_CAPTION_BOLD)
         self.group_count.pack(side="right")
 
-        hint = tk.Label(panel, text="双击重命名 · 拖拽排序 · 右键更多操作",
+        hint = tk.Label(panel, text="双击重命名 · 拖拽排序 · 右键查看更多操作",
                         bg=CARD, fg=MUTED, font=FONT_NOTE)
         hint.pack(side="bottom", pady=self.s(12))
 
@@ -1041,11 +1163,11 @@ class App(tk.Tk):
             accent=ACCENT, nose=ACCENT_STRONG)
         self.group_empty_icon.pack(pady=(0, self.s(10)))
         self.group_empty = tk.Label(
-            self.group_empty_box, text="这里空空如也，喵～", bg=CARD, fg=TEXT,
+            self.group_empty_box, text="尚未创建执行组", bg=CARD, fg=TEXT,
             font=FONT_DISPLAY)
         self.group_empty.pack()
         tk.Label(self.group_empty_box,
-                 text="执行组是一组可重复运行的步骤；\n先建一个，再往里面添加步骤。",
+                 text="执行组由一组可重复执行的步骤组成。\n请先创建执行组，再添加步骤。",
                  bg=CARD, fg=MUTED, justify="center",
                  font=FONT_BODY).pack(pady=(self.s(6), self.s(14)))
         uikit.RoundButton(
@@ -1067,7 +1189,7 @@ class App(tk.Tk):
         self.step_title = tk.Label(head, text="步骤", bg=CARD, fg=TEXT,
                                    font=FONT_SECTION)
         self.step_title.pack(side="left", padx=(self.s(8), 0))
-        tk.Label(head, text="双击单元格可直接修改", bg=CARD,
+        tk.Label(head, text="双击单元格可直接编辑", bg=CARD,
                  fg=MUTED, font=FONT_NOTE).pack(
             side="left", padx=(self.s(12), 0))
         self.btn_add_step = uikit.RoundButton(
@@ -1101,7 +1223,7 @@ class App(tk.Tk):
             self.search_clear_slot, "", "close", self._clear_search_and_focus,
             kind="ghost", scale=self.scale, bg=ENTRY_BG, height=CONTROL_XS,
             pad=self.s(4), icon_size=ICON_XS, tooltip="清除搜索（Esc）")
-        self.step_search.insert(0, SEARCH_PLACEHOLDER)
+        self.step_search.insert(0, _search_placeholder())
         self.step_search.configure(foreground=MUTED)
         self.step_search.bind("<FocusIn>", self._on_search_focus_in)
         self.step_search.bind("<FocusOut>", self._on_search_focus_out)
@@ -1157,7 +1279,7 @@ class App(tk.Tk):
             accent=ACCENT, nose=ACCENT_STRONG)
         self.step_empty_icon.pack(pady=(0, self.s(8)))
         self.step_empty = tk.Label(
-            self.step_empty_box, text="这个组还没有步骤", bg=CARD, fg=TEXT,
+            self.step_empty_box, text="此执行组尚未添加步骤", bg=CARD, fg=TEXT,
             font=FONT_DISPLAY)
         self.step_empty.pack()
         self.step_empty_hint = tk.Label(
@@ -1305,7 +1427,8 @@ class App(tk.Tk):
         bar = tk.Frame(self, bg=BG)
         bar.pack(fill="x", side="bottom", padx=self.s(24),
                  pady=(self.s(2), self.s(8)))
-        self.status_var = tk.StringVar(value="就绪")
+        self.status_var = tk.StringVar(value=i18n.tr("就绪"))
+        self._status_source = "就绪"
         tk.Label(bar, textvariable=self.status_var, bg=BG, fg=MUTED,
                  font=FONT_NOTE).pack(side="left")
         self.btn_shortcuts = uikit.RoundButton(
@@ -1445,7 +1568,7 @@ class App(tk.Tk):
         self._refresh_tray()           # 托盘图标跟着主题反白
         self._refresh_groups()
         self._refresh_steps()
-        if self.step_search.get() == SEARCH_PLACEHOLDER:
+        if _is_search_placeholder(self.step_search.get()):
             self.step_search.configure(foreground=MUTED)
         self._last_palette = dict(palette)
         self.after(0, lambda: uikit.style_window(self, self.dark))
@@ -1601,7 +1724,8 @@ class App(tk.Tk):
 
     def _set_status(self, text: str) -> None:
         """状态栏文案。日志标题只显示运行阶段，避免同一句话出现两遍。"""
-        self.status_var.set(text)
+        self._status_source = text
+        self.status_var.set(i18n.tr(text))
 
     def _set_log_state(self, text: str) -> None:
         """日志标题的运行阶段：就绪 / 运行中 / 暂停 / 完成 / 失败。"""
@@ -1661,11 +1785,11 @@ class App(tk.Tk):
     def _step_summary(self, step: Step, index: int) -> str:
         text = step.content.strip().replace("\n", " ")
         if step.type == "call":
-            text = f"调用组：{step.content}"
+            text = f"{i18n.tr('调用组：')}{step.content}"
         if len(text) > 22:
             text = text[:22] + "…"
         repeat = f"  ×{step.repeat:g}" if step.repeat else ""
-        return f"{index + 1}. {step.label()} {text}{repeat}"
+        return f"{index + 1}. {i18n.tr(step.label())} {text}{repeat}"
 
     def _refresh_steps(self, select: Optional[int] = None) -> None:
         self.step_tree.delete(*self.step_tree.get_children())
@@ -1692,15 +1816,15 @@ class App(tk.Tk):
         else:
             if filtered:
                 self.step_empty.configure(
-                    text=f"没有找到“{self._step_filter}”的步骤")
+                    text=f"未找到与“{self._step_filter}”匹配的步骤")
                 self.step_empty_hint.configure(
-                    text="换个关键词试试，或清除搜索查看全部步骤")
+                    text="请尝试其他关键词，或清除搜索以显示全部步骤。")
                 self.step_empty_btn.set_text("清除搜索", "close")
                 self.step_empty_btn.command = self._clear_search_and_focus
             else:
-                self.step_empty.configure(text="这个组还没有步骤")
+                self.step_empty.configure(text="此执行组尚未添加步骤")
                 self.step_empty_hint.configure(
-                    text="添加第一个步骤；也可以右键列表批量导入或粘贴")
+                    text="请添加第一个步骤，或通过右键菜单批量导入。")
                 self.step_empty_btn.set_text("新增步骤", "add")
                 self.step_empty_btn.command = self.add_step
             self.step_empty_box.place(relx=0.5, rely=0.45, anchor="center")
@@ -1777,7 +1901,7 @@ class App(tk.Tk):
         return text in hay
 
     def _on_search_focus_in(self, _event=None) -> None:
-        if self.step_search.get() == SEARCH_PLACEHOLDER:
+        if _is_search_placeholder(self.step_search.get()):
             self.step_search.delete(0, "end")
             self.step_search.configure(foreground=TEXT)
         if hasattr(self, "search_field"):
@@ -1786,7 +1910,7 @@ class App(tk.Tk):
 
     def _on_search_focus_out(self, _event=None) -> None:
         if not self.step_search.get():
-            self.step_search.insert(0, SEARCH_PLACEHOLDER)
+            self.step_search.insert(0, _search_placeholder())
             self.step_search.configure(foreground=MUTED)
         if hasattr(self, "search_field"):
             self.search_field.set_colors(border=BORDER)
@@ -1805,7 +1929,7 @@ class App(tk.Tk):
     def _sync_search_clear(self) -> None:
         """有实际搜索词时才显示 ×；占位符不算。"""
         text = self.step_search.get()
-        if text in ("", SEARCH_PLACEHOLDER):
+        if text in ("", SEARCH_PLACEHOLDER) or _is_search_placeholder(text):
             self.btn_search_clear.pack_forget()
         else:
             self.btn_search_clear.pack()
@@ -1817,7 +1941,7 @@ class App(tk.Tk):
 
     def _apply_step_filter(self) -> None:
         text = self.step_search.get()
-        self._step_filter = ("" if text == SEARCH_PLACEHOLDER
+        self._step_filter = ("" if _is_search_placeholder(text)
                              else text.strip())
         self._sync_search_clear()
         self._refresh_steps()
@@ -1825,7 +1949,7 @@ class App(tk.Tk):
     def _clear_step_filter(self) -> None:
         self._step_filter = ""
         self.step_search.delete(0, "end")
-        self.step_search.insert(0, SEARCH_PLACEHOLDER)
+        self.step_search.insert(0, _search_placeholder())
         self.step_search.configure(foreground=MUTED)
         self._sync_search_clear()
         self._refresh_steps()
@@ -2202,10 +2326,11 @@ class App(tk.Tk):
         if field == "type":
             widget: tk.Widget = ttk.Combobox(
                 self.step_tree, state="readonly",
-                values=[f"{i + 1} · {info[0]}"
+                values=[f"{i + 1} · {i18n.tr(info[0])}"
                         for i, info in enumerate(STEP_TYPES.values())],
                 font=FONT_NOTE)
-            widget.set(f"{list(STEP_TYPES).index(step.type) + 1} · {step.label()}")
+            widget.set(f"{list(STEP_TYPES).index(step.type) + 1} · "
+                       f"{i18n.tr(step.label())}")
         else:
             widget = ttk.Entry(self.step_tree, font=FONT_NOTE)
             widget.insert(0, {"content": step.content,
@@ -2280,7 +2405,7 @@ class App(tk.Tk):
             return
         self._inline_previous = widget.get()
         if not self._inline_recorder.start(self._inline_previous):
-            self._set_status("无法启动键盘录制（装不上钩子），请手动输入")
+            self._set_status("无法启动键盘录制（键盘钩子安装失败），请手动输入")
 
     def _inline_record_state(self, active: bool) -> None:
         self._inline_recording = active
@@ -2719,6 +2844,7 @@ class App(tk.Tk):
         try:
             while True:
                 level, message = self.log_queue.get_nowait()
+                display = i18n.tr(message)
                 stamp = time.strftime("%H:%M:%S")
                 self.log_text.configure(state="normal")
                 self.log_text.insert("end", f"[{stamp}] ", "time")
@@ -2728,9 +2854,9 @@ class App(tk.Tk):
                              or "超时" in message)):
                     line = int(self.log_text.index("end-1c").split(".")[0])
                     self._step_log_lines[line] = self._current_run_step
-                    self.log_text.insert("end", message + "\n", ("link", level))
+                    self.log_text.insert("end", display + "\n", ("link", level))
                 else:
-                    self.log_text.insert("end", message + "\n", level)
+                    self.log_text.insert("end", display + "\n", level)
                 self._trim_log()
                 self.log_text.see("end")
                 self.log_text.configure(state="disabled")
@@ -2840,15 +2966,15 @@ class App(tk.Tk):
         return {name: [step.copy() for step in index[name].steps]
                 for name in wanted if name in index}
 
-    def run_group(self) -> None:
-        self._start(self._current_group_name())
+    def run_group(self) -> bool:
+        return self._start(self._current_group_name())
 
-    def run_group_for(self, name: str) -> None:
+    def run_group_for(self, name: str) -> bool:
         """运行指定组（定时运行用；不切换左侧选中）。"""
-        self._start(name)
+        return self._start(name)
 
-    def run_loop(self) -> None:
-        self._start(self._current_group_name(), loop=True)
+    def run_loop(self) -> bool:
+        return self._start(self._current_group_name(), loop=True)
 
     def run_group_debug(self) -> None:
         """单步调试运行当前组：只这一程每步确认，不动全局开关。"""
@@ -2911,17 +3037,17 @@ class App(tk.Tk):
                 if last > last_ok:
                     question = (f"上次在第 {last_ok + 1} 行失败，"
                                 f"是否从第 {resume + 1} 行继续重试？\n\n"
-                                "选「否」则从头开始。")
+                                "选择「否」将从第一行开始。")
                 else:
-                    question = (f"上次跑到第 {last} 行，"
+                    question = (f"上次已执行至第 {last} 行，"
                                 f"是否从第 {last + 1} 行继续？\n\n"
-                                "选「否」则从头开始。")
+                                "选择「否」将从第一行开始。")
                 if messagebox.askyesno("继续上次？", question, parent=self):
                     start_row = resume
             elif last >= len(data) and len(data):
                 if not messagebox.askyesno(
-                        "已经跑完",
-                        f"上次已经跑完全部 {len(data)} 行，是否从头再跑一遍？",
+                        "执行已完成",
+                        f"上次已完成全部 {len(data)} 行，是否重新从头执行？",
                         parent=self):
                     return
         except Exception:      # noqa: BLE001 - 旧结果文件读不了就从头跑
@@ -2932,18 +3058,18 @@ class App(tk.Tk):
     def _start(self, entry: Optional[str], loop: bool = False,
                data: Optional[list] = None,
                data_path: Optional[str] = None,
-               row_offset: int = 0) -> None:
+               row_offset: int = 0) -> bool:
         if self.running:
             messagebox.showinfo("提示", "正在运行中，请先停止", parent=self)
-            return
+            return False
         names = None if entry is None else [entry]
         if entry is not None and not entry:
-            return
+            return False
         if sum(len(g.steps) for g in self.project.groups) == 0:
             messagebox.showinfo("提示", "还没有可执行的步骤", parent=self)
-            return
+            return False
         if not self._validate(names):
-            return
+            return False
         self.executor.base_dir = self.image_dir    # 步骤里的图片名相对图片目录
         self.executor.groups = self._snapshot(names)
         self.executor.order = ([entry] if entry else self.project.names())
@@ -2964,6 +3090,7 @@ class App(tk.Tk):
         delay = int(self.settings.get("delay", 3))
         self.iconify()
         self._countdown(delay, lambda: self._launch(entry, loop, debug=debug))
+        return True
 
     def _countdown(self, seconds: int, callback) -> None:
         self._countdown_token += 1
@@ -2990,13 +3117,21 @@ class App(tk.Tk):
         def cancel(_event=None):
             state["cancelled"] = True
             self._countdown_token += 1
+            self._schedule_pending = False
+            self._cancel_schedule_record("skipped", "启动倒计时被取消")
             overlay.destroy()
             self.deiconify()
 
         overlay.bind("<Escape>", cancel)
 
         def tick():
-            if state["cancelled"] or token != self._countdown_token:
+            if state["cancelled"]:
+                return
+            if token != self._countdown_token:
+                # 被新的倒计时取代：关掉自己的遮罩，别留在屏幕中间
+                overlay.destroy()
+                if self._active_schedule is not None:
+                    self._cancel_schedule_record("skipped", "启动被新的运行取代")
                 return
             if state["left"] <= 0:
                 overlay.destroy()
@@ -3010,9 +3145,11 @@ class App(tk.Tk):
 
     def _launch(self, entry: Optional[str], loop: bool,
                 debug: bool = False) -> None:
+        self._schedule_pending = False
         # 防止界面和计划任务 / 另一个副本同时抢鼠标
         lock = InstanceLock(make_lock_name(APP_DIR, "RUN"))
         if not lock.acquire():
+            self._cancel_schedule_record("skipped", "已有其它运行在进行")
             messagebox.showinfo(
                 "已有运行在进行",
                 "另一个 MeowGo 正在运行（可能是计划任务），\n"
@@ -3064,10 +3201,12 @@ class App(tk.Tk):
             self._write_run_report(result)
             self._write_result_file()
             self._show_summary(result)
+            self._finish_schedule_history(result)
             self._notify_finish(result)
         finally:
             self.running = False
             self.paused = False
+            self._schedule_pending = False
             if self._run_lock is not None:
                 self._run_lock.release()
                 self._run_lock = None
@@ -3225,38 +3364,116 @@ class App(tk.Tk):
     def _schedule_tick(self) -> None:
         """每秒对一次表：到点就自动跑设定的执行组（界面开着才有效）。"""
         try:
-            schedule = self.settings.get("schedule") or {}
-            if schedule.get("enabled") and not self.running:
-                now = time.localtime()
-                today = time.strftime("%Y-%m-%d")
-                key = f"{today} {schedule.get('time', '')}"
-                if (time.strftime("%H:%M") == schedule.get("time")
-                        and key not in self._schedule_fired):
+            tasks = schedule_tasks(self.settings)
+            today = time.strftime("%Y-%m-%d")
+            current = time.strftime("%H:%M")
+            if not self.running and not self._schedule_pending:
+                for task in tasks:
+                    if not task.get("enabled") or task.get("time") != current:
+                        continue
+                    key = f"{today}|{task.get('id', '')}|{current}"
+                    if key in self._schedule_fired:
+                        continue
                     self._schedule_fired.add(key)
-                    group = schedule.get("group") or ""
-                    if group and group in self.project.names():
-                        self._log("info", f"定时运行触发：{group}")
-                        self.run_group_for(group)
-                    elif not group:
-                        self._log("info", "定时运行触发：当前组")
-                        self.run_group()
-                    else:
-                        self._log("warn",
-                                  f"定时运行跳过：找不到执行组「{group}」")
+                    self._fire_schedule(task)
+                    break
             # 清理前一天的火星记录，避免集合无限增长
-            if len(self._schedule_fired) > 8:
+            if len(self._schedule_fired) > 32:
                 self._schedule_fired = {
                     k for k in self._schedule_fired if k.startswith(today)}
         finally:
             self.after(1000, self._schedule_tick)
 
+    def _fire_schedule(self, task: dict) -> None:
+        """执行一条到点的任务，并把这次触发写进历史。"""
+        group = task.get("group") or ""
+        if group and group not in self.project.names():
+            self._log("warn", f"定时运行跳过：找不到执行组「{group}」")
+            self._record_schedule(task, group, "skipped",
+                                  f"找不到执行组「{group}」")
+            return
+        if not group:
+            self._log("info", "定时运行触发：当前组")
+            group = self._current_group_name()
+        else:
+            self._log("info", f"定时运行触发：{group}")
+        entry = self._record_schedule(task, group, "running")
+        self._active_schedule = entry
+        self._schedule_pending = True
+        started = self.run_group_for(group) if task.get("group") else self.run_group()
+        if started is False:
+            self._schedule_pending = False
+            self._active_schedule = None
+            entry["status"] = "skipped"
+            entry["detail"] = "没有可运行的步骤或被校验拦下"
+            self._mark_dirty()
+
+    def _cancel_schedule_record(self, status: str = "skipped",
+                                detail: str = "") -> None:
+        """定时启动被取消 / 抢锁失败时，把记录收尾，别一直停在运行中。"""
+        entry = self._active_schedule
+        if entry is None:
+            return
+        self._active_schedule = None
+        self._schedule_pending = False
+        entry["status"] = status
+        if detail:
+            entry["detail"] = detail
+        entry["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._mark_dirty()
+
+    def _record_schedule(self, task: dict, group: str, status: str,
+                         detail: str = "") -> dict:
+        """追加一条定时执行记录（最新在前，最多保留 60 条）。"""
+        entry = {
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "time": task.get("time", ""),
+            "group": group or "当前组",
+            "status": status,
+            "detail": detail,
+            "seconds": 0,
+            "steps": 0,
+            "failed": 0,
+        }
+        history = [item for item in
+                   (self.settings.get("schedule_history") or [])
+                   if isinstance(item, dict)]
+        history.insert(0, entry)
+        self.settings["schedule_history"] = history[:SCHEDULE_HISTORY_LIMIT]
+        self._mark_dirty()
+        return entry
+
+    def _finish_schedule_history(self, result: str) -> None:
+        """运行结束后，把正在跑的那条定时记录补上结果和耗时。"""
+        entry = self._active_schedule
+        if entry is None:
+            return
+        self._active_schedule = None
+        self._schedule_pending = False
+        entry["status"] = result if result in SCHEDULE_RESULT_TEXT else "error"
+        entry["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            report = self.executor.report()
+            entry["steps"] = int(report.get("steps", 0))
+            entry["failed"] = int(report.get("failed", 0))
+            entry["seconds"] = float(report.get("seconds", 0))
+        except Exception:  # noqa: BLE001 — 历史记录失败不影响运行收尾
+            pass
+        self._mark_dirty()
+
     def _schedule_summary(self) -> str:
         """状态栏 / 菜单里显示的定时运行概况。"""
-        schedule = self.settings.get("schedule") or {}
-        if not schedule.get("enabled"):
+        enabled = [task for task in schedule_tasks(self.settings)
+                   if task.get("enabled")]
+        if not enabled:
             return "定时运行未启用"
-        group = schedule.get("group") or "当前组"
-        return f"定时 {schedule.get('time', '--:--')} → {group}"
+        enabled.sort(key=lambda task: task.get("time", ""))
+        first = enabled[0]
+        group = first.get("group") or "当前组"
+        if len(enabled) == 1:
+            return f"定时 {first.get('time', '--:--')} → {group}"
+        return (f"{len(enabled)} 个定时任务 · "
+                f"最近 {first.get('time', '--:--')} → {group}")
 
     # --------------------------------------------------------------- 报告通知
     def _write_run_report(self, result: str) -> None:
@@ -3531,9 +3748,33 @@ class App(tk.Tk):
         self.settings = dialog.result
         self.image_dir = dialog.result["image_dir"]
         self.project.image_dir = self.image_dir
+        language = str(self.settings.get("language", i18n.get_language()))
+        if language != i18n.get_language():
+            self.set_language(language, save=False)
         self._save_state()
         self._apply_tray_settings()
         self.image_label.configure(text=f"图片目录：{self.image_dir}")
+
+    def set_language(self, language: str, save: bool = True) -> None:
+        """切换界面语言并即时刷新已存在的控件（不重启客户端）。"""
+        language = i18n.set_language(language)
+        self.settings["language"] = language
+        i18n.refresh(self)
+        self._refresh_groups()
+        self._refresh_steps()
+        if hasattr(self, "_status_source"):
+            self.status_var.set(i18n.tr(self._status_source))
+        if _is_search_placeholder(self.step_search.get()):
+            self.step_search.delete(0, "end")
+            self.step_search.insert(0, _search_placeholder())
+            self.step_search.configure(foreground=MUTED)
+        self.image_label.configure(text=f"图片目录：{self.image_dir}")
+        self._log("info", (
+            f"界面语言已切换为 {i18n.language_label(language)}"
+            if language == "zh" else
+            f"Interface language changed to {i18n.language_label(language)}"))
+        if save:
+            self._save_state()
 
     def open_schedule(self) -> None:
         dialog = ScheduleDialog(self, self.settings, self.project.names())
@@ -3542,7 +3783,19 @@ class App(tk.Tk):
         self.settings.update(dialog.result)
         self._mark_dirty()
         self._save_state()
-        self._log("info", f"定时运行设置已保存（{self._schedule_summary()}）")
+        self._log("info", f"定时任务已保存（{self._schedule_summary()}）")
+
+    def open_schedule_popover(self) -> None:
+        """顶栏时钟：浮窗显示即将执行的定时任务与倒计时。"""
+        popover = getattr(self, "_schedule_popover", None)
+        if popover is not None and popover.winfo_exists():
+            popover.close()
+            return
+        self._schedule_popover = SchedulePopover(self).popup()
+
+    def open_schedule_history(self) -> None:
+        """近期定时执行情况。"""
+        ScheduleHistoryDialog(self, self.settings).wait()
 
     def _image_count(self) -> int:
         try:
@@ -3575,30 +3828,32 @@ class App(tk.Tk):
         ShortcutsDialog(self).wait()
 
     def show_help(self) -> None:
-        lines = ["【一句话】",
-                 "左侧管理「执行组」，右侧编辑组里的步骤，点「运行组」执行。",
-                 "没有“项目”概念：所有执行组自动保存，下次打开还在。",
-                 "一个组可以被别的组用「调用执行组」指令反复复用。",
+        lines = [i18n.tr("【概述】"),
+                 i18n.tr("左侧管理执行组，右侧编辑组内步骤，点击「运行组」即可执行。"),
+                 i18n.tr("所有执行组均自动保存，无需手动维护项目文件。"),
+                 i18n.tr("执行组可通过「调用执行组」指令被其他执行组复用。"),
                  "",
-                 "【操作要点】",
-                 "· 组操作：在左侧组上右键 → 新建 / 重命名 / 复制 / 删除 / 排序；",
-                 "· 直接运行某个组：在该组上右键 →「运行这个组」；",
-                 "· 步骤列表双击单元格可直接改内容、类型、重复次数、备注；",
-                 "· 右键列表＝完整操作菜单（新增/编辑/复制/删除/截图/上下移）；",
-                 "· 图片类步骤点「截图」框选屏幕，自动保存到图片目录；",
-                 "· 编排复用：在组里新增「调用执行组」，内容填要调用的组名。",
+                 i18n.tr("【操作要点】"),
+                 i18n.tr("· 执行组操作：在左侧执行组上右键，可新建、重命名、复制、删除或排序。"),
+                 i18n.tr("· 运行指定执行组：在该执行组上右键，选择「运行这个组」。"),
+                 i18n.tr("· 步骤列表：双击单元格可编辑内容、类型、重复次数与备注。"),
+                 i18n.tr("· 右键菜单提供新增、编辑、复制、删除、截图及上下移动等完整操作。"),
+                 i18n.tr("· 图像类步骤可点击「截图」框选屏幕区域，并自动保存至图像目录。"),
+                 i18n.tr("· 复用编排：在组内新增「调用执行组」，内容填写目标执行组名称。"),
                  "",
-                 "【指令类型】"]
+                 i18n.tr("【指令类型】")]
+        separators = ":" if i18n.get_language() == "en" else "："
         for index, (key, (name, hint, need_repeat, repeat_hint)) in enumerate(
                 STEP_TYPES.items(), start=1):
-            lines.append(f"{index}. {name}：{hint}")
+            lines.append(f"{index}. {i18n.tr(name)}{separators} {i18n.tr(hint)}")
             if repeat_hint:
-                lines.append(f"     重复次数：{repeat_hint}")
-        lines += ["", "【快捷键】",
-                  "Ctrl+G 新建组　Ctrl+Enter 新增步骤　F2 编辑步骤　Delete 删除步骤",
-                  "F5 运行当前组（全局）　F9 停止（全局，任何时候都有效）",
+                lines.append(f"     {i18n.tr('重复次数：')}{i18n.tr(repeat_hint)}")
+        lines += ["", i18n.tr("【快捷键】"),
+                  i18n.tr("Ctrl+G 新建执行组　Ctrl+Enter 新增步骤　F2 编辑步骤　"
+                          "Delete 删除步骤"),
+                  i18n.tr("F5 运行当前组（全局）　F9 停止（全局，任何时候均有效）"),
                   "",
-                  "【安全】把鼠标快速甩到屏幕左上角可立即中断 pyautogui。"]
+                  i18n.tr("【安全】将鼠标快速移至屏幕左上角，可立即中断执行。")]
 
         win = tk.Toplevel(self)
         win.title("使用说明")
@@ -3619,14 +3874,13 @@ class App(tk.Tk):
         self.place_window(win, x, y, win.winfo_width(), win.winfo_height())
 
     def show_about(self) -> None:
-        messagebox.showinfo(
-            "关于",
+        message = (
             f"{APP_TITLE}\n\n"
-            "把原来的 Excel 配置搬到界面上：可视化维护执行组与步骤、\n"
-            "组间可互相调用复用、一键截图、运行前校验、日志与全局停止热键。\n\n"
-            "执行组自动保存在程序目录的 rpa_settings.json，\n"
-            "Excel 互转：单组导入导出 / 全部工作表导入导出（旧版 cmd.xls 通用）。",
-            parent=self)
+            "将原 Excel 配置迁移至客户端界面：可视化维护执行组与步骤，\n"
+            "支持执行组间调用复用、屏幕截图、运行前校验、日志记录与全局停止热键。\n\n"
+            "执行组自动保存于程序目录的 rpa_settings.json；\n"
+            "支持 Excel 单组或全部工作表导入导出（兼容旧版 cmd.xls）。")
+        messagebox.showinfo("关于", i18n.tr(message), parent=self)
 
     # --------------------------------------------------------------- 关闭
     def on_close(self) -> None:
@@ -4386,6 +4640,8 @@ class StepDialog(BaseDialog):
         self._type_labels = [info[0] for info in STEP_TYPES.values()]
         self._type_by_label = {info[0]: key
                                for key, info in STEP_TYPES.items()}
+        self._type_by_label.update({
+            i18n.tr(info[0]): key for key, info in STEP_TYPES.items()})
         self.var_type = tk.StringVar()
         # 分组 + 模糊搜索：基础指令与会调用执行组的指令分开展示
         # 用一个描边容器把下拉框包成和输入框同样的“字段”，
@@ -4553,8 +4809,8 @@ class StepDialog(BaseDialog):
         self.lbl_fail.grid(row=0, column=2, sticky="w")
         self.var_on_fail = tk.StringVar(
             value="跳过这步" if editing.on_fail != "stop" else "停止执行")
-        self.combo_fail = ttk.Combobox(
-            row_timeout, textvariable=self.var_on_fail, state="readonly",
+        self.combo_fail = uikit.LocalizedCombobox(
+            row_timeout, variable=self.var_on_fail, state="readonly",
             values=["跳过这步", "停止执行"], width=9,
             font=FONT_NOTE)
         self.combo_fail.grid(row=0, column=3, sticky="w",
@@ -4637,8 +4893,8 @@ class StepDialog(BaseDialog):
         self.var_input_mode = tk.StringVar(
             value="逐字输入（英文/数字）" if editing.input_mode == "type"
             else "粘贴（快，支持中文）")
-        self.combo_input = ttk.Combobox(
-            row_other, textvariable=self.var_input_mode, state="readonly",
+        self.combo_input = uikit.LocalizedCombobox(
+            row_other, variable=self.var_input_mode, state="readonly",
             values=["粘贴（快，支持中文）", "逐字输入（英文/数字）"],
             width=20, font=FONT_NOTE)
         self.combo_input.grid(row=0, column=0, sticky="w")
@@ -4757,19 +5013,19 @@ class StepDialog(BaseDialog):
                 if missing and not points:
                     message = "找不到图片文件：" + "、".join(missing)
                 elif not points:
-                    message = "当前屏幕没找到（确认窗口已打开、缩放一致）"
+                    message = "当前屏幕未找到匹配图像（请确认目标窗口已打开且缩放比例一致）"
                 elif len(points) == 1:
-                    message = "命中 1 处 ✓"
+                    message = "找到 1 处匹配 ✓"
                     warn = False
                 else:
-                    message = (f"命中 {len(points)} 处，可能点错"
-                               "（可用「第几个」或框选范围）")
+                    message = (f"找到 {len(points)} 处匹配，可能定位不准"
+                               "（可使用「第几个」或框选识别范围）")
                 try:
                     nth = int(self.var_nth.get() or 1)
                 except ValueError:
                     nth = 1
                 if points and nth > len(points):
-                    message = f"只命中 {len(points)} 处，没有第 {nth} 个"
+                    message = f"仅找到 {len(points)} 处匹配，不存在第 {nth} 个"
                     warn = True
             except Exception as exc:      # noqa: BLE001
                 message = f"检查失败：{exc}"
@@ -4819,32 +5075,32 @@ class StepDialog(BaseDialog):
             names = "、".join(self.project.names()) or "（还没有其它组）"
             text += f"\n可调用：{names}"
         if key == "hotkey":
-            text += "\n也可点右侧键盘按钮直接按组合键录入（Ctrl+Shift+A 这种）"
+            text += "\n也可点击右侧键盘按钮录入组合键（如 Ctrl+Shift+A）。"
         if key in PIPE_CONDITION_TYPES:
-            text += ("\n左边填判断用图片，右边填满足后要执行的组"
-                     "（可点「选组」）")
+            text += ("\n左侧填写判断图像，右侧填写条件满足后执行的执行组"
+                     "（可点击「选组」）。")
         if key == "if_else":
-            text += "\n下面两个输入框分别填出现时 / 没出现时要执行的组" \
-                    "（都能点「选组」）"
+            text += "\n下方两个输入框分别填写图像出现与未出现时执行的执行组" \
+                    "（均可点击「选组」）。"
         if key == "set":
-            text += "\n设置后，任意步骤的内容里都能用 {变量名} 读回"
+            text += "\n设置后，任意步骤的内容均可通过 {变量名} 读取。"
         if key == "copy":
-            text += "\n先手动复制好文字，这一步把它存进指定变量" \
-                    "（发一次 Ctrl+C，剪贴板稍后会还原）"
+            text += "\n请先复制目标文字；此步骤会将其存入指定变量" \
+                    "（发送一次 Ctrl+C，随后恢复剪贴板内容）。"
         if key == "drag":
-            text += "\n截图 / 选图 / 拾取会填进第一个空着的一段"
+            text += "\n截图、选图或拾取的结果将填入第一个空白段。"
         if key == "window":
-            text += "\n标题写窗口名的一部分就行，如 activate:记事本"
+            text += "\n窗口标题可只填写其中一部分，例如 activate:记事本。"
         if key in ("click_xy", "move_xy"):
-            text += "\n也可以把鼠标移到目标处，点「拾取」自动填坐标"
+            text += "\n也可将鼠标移至目标位置，点击「拾取」自动填入坐标。"
         if key == "input":
-            text += ("\n默认用剪贴板粘贴（支持中文）"
-                     "\n个别应用不认粘贴时，可在「高级选项」改逐字输入")
+            text += ("\n默认通过剪贴板粘贴（支持中文）。"
+                     "\n若个别应用不支持粘贴，可在「高级选项」中改为逐字输入。")
         if needs_image:
-            text += ("\n截图 / 选图后点「预览」核对内容"
-                     "\n点错了可在「高级选项」里框选范围或指定第几个")
+            text += ("\n截图或选图后，请点击「预览」核对内容。"
+                     "\n若定位有误，可在「高级选项」中框选识别范围或指定第几个匹配项。")
         elif key in CONDITION_TYPES:
-            text += "\n「高级选项」里可以设置最多等几秒"
+            text += "\n可在「高级选项」中设置最长等待时间。"
         self._show_hint(text)
         is_image = key in IMAGE_TYPES
         is_hotkey = key == "hotkey"
@@ -4938,13 +5194,14 @@ class StepDialog(BaseDialog):
 
     # -- 按键录入 -----------------------------------------------------------
     def _show_hint(self, text: str, warn: bool = False) -> None:
-        self.hint.configure(text=text, fg=WARNING if warn else MUTED)
+        i18n.set_text_source(self.hint, text,
+                             fg=WARNING if warn else MUTED)
 
     def _start_record(self) -> None:
         if self._recorder.active:
             return
         if not self._recorder.start(self.var_content.get()):
-            self._show_hint("无法启动键盘录制（装不上钩子），请手动输入",
+            self._show_hint("无法启动键盘录制（键盘钩子安装失败），请手动输入",
                             warn=True)
 
     def _set_recording_ui(self, active: bool) -> None:
@@ -5245,123 +5502,384 @@ class ImagePreviewDialog(BaseDialog):
 class ScheduleDialog(BaseDialog):
     """定时运行 + 结束通知。
 
+    左侧是任务列表（新增 / 选择 / 删除 / 行内开关），右侧编辑当前任务。
     定时到点后自动运行设定的执行组（软件内定时只在界面开着时有效）。
-    底部可以把同样的时间和组交给 Windows 计划任务，实现关界面也能跑的无人值守。
+    底部可以把当前任务交给 Windows 计划任务，实现关界面也能跑的无人值守。
     """
 
     def __init__(self, parent: App, settings: dict, group_names: list[str]):
-        super().__init__(parent, "定时运行与通知", width=470, height=475)
-        self.columnconfigure(1, weight=1)
+        super().__init__(parent, "定时运行与通知", width=790, height=575)
         self._group_names = list(group_names)
-        schedule = settings.get("schedule") or {}
-        hour, _, minute = str(schedule.get("time", "09:00")).partition(":")
+        self._tasks = schedule_tasks(settings)
+        # 老配置（没有 schedules 键）首次打开时给一条草稿，方便直接填时间；
+        # 用户明确删光任务后（schedules=[]）则保持空列表。
+        if not self._tasks and "schedules" not in settings:
+            self._tasks = [make_schedule_task()]
+        self._selected = 0 if self._tasks else -1
+        self._loading = False
+        self._task_rows: list[dict] = []
 
-        self.label("启用定时运行", 0)
-        self.var_enabled = tk.BooleanVar(value=bool(schedule.get("enabled")))
-        uikit.Switch(self, self.var_enabled, scale=parent.scale, bg=CARD).grid(
-            row=0, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
-        self.label("每天运行时间", 1)
-        row_time = tk.Frame(self, bg=CARD)
-        row_time.grid(row=1, column=1, sticky="w", padx=(0, parent.s(16)),
-                      pady=parent.s(5))
+        current = self._tasks[self._selected] if self._tasks else {}
+        hour, _, minute = str(current.get("time", "09:00")).partition(":")
+        self.var_enabled = tk.BooleanVar(value=bool(current.get("enabled", True)))
         self.var_hour = tk.StringVar(value=hour or "09")
         self.var_minute = tk.StringVar(value=minute or "00")
-        ttk.Spinbox(row_time, from_=0, to=23, width=4, wrap=True,
-                    format="%02.0f", textvariable=self.var_hour).pack(
-            side="left")
-        tk.Label(row_time, text=":", bg=CARD, fg=TEXT,
-                 font=FONT_NOTE).pack(side="left", padx=parent.s(2))
-        ttk.Spinbox(row_time, from_=0, to=59, width=4, wrap=True,
-                    format="%02.0f", textvariable=self.var_minute).pack(
-            side="left")
-        tk.Label(row_time, text="时 : 分", bg=CARD, fg=MUTED,
-                 font=FONT_NOTE).pack(side="left", padx=parent.s(6))
-
-        self.label("运行哪个组", 2)
         self.var_group = tk.StringVar(
-            value=schedule.get("group") or "（当前组）")
-        ttk.Combobox(self, textvariable=self.var_group, state="readonly",
-                     values=["（当前组）"] + list(group_names),
-                     font=FONT_NOTE).grid(
-            row=2, column=1, sticky="ew", padx=(0, parent.s(16)),
-            pady=parent.s(5))
-
-        tk.Frame(self, bg=BORDER, height=1).grid(
-            row=3, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=parent.s(10))
-        self.label("结束通知", 4)
+            value=current.get("group") or "（当前组）")
         self.var_sound = tk.BooleanVar(value=bool(settings.get("sound")))
-        sound_box = tk.Frame(self, bg=CARD)
-        sound_box.grid(row=4, column=1, sticky="w",
-                       padx=(0, parent.s(16)), pady=parent.s(3))
-        uikit.Switch(sound_box, self.var_sound, scale=parent.scale,
-                     bg=CARD).pack(side="left")
-        tk.Label(sound_box, text="播放提示音", bg=CARD, fg=TEXT,
-                 font=FONT_NOTE).pack(side="left", padx=(parent.s(6), 0))
-
-        self.label("Webhook", 5)
         self.var_webhook = tk.StringVar(value=settings.get("webhook", ""))
-        ttk.Entry(self, textvariable=self.var_webhook).grid(
-            row=5, column=1, sticky="ew", padx=(0, parent.s(16)),
-            pady=parent.s(5))
-        tk.Label(self, text="填企业微信 / 钉钉机器人地址，运行结束自动推送；"
-                            "留空则不推送",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(400), justify="left", anchor="w").grid(
-            row=6, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(0, parent.s(2)))
 
-        tk.Frame(self, bg=BORDER, height=1).grid(
-            row=7, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=parent.s(8))
-        self.label("无人值守（Windows 计划任务）", 8)
-        tk.Label(self, text="由 Windows 负责，关掉界面也会按时跑。"
-                            "\n不需要管理员权限，创建后可在「任务计划程序」里查看。",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(400), justify="left", anchor="w").grid(
-            row=9, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(0, parent.s(2)))
-        row_task = tk.Frame(self, bg=CARD)
-        row_task.grid(row=10, column=0, columnspan=2, sticky="w",
-                      padx=parent.s(16),
-                      pady=(parent.s(2), parent.s(4)))
-        self.btn_task_create = uikit.RoundButton(
-            row_task, "创建计划任务", "calendar", self._create_task,
-            kind="outline", scale=parent.scale, bg=CARD, height=CONTROL_SM,
-            pad=parent.s(10), font_size=FONT_SIZE_NOTE,
-            tooltip="用上面的时间和执行组创建每天运行的计划任务")
-        self.btn_task_create.pack(side="left", padx=parent.s(4))
-        self.btn_task_delete = uikit.RoundButton(
-            row_task, "删除计划任务", "trash", self._delete_task,
-            kind="ghost", scale=parent.scale, bg=CARD, height=CONTROL_SM,
-            pad=parent.s(10), font_size=FONT_SIZE_NOTE)
-        self.btn_task_delete.pack(side="left", padx=parent.s(4))
-        self.lbl_task = tk.Label(self, text="", bg=CARD, fg=MUTED,
-                                 font=FONT_CAPTION,
-                                 wraplength=parent.s(400), justify="left")
-        self.lbl_task.grid(row=11, column=0, columnspan=2,
-                           padx=parent.s(16), pady=(0, parent.s(4)))
+        body = tk.Frame(self, bg=CARD)
+        body.grid(row=0, column=0, sticky="nsew",
+                  padx=parent.s(16), pady=(parent.s(12), 0))
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=0, minsize=parent.s(250))
+        body.columnconfigure(1, weight=1)
 
-        self.footer(12, "保存", "check", self.ok, pad_top=10)
-        self.fit_content(width=parent.s(470))
+        self._build_task_panel(body)
+        self._build_editor(body)
+
+        self._load_task()
+        self._rebuild_task_list()
+        self.footer(1, "保存", "check", self.ok, pad_top=10)
+        self.fit_content(width=parent.s(790))
         self.center()
 
-    def ok(self) -> None:
+    # -- 左侧任务列表 -------------------------------------------------------
+    def _build_task_panel(self, parent) -> None:
+        app = self.app
+        panel = tk.Frame(parent, bg=HEADING_BG, highlightthickness=1,
+                         highlightbackground=BORDER, width=app.s(250))
+        panel.grid(row=0, column=0, sticky="nsew", padx=(0, app.s(14)))
+        panel.grid_propagate(False)
+        panel.rowconfigure(1, weight=1)
+        panel.columnconfigure(0, weight=1)
+
+        head = tk.Frame(panel, bg=HEADING_BG)
+        head.grid(row=0, column=0, sticky="ew",
+                  padx=app.s(10), pady=(app.s(8), app.s(4)))
+        tk.Label(head, text="定时任务", bg=HEADING_BG, fg=TEXT,
+                 font=FONT_SECTION).pack(side="left")
+        self.btn_add_task = uikit.RoundButton(
+            head, "新增", "add", self._add_task, kind="outline",
+            scale=app.scale, bg=HEADING_BG, height=CONTROL_XS,
+            pad=app.s(7), font_size=FONT_SIZE_CAPTION,
+            tooltip="新增一个定时任务")
+        self.btn_add_task.pack(side="right")
+
+        wrap = tk.Frame(panel, bg=HEADING_BG)
+        wrap.grid(row=1, column=0, sticky="nsew", padx=app.s(4))
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        self.task_canvas = tk.Canvas(
+            wrap, bg=HEADING_BG, highlightthickness=0, bd=0)
+        self.task_canvas.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(wrap, orient="vertical",
+                               command=self.task_canvas.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.task_canvas.configure(yscrollcommand=scroll.set)
+        self.task_inner = tk.Frame(self.task_canvas, bg=HEADING_BG)
+        self._task_window = self.task_canvas.create_window(
+            (0, 0), window=self.task_inner, anchor="nw")
+        self.task_inner.bind(
+            "<Configure>",
+            lambda e: self.task_canvas.configure(
+                scrollregion=self.task_canvas.bbox("all")))
+        self.task_canvas.bind(
+            "<Configure>",
+            lambda e: self.task_canvas.itemconfigure(
+                self._task_window, width=e.width))
+
+        foot = tk.Frame(panel, bg=HEADING_BG)
+        foot.grid(row=2, column=0, sticky="ew",
+                  padx=app.s(8), pady=(app.s(4), app.s(8)))
+        self.btn_delete_task = uikit.RoundButton(
+            foot, "删除", "trash", self._delete_task, kind="ghost",
+            scale=app.scale, bg=HEADING_BG, height=CONTROL_XS,
+            pad=app.s(6), font_size=FONT_SIZE_CAPTION)
+        self.btn_delete_task.pack(side="left")
+
+    def _rebuild_task_list(self) -> None:
+        for child in self.task_inner.winfo_children():
+            child.destroy()
+        self._task_rows = []
+        app = self.app
+        if not self._tasks:
+            tk.Label(self.task_inner, text="暂无定时任务\n请点击「新增」创建",
+                     bg=HEADING_BG, fg=MUTED, font=FONT_CAPTION,
+                     justify="left", anchor="w").pack(
+                fill="x", padx=app.s(10), pady=app.s(12))
+            return
+        for index, task in enumerate(self._tasks):
+            selected = index == self._selected
+            bg = ACCENT_MIST if selected else CARD
+            row = tk.Frame(self.task_inner, bg=bg, cursor="hand2",
+                           highlightthickness=1,
+                           highlightbackground=(ACCENT if selected else BORDER))
+            row.pack(fill="x", padx=app.s(4), pady=app.s(3))
+            row.columnconfigure(2, weight=1)
+            variable = tk.BooleanVar(value=bool(task.get("enabled")))
+            switch = uikit.Switch(row, variable, scale=app.scale, bg=bg,
+                                  tooltip="快速启用或停用此任务")
+            switch.grid(row=0, column=0, rowspan=2,
+                        padx=(app.s(6), app.s(2)), pady=app.s(6))
+            variable.trace_add(
+                "write",
+                lambda *_a, i=index, var=variable:
+                self._on_row_switch(i, var))
+            time_label = tk.Label(row, text=task.get("time", "09:00"),
+                                  bg=bg, fg=TEXT if task.get("enabled")
+                                  else MUTED, font=FONT_NOTE_BOLD,
+                                  anchor="w", cursor="hand2")
+            time_label.grid(row=0, column=1, columnspan=2, sticky="ew",
+                            padx=(app.s(4), app.s(6)),
+                            pady=(app.s(6), 0))
+            group_label = tk.Label(
+                row, text=task.get("group") or "（当前组）", bg=bg,
+                fg=MUTED, font=FONT_CAPTION, anchor="w", cursor="hand2")
+            group_label.grid(row=1, column=1, columnspan=2, sticky="ew",
+                             padx=(app.s(4), app.s(6)),
+                             pady=(0, app.s(6)))
+            for widget in (row, time_label, group_label):
+                widget.bind("<Button-1>", lambda _e, i=index: self._select(i))
+            self._task_rows.append({"row": row, "switch": switch,
+                                    "time": time_label,
+                                    "group": group_label})
+
+    def _refresh_task_row_styles(self) -> None:
+        for index, parts in enumerate(self._task_rows):
+            if index >= len(self._tasks):
+                break
+            task = self._tasks[index]
+            selected = index == self._selected
+            bg = ACCENT_MIST if selected else CARD
+            parts["row"].configure(
+                bg=bg, highlightbackground=(ACCENT if selected else BORDER))
+            parts["time"].configure(
+                bg=bg, fg=TEXT if task.get("enabled") else MUTED)
+            parts["group"].configure(bg=bg)
+            parts["switch"].set_bg(bg)
+
+    def _select(self, index: int) -> None:
+        if not (0 <= index < len(self._tasks)) or index == self._selected:
+            return
+        self._commit_current()
+        self._selected = index
+        self._load_task()
+        # 重建一次让上一行的时间 / 执行组跟着编辑结果刷新
+        self._rebuild_task_list()
+
+    def _add_task(self) -> None:
+        self._commit_current()
+        task = make_schedule_task()
+        self._tasks.append(task)
+        self._selected = len(self._tasks) - 1
+        self._load_task()
+        self._rebuild_task_list()
+        self.task_canvas.after_idle(
+            lambda: self.task_canvas.yview_moveto(1.0))
+
+    def _delete_task(self) -> None:
+        if not (0 <= self._selected < len(self._tasks)):
+            return
+        task = self._tasks[self._selected]
+        name = (f"{task.get('time', '--:--')} · "
+                f"{task.get('group') or i18n.tr('当前组')}")
+        if not messagebox.askyesno("删除定时任务",
+                                   f"确定删除定时任务「{name}」？",
+                                   parent=self):
+            return
+        del self._tasks[self._selected]
+        if self._selected >= len(self._tasks):
+            self._selected = len(self._tasks) - 1
+        self._load_task()
+        self._rebuild_task_list()
+
+    def _on_row_switch(self, index: int, variable: tk.BooleanVar) -> None:
+        if self._loading or not (0 <= index < len(self._tasks)):
+            return
+        task = self._tasks[index]
+        task["enabled"] = bool(variable.get())
+        if index == self._selected:
+            self._loading = True
+            try:
+                self.var_enabled.set(task["enabled"])
+            finally:
+                self._loading = False
+        self._refresh_task_row_styles()
+
+    # -- 右侧编辑区 ---------------------------------------------------------
+    def _build_editor(self, parent) -> None:
+        app = self.app
+        right = tk.Frame(parent, bg=CARD)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(1, weight=1)
+        self.right_panel = right
+
+        self.editor_title = tk.Label(right, text="任务设置", bg=CARD, fg=TEXT,
+                                     font=FONT_SECTION, anchor="w")
+        self.editor_title.grid(row=0, column=0, columnspan=2, sticky="w",
+                               pady=(app.s(2), app.s(6)))
+        self.editor_hint = tk.Label(
+            right, text="修改后请点击底部「保存」；左侧开关可快速启用或停用任务。",
+            bg=CARD, fg=MUTED, font=FONT_CAPTION, anchor="w")
+        self.editor_hint.grid(row=1, column=0, columnspan=2, sticky="w",
+                              pady=(0, app.s(4)))
+
+        def row_label(text: str, row: int) -> tk.Label:
+            label = tk.Label(right, text=text, bg=CARD, fg=TEXT,
+                             font=FONT_NOTE)
+            label.grid(row=row, column=0, sticky="w",
+                       padx=(0, app.s(10)), pady=app.s(5))
+            return label
+
+        row_label("每日运行时间", 2)
+        row_time = tk.Frame(right, bg=CARD)
+        row_time.grid(row=2, column=1, sticky="w", pady=app.s(5))
+        self.spin_hour = ttk.Spinbox(
+            row_time, from_=0, to=23, width=4, wrap=True, format="%02.0f",
+            textvariable=self.var_hour)
+        self.spin_hour.pack(side="left")
+        tk.Label(row_time, text=":", bg=CARD, fg=TEXT,
+                 font=FONT_NOTE).pack(side="left", padx=app.s(2))
+        self.spin_minute = ttk.Spinbox(
+            row_time, from_=0, to=59, width=4, wrap=True, format="%02.0f",
+            textvariable=self.var_minute)
+        self.spin_minute.pack(side="left")
+        tk.Label(row_time, text="时 : 分", bg=CARD, fg=MUTED,
+                 font=FONT_NOTE).pack(side="left", padx=app.s(6))
+
+        row_label("目标执行组", 3)
+        self.group_combo = ttk.Combobox(
+            right, textvariable=self.var_group, state="readonly",
+            values=[i18n.tr("（当前组）")] + list(self._group_names),
+            font=FONT_NOTE)
+        self.group_combo.grid(row=3, column=1, sticky="ew", pady=app.s(5))
+
+        tk.Frame(right, bg=BORDER, height=1).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=app.s(10))
+        row_label("完成通知", 5)
+        sound_box = tk.Frame(right, bg=CARD)
+        sound_box.grid(row=5, column=1, sticky="w", pady=app.s(3))
+        uikit.Switch(sound_box, self.var_sound, scale=app.scale,
+                     bg=CARD).pack(side="left")
+        tk.Label(sound_box, text="播放提示音", bg=CARD, fg=TEXT,
+                 font=FONT_NOTE).pack(side="left", padx=(app.s(6), 0))
+
+        row_label("Webhook", 6)
+        ttk.Entry(right, textvariable=self.var_webhook).grid(
+            row=6, column=1, sticky="ew", pady=app.s(5))
+        tk.Label(right, text="填写企业微信或钉钉机器人地址，任务结束后自动推送；"
+                             "留空则不推送。完成通知由所有定时任务共用。",
+                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
+                 wraplength=app.s(445), justify="left", anchor="w").grid(
+            row=7, column=0, columnspan=2, sticky="ew",
+            pady=(0, app.s(2)))
+
+        tk.Frame(right, bg=BORDER, height=1).grid(
+            row=8, column=0, columnspan=2, sticky="ew", pady=app.s(9))
+        row_label("无人值守运行", 9)
+        tk.Label(right, text="由 Windows 任务计划程序执行，客户端关闭后仍会按时运行。"
+                             "\n无需管理员权限；创建后可在「任务计划程序」中查看。",
+                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
+                 wraplength=app.s(300), justify="left", anchor="w").grid(
+            row=9, column=1, sticky="w", pady=(0, app.s(2)))
+        row_task = tk.Frame(right, bg=CARD)
+        row_task.grid(row=10, column=1, sticky="w", pady=(app.s(4), 0))
+        self.btn_task_create = uikit.RoundButton(
+            row_task, "创建计划任务", "calendar", self._create_task,
+            kind="outline", scale=app.scale, bg=CARD, height=CONTROL_SM,
+            pad=app.s(8), font_size=FONT_SIZE_NOTE,
+            tooltip="用当前任务的时间和执行组创建每天运行的计划任务")
+        self.btn_task_create.pack(side="left", padx=(0, app.s(4)))
+        self.btn_task_delete = uikit.RoundButton(
+            row_task, "删除计划任务", "trash", self._delete_task_plan,
+            kind="ghost", scale=app.scale, bg=CARD, height=CONTROL_SM,
+            pad=app.s(8), font_size=FONT_SIZE_NOTE)
+        self.btn_task_delete.pack(side="left", padx=app.s(4))
+        self.lbl_task = tk.Label(right, text="", bg=CARD, fg=MUTED,
+                                 font=FONT_CAPTION,
+                                 wraplength=app.s(445), justify="left",
+                                 anchor="w")
+        self.lbl_task.grid(row=11, column=0, columnspan=2, sticky="ew",
+                           pady=(app.s(4), 0))
+
+    def _load_task(self) -> None:
+        task = (self._tasks[self._selected]
+                if 0 <= self._selected < len(self._tasks) else None)
+        self._loading = True
+        try:
+            if task is None:
+                self.var_enabled.set(False)
+                self.var_hour.set("09")
+                self.var_minute.set("00")
+                self.var_group.set(i18n.tr("（当前组）"))
+            else:
+                hour, _, minute = str(task.get("time", "09:00")).partition(":")
+                self.var_enabled.set(bool(task.get("enabled")))
+                self.var_hour.set(hour or "09")
+                self.var_minute.set(minute or "00")
+                self.var_group.set(task.get("group")
+                                   or i18n.tr("（当前组）"))
+        finally:
+            self._loading = False
+        if task is None:
+            self.editor_title.configure(text="暂无定时任务")
+            self.editor_hint.configure(
+                text="请点击左侧「新增」创建；行内开关可快速启用或停用。")
+        else:
+            self.editor_title.configure(
+                text=f"第 {self._selected + 1} 个任务")
+            self.editor_hint.configure(
+                text="修改后请点击底部「保存」；左侧开关可快速启用或停用任务。")
+        self._set_editor_enabled(task is not None)
+
+    def _set_editor_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        combo_state = "readonly" if enabled else "disabled"
+        for spin in (self.spin_hour, self.spin_minute):
+            spin.configure(state=state)
+        self.group_combo.configure(state=combo_state)
+        self.btn_task_create.set_enabled(enabled)
+        self.btn_task_delete.set_enabled(enabled)
+        self.btn_delete_task.set_enabled(enabled)
+
+    def _commit_current(self) -> None:
+        if self._loading or not (0 <= self._selected < len(self._tasks)):
+            return
+
         def number(value, default):
             try:
                 return int(float(value))
             except (TypeError, ValueError):
                 return default
 
+        task = self._tasks[self._selected]
         hour = min(23, max(0, number(self.var_hour.get(), 9)))
         minute = min(59, max(0, number(self.var_minute.get(), 0)))
         group = self.var_group.get()
+        task["enabled"] = bool(self.var_enabled.get())
+        task["time"] = f"{hour:02d}:{minute:02d}"
+        task["group"] = "" if group in i18n.variants("（当前组）") else group
+
+    # -- 保存 ---------------------------------------------------------------
+    def ok(self) -> None:
+        self._commit_current()
+        schedules = [{
+            "id": str(task.get("id") or f"task-{index + 1}"),
+            "enabled": bool(task.get("enabled")),
+            "time": _valid_schedule_time(task.get("time")),
+            "group": task.get("group") or "",
+        } for index, task in enumerate(self._tasks)]
+        legacy = ({key: schedules[0][key]
+                   for key in ("enabled", "time", "group")}
+                  if schedules else {})
         self.result = {
-            "schedule": {"enabled": bool(self.var_enabled.get()),
-                         "time": f"{hour:02d}:{minute:02d}",
-                         "group": "" if group == "（当前组）" else group},
+            "schedules": schedules,
+            "schedule": legacy,
             "sound": bool(self.var_sound.get()),
             "webhook": self.var_webhook.get().strip(),
         }
@@ -5441,7 +5959,7 @@ class ScheduleDialog(BaseDialog):
             messagebox.showerror("创建失败", detail or "schtasks 返回错误",
                                  parent=self)
 
-    def _delete_task(self) -> None:
+    def _delete_task_plan(self) -> None:
         group = self._task_group()
         name = self._task_name(group)
         if not messagebox.askyesno(
@@ -5464,6 +5982,289 @@ class ScheduleDialog(BaseDialog):
             self.lbl_task.configure(text="删除失败：" + detail, fg=DANGER)
             messagebox.showerror("删除失败", detail or "schtasks 返回错误",
                                  parent=self)
+
+
+class SchedulePopover(tk.Toplevel):
+    """顶栏时钟弹出的浮窗：即将执行的任务 + 实时倒计时 + 历史入口。"""
+
+    def __init__(self, parent: App):
+        super().__init__(parent)
+        self.app = parent
+        self.withdraw()
+        self.overrideredirect(True)
+        self._closed = False
+        self._armed = False
+        self._after_id = None
+        self._poll_id = None
+        self._rows: list[dict] = []
+        self._width = parent.s(330)
+
+        try:
+            self.configure(bg=uikit.TRANSPARENT_KEY)
+            self.wm_attributes("-transparentcolor", uikit.TRANSPARENT_KEY)
+            outer_bg = uikit.TRANSPARENT_KEY
+        except tk.TclError:
+            outer_bg = BORDER
+            self.configure(bg=outer_bg)
+
+        outer = tk.Frame(self, bg=outer_bg)
+        outer.pack(fill="both", expand=True)
+        inner = tk.Frame(outer, bg=CARD)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        head = tk.Frame(inner, bg=CARD)
+        head.pack(fill="x", padx=parent.s(14), pady=(parent.s(12), parent.s(6)))
+        tk.Label(head, image=parent.pic("clock", 16, ACCENT_STRONG),
+                 bg=CARD).pack(side="left")
+        tk.Label(head, text="即将执行的定时任务", bg=CARD, fg=TEXT,
+                 font=FONT_NOTE_BOLD).pack(side="left", padx=(parent.s(7), 0))
+
+        self.rows_frame = tk.Frame(inner, bg=CARD)
+        self.rows_frame.pack(fill="x", padx=parent.s(10), pady=(0, parent.s(4)))
+        self._rebuild_rows()
+
+        tk.Frame(inner, bg=BORDER, height=1).pack(
+            fill="x", padx=parent.s(12), pady=(parent.s(4), 0))
+        foot = tk.Frame(inner, bg=CARD)
+        foot.pack(fill="x", padx=parent.s(12), pady=(parent.s(8), parent.s(10)))
+        self.btn_manage = uikit.RoundButton(
+            foot, "管理", "calendar", self._manage, kind="ghost",
+            scale=parent.scale, bg=CARD, height=CONTROL_SM,
+            pad=parent.s(8), font_size=FONT_SIZE_NOTE,
+            tooltip="打开定时运行与通知")
+        self.btn_manage.pack(side="left")
+        self.btn_history = uikit.RoundButton(
+            foot, "历史", "list", self._history, kind="outline",
+            scale=parent.scale, bg=CARD, height=CONTROL_SM,
+            pad=parent.s(9), font_size=FONT_SIZE_NOTE,
+            tooltip="查看近期定时执行情况")
+        self.btn_history.pack(side="right")
+        self.footer_hint = tk.Label(
+            inner, text="仅保留最近 60 条记录；客户端运行时将按时触发。",
+            bg=CARD, fg=MUTED, font=FONT_CAPTION, anchor="w")
+        self.footer_hint.pack(fill="x", padx=parent.s(14),
+                              pady=(0, parent.s(10)))
+
+        self.bind("<Escape>", lambda e: self.close())
+        self.bind("<FocusOut>", lambda e: self.close())
+        self._tick()
+
+    # -- 内容 ---------------------------------------------------------------
+    def _rebuild_rows(self) -> None:
+        for child in self.rows_frame.winfo_children():
+            child.destroy()
+        self._rows = []
+        now = datetime.now()
+        tasks = [task for task in schedule_tasks(self.app.settings)
+                 if task.get("enabled")]
+        tasks.sort(key=lambda task: schedule_next_run(task, now))
+        if not tasks:
+            tk.Label(self.rows_frame, text="还没有启用的定时任务",
+                     bg=CARD, fg=MUTED, font=FONT_NOTE, anchor="w").pack(
+                fill="x", padx=self.app.s(4), pady=self.app.s(10))
+            return
+        # 浮窗里最多列 6 条，避免任务很多时把窗口撑出屏幕
+        for task in tasks[:6]:
+            target = schedule_next_run(task, now)
+            row = tk.Frame(self.rows_frame, bg=CARD)
+            row.pack(fill="x", pady=self.app.s(3))
+            left = tk.Frame(row, bg=CARD)
+            left.pack(side="left", fill="x", expand=True)
+            time_text = task.get("time", "--:--")
+            day_label = tk.Label(left, text=f"{schedule_day_text(target, now)} "
+                                            f"{time_text}",
+                                 bg=CARD, fg=TEXT, font=FONT_NOTE_BOLD,
+                                 anchor="w")
+            day_label.pack(anchor="w")
+            tk.Label(left, text=task.get("group") or "（当前组）", bg=CARD,
+                     fg=MUTED, font=FONT_CAPTION, anchor="w").pack(anchor="w")
+            countdown = tk.Label(row, text="", bg=CARD, fg=ACCENT_STRONG,
+                                 font=FONT_NOTE_BOLD, anchor="e")
+            countdown.pack(side="right", padx=(self.app.s(8), 0))
+            self._rows.append({"target": target, "countdown": countdown,
+                               "day": day_label, "time": time_text})
+        if len(tasks) > 6:
+            tk.Label(self.rows_frame,
+                     text=f"还有 {len(tasks) - 6} 个任务…", bg=CARD,
+                     fg=MUTED, font=FONT_CAPTION, anchor="w").pack(
+                fill="x", padx=self.app.s(4), pady=(self.app.s(2), 0))
+
+    def _tick(self) -> None:
+        if self._closed:
+            return
+        now = datetime.now()
+        if any(row["target"] <= now for row in self._rows):
+            self._rebuild_rows()
+            now = datetime.now()
+        for row in self._rows:
+            row["day"].configure(
+                text=f"{schedule_day_text(row['target'], now)} "
+                     f"{row['time']}")
+            row["countdown"].configure(
+                text=schedule_countdown_text(row["target"], now))
+        try:
+            self._after_id = self.after(1000, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    # -- 交互 ---------------------------------------------------------------
+    def popup(self) -> "SchedulePopover":
+        self.update_idletasks()
+        width = max(self._width, self.winfo_reqwidth())
+        height = self.winfo_reqheight()
+        button = getattr(self.app, "btn_schedule", None)
+        if button is not None and button.winfo_exists():
+            x = button.winfo_rootx() + button.winfo_width() - width
+            y = button.winfo_rooty() + button.winfo_height() \
+                + self.app.s(6)
+        else:
+            x = self.app.winfo_rootx() + self.app.winfo_width() - width
+            y = self.app.winfo_rooty() + self.app.s(80)
+        rect = uikit.monitor_work_area(x, y)
+        if rect is not None:
+            left, top, right, bottom = rect
+            margin = self.app.s(6)
+            x = min(max(x, left), max(left, right - width - margin))
+            y = min(max(y, top), max(top, bottom - height - margin))
+        self.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
+        self.deiconify()
+        self.lift()
+        try:
+            self.attributes("-topmost", True)
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.focus_force()
+        self._watch()
+        return self
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for attr in ("_after_id", "_poll_id"):
+            identifier = getattr(self, attr, None)
+            if identifier is not None:
+                try:
+                    self.after_cancel(identifier)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        if getattr(self.app, "_schedule_popover", None) is self:
+            self.app._schedule_popover = None
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+    def _inside(self) -> bool:
+        try:
+            x, y = self.winfo_pointerxy()
+            left, top = self.winfo_rootx(), self.winfo_rooty()
+            return (left <= x < left + self.winfo_width()
+                    and top <= y < top + self.winfo_height())
+        except tk.TclError:
+            return True
+
+    def _watch(self) -> None:
+        """点浮窗外的任意位置就收起（和右键菜单同一套鼠标轮询）。"""
+        if self._closed:
+            return
+        try:
+            get = ctypes.windll.user32.GetAsyncKeyState
+            left, right = int(get(0x01)), int(get(0x02))
+            edge = bool(left & 0x0001) or bool(right & 0x0001)
+            down = bool(left & 0x8000) or bool(right & 0x8000)
+            if self._armed:
+                if (edge or down) and not self._inside():
+                    self.close()
+                    return
+            elif not edge and not down:
+                self._armed = True
+            self._poll_id = self.after(50, self._watch)
+        except (tk.TclError, AttributeError):
+            self._poll_id = None
+
+    def _history(self) -> None:
+        self.close()
+        self.app.after(0, self.app.open_schedule_history)
+
+    def _manage(self) -> None:
+        self.close()
+        self.app.after(0, self.app.open_schedule)
+
+
+class ScheduleHistoryDialog(BaseDialog):
+    """近期定时执行情况：触发时间、任务、结果与耗时。"""
+
+    def __init__(self, parent: App, settings: dict):
+        super().__init__(parent, "定时执行历史", width=680, height=470)
+        self._history = [item for item in
+                         (settings.get("schedule_history") or [])
+                         if isinstance(item, dict)]
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        columns = ("at", "task", "result", "stats")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings",
+                                 selectmode="browse")
+        self.tree.heading("at", text="触发时间")
+        self.tree.heading("task", text="任务")
+        self.tree.heading("result", text="结果")
+        self.tree.heading("stats", text="执行情况")
+        self.tree.column("at", width=155)
+        self.tree.column("task", width=190)
+        self.tree.column("result", width=80)
+        self.tree.column("stats", width=205)
+        self.tree.grid(row=0, column=0, sticky="nsew",
+                       padx=(parent.s(12), 0), pady=(parent.s(12), 0))
+        scroll = ttk.Scrollbar(self, orient="vertical",
+                               command=self.tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0))
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.tag_configure("ok", foreground=SUCCESS)
+        self.tree.tag_configure("danger", foreground=DANGER)
+        self.tree.tag_configure("muted", foreground=MUTED)
+        self.tree.tag_configure("running", foreground=ACCENT_STRONG)
+
+        for entry in self._history:
+            status = entry.get("status", "")
+            result = SCHEDULE_RESULT_TEXT.get(status, status or "未知")
+            seconds = float(entry.get("seconds") or 0)
+            steps = int(entry.get("steps") or 0)
+            failed = int(entry.get("failed") or 0)
+            if status == "skipped":
+                stats = entry.get("detail") or "已跳过"
+            elif status == "running":
+                stats = "正在执行…"
+            else:
+                stats = f"{steps} 步 · 失败 {failed} · {seconds:g} 秒"
+            tag = {"finished": "ok", "running": "running",
+                   "error": "danger", "stopped": "muted",
+                   "skipped": "muted"}.get(status, "muted")
+            self.tree.insert(
+                "", "end", tags=(tag,), values=(
+                    entry.get("at", ""),
+                    f"{entry.get('time', '--:--')} · "
+                    f"{entry.get('group') or '当前组'}",
+                    result, stats))
+
+        latest = self._history[0].get("at", "") if self._history else ""
+        summary = (f"近 {len(self._history)} 次"
+                   + (f" · 最近 {latest}" if latest else "")
+                   if self._history else "还没有定时执行记录")
+        self.summary = tk.Label(self, text=summary, bg=CARD, fg=MUTED,
+                                font=FONT_CAPTION, anchor="w")
+        self.summary.grid(row=1, column=0, columnspan=2, sticky="ew",
+                          padx=parent.s(14), pady=(parent.s(4), 0))
+
+        self.footer(2, "关闭", "close", self.cancel,
+                    cancel_text="", pad_top=8, pad_bottom=12)
+        self.center()
 
 
 class MacroBar(BaseDialog):
@@ -5516,7 +6317,7 @@ class MacroBar(BaseDialog):
         if self._recorder.active:
             self._recorder.stop()          # 结果走 on_done
         elif not self._recorder.start(ignore_rect=self._self_rect()):
-            self.status.configure(text="无法启动鼠标录制（装不上钩子）")
+            self.status.configure(text="无法启动鼠标录制（鼠标钩子安装失败）")
 
     def _cancel(self) -> None:
         self._recorder.cancel()
@@ -5838,111 +6639,125 @@ class SettingsDialog(BaseDialog):
     """运行设置：倒计时、相似度、图片目录、开关项、开机自启与托盘。"""
 
     def __init__(self, parent: App, settings: dict, image_dir: str):
-        super().__init__(parent, "运行设置", width=430, height=435)
+        super().__init__(parent, "运行设置", width=470, height=470)
         self.columnconfigure(1, weight=1)
         # 用传进来的设置做底稿，保存时只改本对话框的键，别冲掉定时等配置
         self._base_settings = dict(settings)
 
-        self.label("启动倒计时（秒）", 0)
+        self.label("界面语言", 0)
+        self.var_language = tk.StringVar(
+            value=i18n.language_display(str(settings.get("language", "zh"))))
+        row_lang = tk.Frame(self, bg=CARD)
+        row_lang.grid(row=0, column=1, sticky="w",
+                      padx=(0, parent.s(16)), pady=parent.s(5))
+        self.combo_language = ttk.Combobox(
+            row_lang, textvariable=self.var_language, state="readonly", width=20,
+            values=[i18n.language_display(code) for code, _name in i18n.LANGUAGES],
+            font=FONT_NOTE)
+        self.combo_language.pack(side="left")
+
+        self.label("启动前倒计时（秒）", 1)
         self.var_delay = tk.StringVar(value=str(settings.get("delay", 3)))
         ttk.Spinbox(self, from_=0, to=30, width=8,
                     textvariable=self.var_delay).grid(
-            row=0, column=1, sticky="w", padx=(0, parent.s(16)), pady=parent.s(5))
+            row=1, column=1, sticky="w", padx=(0, parent.s(16)), pady=parent.s(5))
 
-        self.label("图片相似度", 1)
+        self.label("图像匹配相似度", 2)
         self.var_conf = tk.StringVar(value=str(settings.get("confidence", 0.9)))
         ttk.Spinbox(self, from_=0.5, to=1.0, increment=0.01, width=8,
                     textvariable=self.var_conf).grid(
-            row=1, column=1, sticky="w", padx=(0, parent.s(16)), pady=parent.s(5))
+            row=2, column=1, sticky="w", padx=(0, parent.s(16)), pady=parent.s(5))
 
-        self.label("图片目录", 2)
+        self.label("图像目录", 3)
         row = tk.Frame(self, bg=CARD)
-        row.grid(row=2, column=1, sticky="ew", padx=(0, parent.s(16)),
+        row.grid(row=3, column=1, sticky="ew", padx=(0, parent.s(16)),
                  pady=parent.s(5))
         row.columnconfigure(0, weight=1)
         self.var_dir = tk.StringVar(value=image_dir)
         ttk.Entry(row, textvariable=self.var_dir).grid(row=0, column=0,
                                                        sticky="ew")
-        uikit.RoundButton(row, "浏览", "folder_open", self._browse,
+        uikit.RoundButton(row, "浏览…", "folder_open", self._browse,
                           kind="outline", scale=parent.scale, bg=CARD,
-                          height=CONTROL_SM, pad=parent.s(8), font_size=FONT_SIZE_NOTE).grid(
+                          height=CONTROL_SM, pad=parent.s(8),
+                          font_size=FONT_SIZE_NOTE).grid(
             row=0, column=1, padx=(parent.s(4), 0))
 
-        self.label("运行时显示迷你进度条", 3)
+        self.label("运行时显示悬浮进度条", 4)
         self.var_mini = tk.BooleanVar(
             value=bool(settings.get("show_mini_bar", True)))
         uikit.Switch(self, self.var_mini, scale=parent.scale, bg=CARD).grid(
-            row=3, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
-
-        self.label("失败时保存截图", 4)
-        self.var_shot = tk.BooleanVar(
-            value=bool(settings.get("shot_on_fail", True)))
-        uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
             row=4, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
-        self.label("数据跑完写结果文件", 5)
+        self.label("失败时保存屏幕截图", 5)
+        self.var_shot = tk.BooleanVar(
+            value=bool(settings.get("shot_on_fail", True)))
+        uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
+            row=5, column=1, sticky="w", padx=(0, parent.s(16)),
+            pady=parent.s(5))
+
+        self.label("数据处理完成后写入结果文件", 6)
         self.var_results = tk.BooleanVar(
             value=bool(settings.get("save_results", True)))
         uikit.Switch(self, self.var_results, scale=parent.scale, bg=CARD).grid(
-            row=5, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=6, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
         # 开机自启：开关状态直接反映注册表实况（Run 项在不在），
         # 不在 settings 里另存一份“真相”，避免两边不一致
-        self.label("开机自动启动", 6)
+        self.label("开机时自动启动客户端", 7)
         self.var_autostart = tk.BooleanVar(value=autostart.is_enabled())
         uikit.Switch(self, self.var_autostart, scale=parent.scale,
-                     bg=CARD).grid(
-            row=6, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
-
-        # 托盘：两个开关任一打开就会出现托盘图标；互不依赖
-        self.label("启动后最小化到托盘", 7)
-        self.var_tray_min = tk.BooleanVar(
-            value=bool(settings.get("tray_start_minimized")))
-        uikit.Switch(self, self.var_tray_min, scale=parent.scale,
                      bg=CARD).grid(
             row=7, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
-        self.label("关闭窗口时最小化到托盘", 8)
-        self.var_tray_close = tk.BooleanVar(
-            value=bool(settings.get("tray_on_close")))
-        uikit.Switch(self, self.var_tray_close, scale=parent.scale,
+        # 托盘：两个开关任一打开就会出现托盘图标；互不依赖
+        self.label("启动后最小化至系统托盘", 8)
+        self.var_tray_min = tk.BooleanVar(
+            value=bool(settings.get("tray_start_minimized")))
+        uikit.Switch(self, self.var_tray_min, scale=parent.scale,
                      bg=CARD).grid(
             row=8, column=1, sticky="w", padx=(0, parent.s(16)),
             pady=parent.s(5))
 
-        # 说明文字横跨两列并自动换行，避免把左侧标签列撑得过宽
-        tk.Label(self, text="相似度越低越容易识别，也越容易误点。"
-                            "失败截图在 reports/shots；数据结果写在数据文件旁边，"
-                            "下次运行同一份数据时可以选择从上次停下的地方继续。",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(390), justify="left", anchor="w").grid(
-            row=9, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(parent.s(2), 0))
-        tk.Label(self, text="开机自启写在当前用户的注册表 Run 项里，不需要管理员"
-                            "权限；登录 Windows 后只打开界面，不会自动跑流程"
-                            "（到点无人值守跑流程请用「定时运行 → 创建计划任务」）。"
-                            "启动命令：" + autostart.launch_command(),
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(390), justify="left", anchor="w").grid(
-            row=10, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(parent.s(2), 0))
-        tk.Label(self, text="托盘选项：勾选后启动或关闭窗口都只是收起界面，"
-                            "右下角托盘会出现 MeowGo 图标——双击打开窗口，"
-                            "右键菜单里可以真正退出。开机自启 + 启动到托盘 = "
-                            "登录后安静待在后台；两个开关都取消并保存，托盘图标"
-                            "随即消失。",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(390), justify="left", anchor="w").grid(
-            row=11, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(parent.s(2), 0))
+        self.label("关闭窗口时最小化至系统托盘", 9)
+        self.var_tray_close = tk.BooleanVar(
+            value=bool(settings.get("tray_on_close")))
+        uikit.Switch(self, self.var_tray_close, scale=parent.scale,
+                     bg=CARD).grid(
+            row=9, column=1, sticky="w", padx=(0, parent.s(16)),
+            pady=parent.s(5))
 
-        self.footer(12, "保存", "check", self.ok, pad_top=10)
-        self.fit_content(width=parent.s(430))
+        # 说明文字横跨两列并自动换行，避免把左侧标签列撑得过宽
+        tk.Label(self, text="相似度阈值越低，识别范围越宽，误匹配风险也越高。"
+                            "失败截图保存于 reports/shots；数据结果写入数据文件"
+                            "所在目录。再次运行同一数据文件时，可选择从上次中断"
+                            "处继续。",
+                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
+                 wraplength=parent.s(430), justify="left", anchor="w").grid(
+            row=10, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(parent.s(3), 0))
+        tk.Label(self, text="开机自启通过当前用户注册表 Run 项实现，无需管理员"
+                            "权限。登录 Windows 后仅启动客户端，不自动执行流程；"
+                            "如需定时无人值守运行，请使用「定时运行 → 创建计划"
+                            "任务」。启动命令：" + autostart.launch_command(),
+                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
+                 wraplength=parent.s(430), justify="left", anchor="w").grid(
+            row=11, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(parent.s(3), 0))
+        tk.Label(self, text="托盘选项：启用后，启动或关闭客户端只会隐藏窗口，"
+                            "系统托盘将显示 MeowGo 图标。双击图标可重新打开窗口，"
+                            "右键菜单可退出客户端。开机自启与启动后最小化至托盘"
+                            "同时启用时，客户端将在登录后静默驻留后台；关闭这两个"
+                            "选项并保存后，托盘图标将消失。",
+                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
+                 wraplength=parent.s(430), justify="left", anchor="w").grid(
+            row=12, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(parent.s(3), 0))
+
+        self.footer(13, "保存", "check", self.ok, pad_top=10)
+        self.fit_content(width=parent.s(470))
         self.center()
 
     def _browse(self) -> None:
@@ -5969,6 +6784,7 @@ class SettingsDialog(BaseDialog):
         # 在现有设置上改键，别把定时运行等其它配置冲掉
         self.result = dict(self._base_settings)
         self.result.update({
+            "language": i18n.language_code(self.var_language.get()),
             "delay": int(number(self.var_delay.get(), 3)),
             "confidence": number(self.var_conf.get(), 0.9),
             "image_dir": directory,
@@ -6154,7 +6970,7 @@ class ShortcutsDialog(BaseDialog):
             tk.Label(self, text=text, bg=CARD, fg=TEXT,
                      font=FONT_NOTE).grid(
                 row=row, column=1, sticky="w")
-        tk.Label(self, text="运行安全：把鼠标快速甩到屏幕左上角，"
+        tk.Label(self, text="运行安全：将鼠标快速移至屏幕左上角，"
                             "可立即中断执行。", bg=CARD, fg=MUTED,
                  font=FONT_CAPTION,
                  wraplength=parent.s(390), justify="left").grid(
