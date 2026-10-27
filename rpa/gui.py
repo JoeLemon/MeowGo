@@ -60,6 +60,15 @@ MAX_CONFIG_BACKUPS = 10
 MAX_LOG_LINES = 2000              # 日志上限：超出后从最早的行开始丢弃
 DEFAULT_GROUPS_KEY = "default_groups_version"   # 状态文件里的预置组版本
 DEFAULT_GROUPS_VERSION = 2
+# 步骤表列宽随界面状态保存；#0 在配置里用 icon 作为键，避免特殊字符。
+STEP_COLUMN_STATE_KEYS = (
+    ("#0", "icon"),
+    ("no", "no"),
+    ("type", "type"),
+    ("content", "content"),
+    ("repeat", "repeat"),
+    ("note", "note"),
+)
 # v1 只预置了这两个组。升级到 v2 时只“原地升级”未改过的浏览器组，
 # 不把用户已经删掉的旧组加回来。
 DEFAULT_GROUPS_V1_NAMES = {"打开浏览器", "打开软件"}
@@ -804,65 +813,85 @@ class App(tk.Tk):
         style.configure("Muted.TLabel", background=BG, foreground=MUTED)
         style.configure("Treeview", background=CARD, fieldbackground=CARD,
                         rowheight=self.s(TABLE_ROW_HEIGHT), borderwidth=0,
-                        bordercolor=BORDER, lightcolor=BORDER,
-                        darkcolor=BORDER, font=FONT_BODY)
-        style.configure("Treeview.Heading", background=HEADING_BG,
-                        foreground=HEADING_FG, bordercolor=BORDER,
-                        lightcolor=BORDER, darkcolor=BORDER,
-                        relief="flat", font=FONT_BODY_BOLD)
-        style.map("Treeview", background=[("selected", SELECT_BG)],
+                        bordercolor=TABLE_BORDER, lightcolor=TABLE_BORDER,
+                        darkcolor=TABLE_BORDER, font=FONT_BODY)
+        style.configure("Treeview.Heading", background=TABLE_HEAD_BG,
+                        foreground=TABLE_HEAD_FG, bordercolor=TABLE_BORDER,
+                        lightcolor=TABLE_BORDER, darkcolor=TABLE_BORDER,
+                        relief="flat", font=FONT_NOTE_BOLD,
+                        padding=(self.s(9), self.s(7)))
+        style.map("Treeview",
+                  background=[("selected", TABLE_ROW_SELECTED)],
                   foreground=[("selected", TEXT)])
+        style.map("Treeview.Heading",
+                  background=[("active", TABLE_HEAD_BG),
+                              ("pressed", TABLE_HEAD_BG)])
         style.configure("TEntry", fieldbackground=ENTRY_BG,
                         foreground=TEXT, padding=self.s(5),
                         bordercolor=BORDER, lightcolor=ENTRY_BG,
                         darkcolor=ENTRY_BG, borderwidth=1)
         style.map("TEntry",
-                  bordercolor=[("focus", ACCENT_STRONG)],
-                  lightcolor=[("focus", ACCENT_STRONG)],
-                  darkcolor=[("focus", ACCENT_STRONG)])
+                  bordercolor=[("focus", FIELD_FOCUS)],
+                  lightcolor=[("focus", FIELD_FOCUS)],
+                  darkcolor=[("focus", FIELD_FOCUS)])
         # 搜索框：外层用圆角卡片，Entry 自身去掉边框融入卡片
         style.configure("Search.TEntry", fieldbackground=ENTRY_BG,
                         foreground=TEXT, bordercolor=ENTRY_BG,
                         lightcolor=ENTRY_BG, darkcolor=ENTRY_BG,
                         borderwidth=0, relief="flat", padding=self.s(2))
         # 可搜索下拉框：同样由外层圆角卡片提供描边
+        # 统一输入框：外层 RoundedCard 负责唯一描边，Entry 自身完全不画边框。
+        style.configure("Field.TEntry", fieldbackground=ENTRY_BG,
+                        foreground=TEXT, bordercolor=ENTRY_BG,
+                        lightcolor=ENTRY_BG, darkcolor=ENTRY_BG,
+                        borderwidth=0, relief="flat", padding=self.s(5))
+        # 显式覆盖 TEntry 的 focus 描边映射，否则 ttk 仍会在圆角外壳内
+        # 再画一圈黑色方框，形成双边框。
+        style.map("Field.TEntry",
+                  bordercolor=[("focus", ENTRY_BG), ("!focus", ENTRY_BG),
+                               ("disabled", ENTRY_BG)],
+                  lightcolor=[("focus", ENTRY_BG), ("!focus", ENTRY_BG),
+                              ("disabled", ENTRY_BG)],
+                  darkcolor=[("focus", ENTRY_BG), ("!focus", ENTRY_BG),
+                             ("disabled", ENTRY_BG)],
+                  fieldbackground=[("disabled", HEADING_BG),
+                                   ("readonly", ENTRY_BG)],
+                  foreground=[("disabled", TEXT_WEAK), ("readonly", TEXT)])
         style.configure("Combo.TEntry", fieldbackground=ENTRY_BG,
                         foreground=TEXT, bordercolor=ENTRY_BG,
                         lightcolor=ENTRY_BG, darkcolor=ENTRY_BG,
                         borderwidth=0, relief="flat", padding=self.s(5))
+        style.map("Combo.TEntry",
+                  bordercolor=[("focus", ENTRY_BG), ("!focus", ENTRY_BG),
+                               ("disabled", ENTRY_BG)],
+                  lightcolor=[("focus", ENTRY_BG), ("!focus", ENTRY_BG),
+                              ("disabled", ENTRY_BG)],
+                  darkcolor=[("focus", ENTRY_BG), ("!focus", ENTRY_BG),
+                             ("disabled", ENTRY_BG)])
         style.configure("TCombobox", padding=self.s(5),
                         fieldbackground=ENTRY_BG, foreground=TEXT,
                         bordercolor=BORDER, arrowcolor=MUTED)
         style.map("TCombobox",
-                  bordercolor=[("focus", ACCENT_STRONG)],
+                  bordercolor=[("focus", FIELD_FOCUS)],
                   fieldbackground=[("readonly", ENTRY_BG)],
                   foreground=[("readonly", TEXT)])
         style.configure("TSpinbox", padding=self.s(5),
                         fieldbackground=ENTRY_BG, foreground=TEXT,
                         bordercolor=BORDER, arrowcolor=MUTED)
-        style.map("TSpinbox", bordercolor=[("focus", ACCENT_STRONG)])
-        style.configure("Vertical.TScrollbar", background=SCROLL_BG,
-                        troughcolor=SCROLL_TROUGH, bordercolor=SCROLL_TROUGH,
-                        arrowcolor=MUTED, width=self.s(11),
-                        lightcolor=SCROLL_BG, darkcolor=SCROLL_BG)
-        style.map("Vertical.TScrollbar",
-                  background=[("pressed", ACCENT_STRONG),
-                              ("active", BORDER_STRONG)],
-                  lightcolor=[("active", BORDER_STRONG)],
-                  darkcolor=[("active", BORDER_STRONG)])
-        style.configure("Horizontal.TScrollbar", background=SCROLL_BG,
-                        troughcolor=SCROLL_TROUGH, bordercolor=SCROLL_TROUGH,
-                        arrowcolor=MUTED, width=self.s(11),
-                        lightcolor=SCROLL_BG, darkcolor=SCROLL_BG)
-        style.map("Horizontal.TScrollbar",
-                  background=[("pressed", ACCENT_STRONG),
-                              ("active", BORDER_STRONG)],
-                  lightcolor=[("active", BORDER_STRONG)],
-                  darkcolor=[("active", BORDER_STRONG)])
+        style.map("TSpinbox", bordercolor=[("focus", FIELD_FOCUS)])
+        # 原生滚动条仅作兜底；实际界面使用 uikit.SlimScrollbar。
+        style.configure("Vertical.TScrollbar", background=SCROLL_THUMB,
+                        troughcolor=SCROLL_TRACK, bordercolor=SCROLL_TRACK,
+                        arrowcolor=MUTED, width=self.s(12),
+                        lightcolor=SCROLL_THUMB, darkcolor=SCROLL_THUMB)
+        style.configure("Horizontal.TScrollbar", background=SCROLL_THUMB,
+                        troughcolor=SCROLL_TRACK, bordercolor=SCROLL_TRACK,
+                        arrowcolor=MUTED, width=self.s(12),
+                        lightcolor=SCROLL_THUMB, darkcolor=SCROLL_THUMB)
         # 日志控制台专用：深色滚动条 / 进度条，避免浅色主题里出现亮补丁
         style.configure("Console.Vertical.TScrollbar", background=CONSOLE_SCROLL,
                         troughcolor=LOG_BG, bordercolor=LOG_BG,
-                        arrowcolor=LOG_HEAD_MUTED, width=self.s(11),
+                        arrowcolor=LOG_HEAD_MUTED, width=self.s(12),
                         lightcolor=CONSOLE_SCROLL, darkcolor=CONSOLE_SCROLL)
         style.configure("TPanedwindow", background=BG)
         style.configure("Sash", background=BG, bordercolor=BG,
@@ -1146,9 +1175,10 @@ class App(tk.Tk):
         wrap.pack(fill="both", expand=True, padx=(self.s(12), 0))
         self.group_tree = ttk.Treeview(wrap, show="tree", selectmode="browse")
         self.group_tree.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(wrap, orient="vertical",
-                               command=self.group_tree.yview)
-        scroll.pack(side="right", fill="y")
+        scroll = uikit.SlimScrollbar(
+            wrap, orient="vertical", command=self.group_tree.yview,
+            scale=self.scale, bg=CARD)
+        scroll.pack(side="right", fill="y", padx=(self.s(2), 0))
         self.group_tree.configure(yscrollcommand=scroll.set)
         self.group_tree.tag_configure("running", foreground=WARNING)
         self.group_tree.bind("<<TreeviewSelect>>", self._on_group_select)
@@ -1202,17 +1232,14 @@ class App(tk.Tk):
                                      padx=0, pady=0,
                                      font=FONT_CAPTION_BOLD)
         self.search_count.pack(side="right", padx=(0, self.s(8)))
-        # 搜索框：圆角字段 + 有内容时出现的 ×
-        self.search_field = uikit.RoundedCard(
-            head, radius=self.s(FIELD_RADIUS), bg=ENTRY_BG,
-            border=BORDER, outer_bg=CARD, padding=self.s(3),
-            shadow=False)
+        # 搜索框：统一圆角输入组件 + 有内容时出现的 ×
+        self.search_field = uikit.TextField(
+            head, width=self.s(14), scale=self.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE, padding=self.s(3))
         self.search_field.pack(side="right", padx=(0, self.s(2)))
         self.search_box = self.search_field.body
-        self.step_search = ttk.Entry(self.search_box, width=self.s(14),
-                                     style="Search.TEntry")
-        self.step_search.pack(side="left", fill="x", expand=True,
-                              padx=(self.s(5), 0))
+        self.step_search = self.search_field
+        self.step_search.entry.pack_configure(padx=(self.s(5), 0))
         # × 只在有搜索词时出现；用固定宽度占位，避免标题栏左右跳动
         self.search_clear_slot = tk.Frame(
             self.search_box, bg=ENTRY_BG, width=self.s(22),
@@ -1230,30 +1257,39 @@ class App(tk.Tk):
         self.step_search.bind("<KeyRelease>", self._on_search_key)
         self.step_search.bind("<Escape>", self._on_search_escape)
 
-        wrap = tk.Frame(panel, bg=CARD)
-        wrap.pack(fill="both", expand=True, padx=(self.s(16), 0),
-                  pady=(0, self.s(16)))
-        self.step_wrap = wrap
+        # 表格容器：参考图的圆角浅灰底 + 细描边，表头和行都贴着容器内缘。
+        self.table_frame = uikit.RoundedCard(
+            panel, radius=self.s(INNER_RADIUS), bg=CARD,
+            border=TABLE_BORDER, outer_bg=CARD,
+            padding=self.s(2), shadow=False)
+        self.table_frame.pack(fill="both", expand=True,
+                              padx=(self.s(16), 0), pady=(0, self.s(16)))
+        self.step_wrap = self.table_frame
+        wrap = tk.Frame(self.table_frame.body, bg=CARD)
+        wrap.pack(fill="both", expand=True)
         columns = ("no", "type", "content", "repeat", "note")
         self.step_tree = ttk.Treeview(wrap, columns=columns,
                                       show="tree headings",
                                       selectmode="extended")
-        self.step_tree.heading("#0", text="")
-        self.step_tree.column("#0", width=self.s(30), stretch=False)
+        self.step_tree.heading("#0", text="", anchor="w")
+        self.step_tree.column("#0", width=self.s(40), anchor="w",
+                              stretch=False)
         for key, (text, width, stretch) in {
-                "no": ("#", 44, False), "type": ("类型", 140, False),
+                "no": ("#", 56, False), "type": ("类型", 140, False),
                 "content": ("内容", 340, False), "repeat": ("重复", 64, False),
                 "note": ("备注", 200, False)}.items():
-            self.step_tree.heading(key, text=text)
+            self.step_tree.heading(key, text=text, anchor="w")
             self.step_tree.column(key, width=self.s(width), anchor="w",
                                   minwidth=self.s(40), stretch=stretch)
         # 列宽固定后，窗口变窄时用横向滚动条查看被挡住的列
-        scroll_x = ttk.Scrollbar(wrap, orient="horizontal",
-                                 command=self.step_tree.xview)
-        scroll_x.pack(side="bottom", fill="x")
-        scroll2 = ttk.Scrollbar(wrap, orient="vertical",
-                                command=self.step_tree.yview)
-        scroll2.pack(side="right", fill="y")
+        scroll_x = uikit.SlimScrollbar(
+            wrap, orient="horizontal", command=self.step_tree.xview,
+            scale=self.scale, bg=CARD)
+        scroll_x.pack(side="bottom", fill="x", pady=(self.s(2), 0))
+        scroll2 = uikit.SlimScrollbar(
+            wrap, orient="vertical", command=self.step_tree.yview,
+            scale=self.scale, bg=CARD)
+        scroll2.pack(side="right", fill="y", padx=(self.s(2), 0))
         self.step_tree.pack(side="left", fill="both", expand=True)
         self.step_tree.configure(yscrollcommand=scroll2.set,
                                  xscrollcommand=scroll_x.set)
@@ -1271,6 +1307,9 @@ class App(tk.Tk):
         self.step_tree.bind("<Control-a>", self._select_all_steps)
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_select)
         enable_tree_drag(self.step_tree, self._on_step_drop)
+        # 用户拖动表头分隔线后立即保存列宽；普通点击因宽度未变而直接返回。
+        self.step_tree.bind("<ButtonRelease-1>",
+                            self._on_step_columns_released, add="+")
 
         # 空状态：像素猫 + 标题 + 说明 + 主按钮
         self.step_empty_box = tk.Frame(wrap, bg=CARD)
@@ -1390,10 +1429,10 @@ class App(tk.Tk):
                                 font=FONT_MONO, wrap="word",
                                 padx=self.s(12), pady=self.s(8),
                                 state="disabled")
-        self.log_scroll = ttk.Scrollbar(
-            self.log_body, orient="vertical", style="Console.Vertical.TScrollbar",
-            command=self.log_text.yview)
-        self.log_scroll.pack(side="right", fill="y")
+        self.log_scroll = uikit.SlimScrollbar(
+            self.log_body, orient="vertical", command=self.log_text.yview,
+            scale=self.scale, bg=LOG_BG, variant="console")
+        self.log_scroll.pack(side="right", fill="y", padx=(self.s(2), 0))
         self.log_text.pack(side="left", fill="both", expand=True)
         self.log_text.configure(yscrollcommand=self.log_scroll.set)
         # 可点击的「第 N 步」日志行：点一下跳到步骤表对应行
@@ -1497,13 +1536,26 @@ class App(tk.Tk):
         except (tk.TclError, AttributeError):
             pass
         try:
-            state["columns"] = {
-                key: int(round(self.step_tree.column(key, "width")
-                               / self.scale))
-                for key in ("content", "note")}
+            state["columns"] = self._step_column_widths()
         except tk.TclError:
             pass
         return state
+
+    def _step_column_widths(self) -> dict:
+        """按配置键收集步骤表各列宽度（逻辑像素，不含 DPI 缩放）。"""
+        return {
+            saved_key: int(round(
+                self.step_tree.column(tree_key, "width") / self.scale))
+            for tree_key, saved_key in STEP_COLUMN_STATE_KEYS}
+
+    def _on_step_columns_released(self, _event=None) -> None:
+        """拖动列宽后立即持久化；只在宽度真正变化时写配置。"""
+        widths = self._step_column_widths()
+        if widths == getattr(self, "_step_columns_snapshot", None):
+            return
+        self._step_columns_snapshot = widths
+        self.settings["columns"] = dict(widths)
+        self._save_state()
 
     def _restore_ui_state(self) -> None:
         """启动时恢复上次的窗口大小、分隔条位置、列宽与日志展开状态。"""
@@ -1514,10 +1566,14 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
         columns = self.settings.get("columns") or {}
-        for key in ("content", "note"):
-            width = columns.get(key)
-            if isinstance(width, int) and width > 0:
-                self.step_tree.column(key, width=self.s(width))
+        for tree_key, saved_key in STEP_COLUMN_STATE_KEYS:
+            width = columns.get(saved_key)
+            if isinstance(width, (int, float)) and width > 0:
+                # 防止旧配置或损坏值把列压到不可见/撑爆窗口。
+                self.step_tree.column(
+                    tree_key, width=self.s(max(20, min(1600, int(width)))))
+        self._step_columns_snapshot = self._step_column_widths()
+        self.settings["columns"] = dict(self._step_columns_snapshot)
         if not self.log_visible:
             self.log_body.pack_forget()
             self.btn_log_toggle.set_text("运行日志", "chevron_right")
@@ -1580,6 +1636,13 @@ class App(tk.Tk):
         RoundButton 是自绘 Canvas，换完底色还要重画一遍。
         """
         bg_map = {old[key]: new[key] for key in new if key in old}
+        # 同一色值可能承担多个语义（例如浅色下 CARD / ENTRY_BG / 滚动条
+        # 猫爪前景都为 #FFFFFF）。按核心表面令牌覆盖，避免映射到无关的新色。
+        for key in ("BG", "CARD", "ZEBRA", "HEADING_BG", "SELECT_BG",
+                    "TABLE_HEAD_BG", "TABLE_ROW_HOVER", "MENU_BG",
+                    "MENU_ROW_HOVER", "ENTRY_BG", "PREVIEW_BG"):
+            if key in old and key in new:
+                bg_map[old[key]] = new[key]
         fg_map = {old[key]: new[key]
                   for key in ("TEXT", "MUTED", "TEXT_WEAK", "ACCENT",
                               "ACCENT_STRONG", "SUCCESS", "WARNING",
@@ -1604,6 +1667,15 @@ class App(tk.Tk):
             bg = _get(widget, "bg")
             widget.set_bg(bg_map.get(bg, bg))
         elif isinstance(widget, uikit.Switch):
+            bg = _get(widget, "bg")
+            widget.set_bg(bg_map.get(bg, bg))
+        elif isinstance(widget, uikit.SlimScrollbar):
+            bg = _get(widget, "bg")
+            widget.set_bg(bg_map.get(bg, bg))
+        elif isinstance(widget, uikit.TextField):
+            bg = _get(widget, "bg")
+            widget.set_bg(bg_map.get(bg, bg))
+        elif isinstance(widget, uikit.SearchableCombo):
             bg = _get(widget, "bg")
             widget.set_bg(bg_map.get(bg, bg))
         elif isinstance(widget, uikit.RoundedCard):
@@ -1905,7 +1977,7 @@ class App(tk.Tk):
             self.step_search.delete(0, "end")
             self.step_search.configure(foreground=TEXT)
         if hasattr(self, "search_field"):
-            self.search_field.set_colors(border=ACCENT_STRONG)
+            self.search_field.set_colors(border=FIELD_FOCUS)
         self._sync_search_clear()
 
     def _on_search_focus_out(self, _event=None) -> None:
@@ -2324,24 +2396,27 @@ class App(tk.Tk):
             return
 
         if field == "type":
-            widget: tk.Widget = ttk.Combobox(
-                self.step_tree, state="readonly",
+            widget: tk.Widget = uikit.ReadonlySelect(
+                self.step_tree,
                 values=[f"{i + 1} · {i18n.tr(info[0])}"
                         for i, info in enumerate(STEP_TYPES.values())],
-                font=FONT_NOTE)
+                scale=self.scale, bg=CARD,
+                font_size=FONT_SIZE_NOTE, width=18)
             widget.set(f"{list(STEP_TYPES).index(step.type) + 1} · "
                        f"{i18n.tr(step.label())}")
         else:
-            widget = ttk.Entry(self.step_tree, font=FONT_NOTE)
-            widget.insert(0, {"content": step.content,
-                              "repeat": "" if not step.repeat else f"{step.repeat:g}",
-                              "note": step.note}[field])
+            widget = uikit.TextField(
+                self.step_tree, scale=self.scale, bg=CARD,
+                font_size=FONT_SIZE_NOTE)
+            widget.set({"content": step.content,
+                        "repeat": "" if not step.repeat else f"{step.repeat:g}",
+                        "note": step.note}[field])
         can_record = field == "content" and step.type == "hotkey"
         entry_width = max(width - self.s(40), self.s(80)) if can_record \
             else max(width, self.s(120))
         widget.place(x=x, y=y, width=entry_width, height=height)
         widget.focus_set()
-        if isinstance(widget, ttk.Entry):
+        if isinstance(widget, uikit.TextField):
             widget.select_range(0, "end")
         self._editor = widget
 
@@ -2371,11 +2446,12 @@ class App(tk.Tk):
 
         widget.bind("<Return>", commit)
         widget.bind("<Escape>", cancel)
-        if isinstance(widget, ttk.Combobox):
-            # 组合框失焦通常发生在「弹出下拉」时，延后一点再提交
-            widget.bind("<<ComboboxSelected>>", commit)
-            widget.bind("<FocusOut>", lambda e: self.after(150, commit))
-        else:
+        if isinstance(widget, uikit.ReadonlySelect):
+            # 自绘下拉选择后立即提交；失焦时延后一点，避开弹出面板的焦点切换
+            widget.command = commit
+            widget.entry.bind("<FocusOut>",
+                              lambda e: self.after(150, commit))
+        elif isinstance(widget, uikit.TextField):
             widget.bind("<FocusOut>", commit)
 
     def _close_inline(self) -> None:
@@ -4603,8 +4679,9 @@ class GroupDialog(BaseDialog):
         super().__init__(parent, title, width=380, height=170)
         self.label("执行组名称", 0)
         self.var = tk.StringVar(value=initial)
-        entry = ttk.Entry(self, textvariable=self.var,
-                          font=FONT_BODY)
+        entry = uikit.TextField(self, textvariable=self.var,
+                                scale=parent.scale, bg=CARD,
+                                font_size=FONT_SIZE_BODY)
         entry.grid(row=0, column=1, sticky="ew", padx=(0, parent.s(16)),
                    pady=parent.s(5))
         self.columnconfigure(1, weight=1)
@@ -4643,28 +4720,16 @@ class StepDialog(BaseDialog):
         self._type_by_label.update({
             i18n.tr(info[0]): key for key, info in STEP_TYPES.items()})
         self.var_type = tk.StringVar()
-        # 分组 + 模糊搜索：基础指令与会调用执行组的指令分开展示
-        # 用一个描边容器把下拉框包成和输入框同样的“字段”，
-        # 否则类型选择看起来像一行裸文字，和下方内容框不是一套控件。
-        self.combo_field = uikit.RoundedCard(
-            self, radius=parent.s(FIELD_RADIUS), bg=ENTRY_BG,
-            border=BORDER, outer_bg=CARD, padding=parent.s(2),
-            shadow=False)
-        self.combo_field.grid(row=0, column=1, sticky="ew",
-                              padx=(0, parent.s(16)), pady=parent.s(5))
+        # 分组 + 模糊搜索：基础指令与会调用执行组的指令分开展示。
+        # 直接使用组件自带的圆角字段，避免“外层 RoundedCard + 内层 Entry”
+        # 各画一圈边框；组件内部统一使用无边框的 Field.TEntry。
         self.combo = uikit.SearchableCombo(
-            self.combo_field.body, self._type_options(), variable=self.var_type,
-            command=self._sync, scale=parent.scale, bg=ENTRY_BG,
-            font_size=FONT_SIZE_NOTE, width=18)
-        self.combo.pack(fill="x", expand=True)
-        self.combo.entry.bind(
-            "<FocusIn>",
-            lambda e: self.combo_field.set_colors(border=ACCENT_STRONG),
-            add="+")
-        self.combo.entry.bind(
-            "<FocusOut>",
-            lambda e: self.combo_field.set_colors(border=BORDER),
-            add="+")
+            self, self._type_options(), variable=self.var_type,
+            command=self._sync, scale=parent.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE, width=18, shell=True)
+        self.combo.grid(row=0, column=1, sticky="ew",
+                        padx=(0, parent.s(16)), pady=parent.s(5))
+        self.combo_field = self.combo._shell
 
         self.label("内容", 1).grid_configure(sticky="nw",
                                              pady=(parent.s(8), parent.s(2)))
@@ -4672,8 +4737,9 @@ class StepDialog(BaseDialog):
         content.grid(row=1, column=1, sticky="ew", padx=(0, parent.s(16)),
                      pady=(parent.s(2), parent.s(4)))
         self.var_content = tk.StringVar(value=editing.content)
-        self.entry = ttk.Entry(content, textvariable=self.var_content,
-                               font=FONT_NOTE)
+        self.entry = uikit.TextField(content, textvariable=self.var_content,
+                                     scale=parent.scale, bg=CARD,
+                                     font_size=FONT_SIZE_NOTE)
         self.entry.pack(fill="x")
         # 输入框与操作按钮之间的分隔线（有操作按钮时才显示）
         self.sep_entry = tk.Frame(content, bg=BORDER, height=1)
@@ -4728,9 +4794,9 @@ class StepDialog(BaseDialog):
                                   fg=MUTED, font=FONT_CAPTION)
         self.lbl_group.grid(row=1, column=0, sticky="w",
                             padx=(0, parent.s(8)))
-        self.group_entry = ttk.Entry(self.group_box,
-                                     textvariable=self.var_group,
-                                     font=FONT_NOTE)
+        self.group_entry = uikit.TextField(
+            self.group_box, textvariable=self.var_group, scale=parent.scale,
+            bg=CARD, font_size=FONT_SIZE_NOTE)
         self.group_entry.grid(row=1, column=1, sticky="ew")
         self.btn_pick_group = uikit.RoundButton(
             self.group_box, "选组", "list", self._pick_group, kind="outline",
@@ -4748,9 +4814,9 @@ class StepDialog(BaseDialog):
                                      bg=CARD, fg=MUTED, font=FONT_CAPTION)
         self.label_group2.grid(row=2, column=0, sticky="w",
                                padx=(0, parent.s(8)), pady=(parent.s(4), 0))
-        self.group2_entry = ttk.Entry(self.group_box,
-                                      textvariable=self.var_group2,
-                                      font=FONT_NOTE)
+        self.group2_entry = uikit.TextField(
+            self.group_box, textvariable=self.var_group2, scale=parent.scale,
+            bg=CARD, font_size=FONT_SIZE_NOTE)
         self.group2_entry.grid(row=2, column=1, sticky="ew",
                                pady=(parent.s(4), 0))
         self.btn_pick_group2 = uikit.RoundButton(
@@ -4822,8 +4888,9 @@ class StepDialog(BaseDialog):
         row_region.grid(row=1, column=1, sticky="ew", pady=parent.s(3))
         row_region.columnconfigure(0, weight=1)
         self.var_region = tk.StringVar(value=editing.region)
-        self.entry_region = ttk.Entry(row_region, textvariable=self.var_region,
-                                      font=FONT_NOTE)
+        self.entry_region = uikit.TextField(
+            row_region, textvariable=self.var_region, scale=parent.scale,
+            bg=CARD, font_size=FONT_SIZE_NOTE)
         self.entry_region.grid(row=0, column=0, sticky="ew")
         self.btn_pick_region = uikit.RoundButton(
             row_region, "框选", "image", self._pick_region, kind="outline",
@@ -4919,9 +4986,13 @@ class StepDialog(BaseDialog):
 
         self.label("备注", 6)
         self.var_note = tk.StringVar(value=editing.note)
-        self.note_entry = ttk.Entry(self, textvariable=self.var_note)
-        self.note_entry.grid(row=6, column=1, sticky="ew",
+        self.note_field = uikit.TextField(
+            self, textvariable=self.var_note, scale=parent.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE)
+        self.note_field.grid(row=6, column=1, sticky="ew",
                              padx=(0, parent.s(16)), pady=parent.s(5))
+        # 兼容既有调用/测试：note_entry 指向真正接收键盘焦点的 Entry。
+        self.note_entry = self.note_field.entry
 
         _, self.btn_ok, self.btn_cancel = self.footer(7)
 
@@ -5577,9 +5648,10 @@ class ScheduleDialog(BaseDialog):
         self.task_canvas = tk.Canvas(
             wrap, bg=HEADING_BG, highlightthickness=0, bd=0)
         self.task_canvas.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(wrap, orient="vertical",
-                               command=self.task_canvas.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll = uikit.SlimScrollbar(
+            wrap, orient="vertical", command=self.task_canvas.yview,
+            scale=app.scale, bg=HEADING_BG)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(app.s(2), 0))
         self.task_canvas.configure(yscrollcommand=scroll.set)
         self.task_inner = tk.Frame(self.task_canvas, bg=HEADING_BG)
         self._task_window = self.task_canvas.create_window(
@@ -5753,10 +5825,10 @@ class ScheduleDialog(BaseDialog):
                  font=FONT_NOTE).pack(side="left", padx=app.s(6))
 
         row_label("目标执行组", 3)
-        self.group_combo = ttk.Combobox(
-            right, textvariable=self.var_group, state="readonly",
-            values=[i18n.tr("（当前组）")] + list(self._group_names),
-            font=FONT_NOTE)
+        self.group_combo = uikit.ReadonlySelect(
+            right, values=[i18n.tr("（当前组）")] + list(self._group_names),
+            variable=self.var_group, scale=app.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE, width=18)
         self.group_combo.grid(row=3, column=1, sticky="ew", pady=app.s(5))
 
         tk.Frame(right, bg=BORDER, height=1).grid(
@@ -5770,7 +5842,9 @@ class ScheduleDialog(BaseDialog):
                  font=FONT_NOTE).pack(side="left", padx=(app.s(6), 0))
 
         row_label("Webhook", 6)
-        ttk.Entry(right, textvariable=self.var_webhook).grid(
+        uikit.TextField(right, textvariable=self.var_webhook,
+                        scale=app.scale, bg=CARD,
+                        font_size=FONT_SIZE_NOTE).grid(
             row=6, column=1, sticky="ew", pady=app.s(5))
         tk.Label(right, text="填写企业微信或钉钉机器人地址，任务结束后自动推送；"
                              "留空则不推送。完成通知由所有定时任务共用。",
@@ -6222,9 +6296,11 @@ class ScheduleHistoryDialog(BaseDialog):
         self.tree.column("stats", width=205)
         self.tree.grid(row=0, column=0, sticky="nsew",
                        padx=(parent.s(12), 0), pady=(parent.s(12), 0))
-        scroll = ttk.Scrollbar(self, orient="vertical",
-                               command=self.tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0))
+        scroll = uikit.SlimScrollbar(
+            self, orient="vertical", command=self.tree.yview,
+            scale=parent.scale, bg=CARD)
+        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0),
+                    padx=(parent.s(2), 0))
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.tag_configure("ok", foreground=SUCCESS)
         self.tree.tag_configure("danger", foreground=DANGER)
@@ -6439,9 +6515,11 @@ class ImageManagerDialog(BaseDialog):
         self.tree.column("size", width=70, anchor="e")
         self.tree.grid(row=0, column=0, sticky="nsew", padx=parent.s(12),
                        pady=(parent.s(12), parent.s(6)))
-        scroll = ttk.Scrollbar(self, orient="vertical",
-                               command=self.tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0))
+        scroll = uikit.SlimScrollbar(
+            self, orient="vertical", command=self.tree.yview,
+            scale=parent.scale, bg=CARD)
+        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0),
+                    padx=(parent.s(2), 0))
         self.tree.configure(yscrollcommand=scroll.set)
 
         self.summary = tk.Label(self, text="", bg=CARD, fg=MUTED,
@@ -6605,13 +6683,15 @@ class BackupDialog(BaseDialog):
             self, font=FONT_NOTE, bg=ENTRY_BG, fg=TEXT,
             selectbackground=SELECT_BG, selectforeground=TEXT,
             relief="flat", highlightthickness=1,
-            highlightbackground=BORDER, highlightcolor=ACCENT_STRONG,
+            highlightbackground=BORDER, highlightcolor=FIELD_FOCUS,
             activestyle="none")
         self.listbox.grid(row=0, column=0, sticky="nsew",
                           padx=(parent.s(12), 0), pady=(parent.s(12), 0))
-        scroll = ttk.Scrollbar(self, orient="vertical",
-                               command=self.listbox.yview)
-        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0))
+        scroll = uikit.SlimScrollbar(
+            self, orient="vertical", command=self.listbox.yview,
+            scale=parent.scale, bg=CARD)
+        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0),
+                    padx=(parent.s(2), 0))
         self.listbox.configure(yscrollcommand=scroll.set)
         for name in names:
             # rpa_settings_20261020_121500.json → 2026-10-20 12:15:00
@@ -6648,25 +6728,26 @@ class SettingsDialog(BaseDialog):
         self.var_language = tk.StringVar(
             value=i18n.language_display(str(settings.get("language", "zh"))))
         row_lang = tk.Frame(self, bg=CARD)
-        row_lang.grid(row=0, column=1, sticky="w",
+        row_lang.grid(row=0, column=1, sticky="e",
                       padx=(0, parent.s(16)), pady=parent.s(5))
-        self.combo_language = ttk.Combobox(
-            row_lang, textvariable=self.var_language, state="readonly", width=20,
+        self.combo_language = uikit.ReadonlySelect(
+            row_lang,
             values=[i18n.language_display(code) for code, _name in i18n.LANGUAGES],
-            font=FONT_NOTE)
+            variable=self.var_language, scale=parent.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE, width=20)
         self.combo_language.pack(side="left")
 
         self.label("启动前倒计时（秒）", 1)
         self.var_delay = tk.StringVar(value=str(settings.get("delay", 3)))
         ttk.Spinbox(self, from_=0, to=30, width=8,
                     textvariable=self.var_delay).grid(
-            row=1, column=1, sticky="w", padx=(0, parent.s(16)), pady=parent.s(5))
+            row=1, column=1, sticky="e", padx=(0, parent.s(16)), pady=parent.s(5))
 
         self.label("图像匹配相似度", 2)
         self.var_conf = tk.StringVar(value=str(settings.get("confidence", 0.9)))
         ttk.Spinbox(self, from_=0.5, to=1.0, increment=0.01, width=8,
                     textvariable=self.var_conf).grid(
-            row=2, column=1, sticky="w", padx=(0, parent.s(16)), pady=parent.s(5))
+            row=2, column=1, sticky="e", padx=(0, parent.s(16)), pady=parent.s(5))
 
         self.label("图像目录", 3)
         row = tk.Frame(self, bg=CARD)
@@ -6674,8 +6755,9 @@ class SettingsDialog(BaseDialog):
                  pady=parent.s(5))
         row.columnconfigure(0, weight=1)
         self.var_dir = tk.StringVar(value=image_dir)
-        ttk.Entry(row, textvariable=self.var_dir).grid(row=0, column=0,
-                                                       sticky="ew")
+        uikit.TextField(row, textvariable=self.var_dir, scale=parent.scale,
+                        bg=CARD, font_size=FONT_SIZE_NOTE).grid(
+            row=0, column=0, sticky="ew")
         uikit.RoundButton(row, "浏览…", "folder_open", self._browse,
                           kind="outline", scale=parent.scale, bg=CARD,
                           height=CONTROL_SM, pad=parent.s(8),
@@ -6686,21 +6768,21 @@ class SettingsDialog(BaseDialog):
         self.var_mini = tk.BooleanVar(
             value=bool(settings.get("show_mini_bar", True)))
         uikit.Switch(self, self.var_mini, scale=parent.scale, bg=CARD).grid(
-            row=4, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=4, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
         self.label("失败时保存屏幕截图", 5)
         self.var_shot = tk.BooleanVar(
             value=bool(settings.get("shot_on_fail", True)))
         uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
-            row=5, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=5, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
         self.label("数据处理完成后写入结果文件", 6)
         self.var_results = tk.BooleanVar(
             value=bool(settings.get("save_results", True)))
         uikit.Switch(self, self.var_results, scale=parent.scale, bg=CARD).grid(
-            row=6, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=6, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
         # 开机自启：开关状态直接反映注册表实况（Run 项在不在），
@@ -6709,7 +6791,7 @@ class SettingsDialog(BaseDialog):
         self.var_autostart = tk.BooleanVar(value=autostart.is_enabled())
         uikit.Switch(self, self.var_autostart, scale=parent.scale,
                      bg=CARD).grid(
-            row=7, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=7, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
         # 托盘：两个开关任一打开就会出现托盘图标；互不依赖
@@ -6718,7 +6800,7 @@ class SettingsDialog(BaseDialog):
             value=bool(settings.get("tray_start_minimized")))
         uikit.Switch(self, self.var_tray_min, scale=parent.scale,
                      bg=CARD).grid(
-            row=8, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=8, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
         self.label("关闭窗口时最小化至系统托盘", 9)
@@ -6726,7 +6808,7 @@ class SettingsDialog(BaseDialog):
             value=bool(settings.get("tray_on_close")))
         uikit.Switch(self, self.var_tray_close, scale=parent.scale,
                      bg=CARD).grid(
-            row=9, column=1, sticky="w", padx=(0, parent.s(16)),
+            row=9, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
         # 说明文字横跨两列并自动换行，避免把左侧标签列撑得过宽
@@ -6856,8 +6938,10 @@ class DataPreviewDialog(BaseDialog):
             tree.insert("", "end",
                         values=[row.get(name, "") for name in shown])
         tree.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll = uikit.SlimScrollbar(
+            wrap, orient="vertical", command=tree.yview,
+            scale=parent.scale, bg=CARD)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(parent.s(2), 0))
         tree.configure(yscrollcommand=scroll.set)
         if len(columns) > 6:
             tk.Label(wrap, text=f"（只显示前 6 列，共 {len(columns)} 列）",

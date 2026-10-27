@@ -12,7 +12,9 @@ CORE_TOKENS = {
     "SUCCESS_TEXT", "WARNING_TEXT", "DANGER_TEXT",
     "ENTRY_BG", "SELECT_BG", "ZEBRA",
     "HEADING_BG", "HEADING_FG",
-    "LOG_BG", "LOG_FG", "LOG_INFO", "LOG_WARN", "LOG_ERROR", "LOG_TIME",
+    "LOG_BG", "LOG_FG", "LOG_HEAD_BG", "LOG_HEAD_FG", "LOG_HEAD_MUTED",
+    "LOG_HEAD_HOVER", "LOG_HEAD_ACTIVE",
+    "LOG_INFO", "LOG_WARN", "LOG_ERROR", "LOG_TIME",
     "SCROLL_BG", "SCROLL_TROUGH",
 }
 
@@ -115,6 +117,22 @@ def test_button_colors_cover_every_kind_in_both_themes():
         assert accent[1] == theme.INK
         disabled = theme.button_colors("accent", bg, dark=dark, enabled=False)
         assert disabled[1] == theme.palette(dark)["TEXT_WEAK"]
+
+
+def test_ghost_buttons_on_dark_log_header_keep_dark_hover():
+    """浅色主题下日志头的“运行日志 / 复制 / 清空”不能 hover 成浅灰。"""
+    for dark in (False, True):
+        p = theme.palette(dark)
+        hover = theme.button_colors(
+            "ghost", p["LOG_HEAD_BG"], dark=dark, hover=True)
+        pressed = theme.button_colors(
+            "ghost", p["LOG_HEAD_BG"], dark=dark, pressed=True)
+        assert hover[0] == p["LOG_HEAD_HOVER"]
+        assert pressed[0] == p["LOG_HEAD_ACTIVE"]
+        assert _luminance(hover[0]) < 0.2
+        assert _luminance(pressed[0]) < 0.2
+        assert _contrast(hover[1], hover[0]) >= 4.5
+        assert _contrast(pressed[1], pressed[0]) >= 4.5
 
 
 def test_is_dark_color_handles_short_and_long_hex():

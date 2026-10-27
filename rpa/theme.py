@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""MeowGo 设计令牌（Design Tokens v1.1）。
+"""MeowGo 设计令牌（Design Tokens v1.3）。
 
 这里是界面颜色、字号、圆角、控件高度和图标的唯一来源：
 `gui.py` 与 `uikit.py` 都从这里取值，不要在组件里另写一套色值或字号。
 
 颜色命名沿用《MeowGo 界面视觉规范》：
 暖白纸面 + 墨黑文字 + 暖橙点缀；暗色模式整组替换。
+v1.3 增加中性控件面、表格、下拉面板与滚动条令牌，三者共用同一套
+「浅底 + 深墨强调 + 大圆角」的参考图语言。
 """
 from __future__ import annotations
 
@@ -69,7 +71,7 @@ ICON_LG = 18
 ICON_XL = 20
 
 HEADER_HEIGHT = 56
-TABLE_ROW_HEIGHT = 34
+TABLE_ROW_HEIGHT = 38
 DIALOG_PAD = 16
 DIALOG_ROW_GAP = 6
 
@@ -102,6 +104,10 @@ LIGHT_PALETTE = {
     "LOG_HEAD_BG": "#1D1B18",
     "LOG_HEAD_FG": "#F5F2ED",
     "LOG_HEAD_MUTED": "#9A938A",
+    # 深色日志头部上的 ghost 按钮：hover / pressed 都留在深色系，
+    # 浅色主题下也不能翻成浅灰，否则整条控制台会被“点亮”。
+    "LOG_HEAD_HOVER": "#2A2622",
+    "LOG_HEAD_ACTIVE": "#3A342C",
     "LOG_INFO": "#7ED3A8",
     "LOG_WARN": "#F0C674",
     "LOG_ERROR": "#F28B82",
@@ -110,10 +116,25 @@ LIGHT_PALETTE = {
     "ZEBRA": "#F7F5F1",
     "HEADING_BG": "#F3F1ED",
     "HEADING_FG": "#6B655E",
-    "SELECT_BG": "#FFE9D2",
+    # 表格 / 下拉 / 滚动条：参考图里的中性灰白层级。
+    # SELECT_BG 同时用于 Treeview 选中行、弹层当前项和菜单高亮。
+    "SELECT_BG": "#F0F0F0",
+    "TABLE_HEAD_BG": "#F7F7F7",
+    "TABLE_HEAD_FG": "#6B655E",
+    "TABLE_BORDER": "#EAEAEA",
+    "TABLE_ROW_HOVER": "#FAFAFA",
+    "TABLE_ROW_SELECTED": "#F0F0F0",
+    "MENU_BG": "#F7F7F7",
+    "MENU_BORDER": "#E6E2DB",
+    "MENU_ROW_HOVER": "#EFEFEF",
+    "MENU_ROW_SELECTED": "#E9E9E9",
+    "FIELD_FOCUS": "#080806",
     "ENTRY_BG": "#FFFFFF",
-    "SCROLL_BG": "#CFC8BE",
-    "SCROLL_TROUGH": "#FAF9F7",
+    "SCROLL_BG": "#2D2D2D",
+    "SCROLL_TROUGH": "#F2F2F2",
+    "SCROLL_THUMB": "#2D2D2D",
+    "SCROLL_TRACK": "#F2F2F2",
+    "SCROLL_THUMB_FG": "#FFFFFF",
     "PROGRESS_TROUGH": "#F0EDE8",
     "PREVIEW_BG": "#FFF6EC",
     "SUMMARY_BG": "#FFF6EC",
@@ -148,6 +169,8 @@ DARK_PALETTE = {
     "LOG_HEAD_BG": "#1E1B18",
     "LOG_HEAD_FG": "#F7F4EF",
     "LOG_HEAD_MUTED": "#B8B1A8",
+    "LOG_HEAD_HOVER": "#26231F",
+    "LOG_HEAD_ACTIVE": "#302C27",
     "LOG_INFO": "#7ED3A8",
     "LOG_WARN": "#F0C674",
     "LOG_ERROR": "#F28B82",
@@ -156,10 +179,24 @@ DARK_PALETTE = {
     "ZEBRA": "#25221E",
     "HEADING_BG": "#26231F",
     "HEADING_FG": "#A8A29A",
-    "SELECT_BG": "#3A2D20",
+    # 暗色下保持同样的中性层级：面板略高于卡片，选中行再高一级。
+    "SELECT_BG": "#302C27",
+    "TABLE_HEAD_BG": "#24211D",
+    "TABLE_HEAD_FG": "#B8B1A8",
+    "TABLE_BORDER": "#35312B",
+    "TABLE_ROW_HOVER": "#25221E",
+    "TABLE_ROW_SELECTED": "#302C27",
+    "MENU_BG": "#24211D",
+    "MENU_BORDER": "#35312B",
+    "MENU_ROW_HOVER": "#302C27",
+    "MENU_ROW_SELECTED": "#35312B",
+    "FIELD_FOCUS": "#F5F2ED",
     "ENTRY_BG": "#1D1B18",
-    "SCROLL_BG": "#3D3831",
-    "SCROLL_TROUGH": "#12110F",
+    "SCROLL_BG": "#B8B1A8",
+    "SCROLL_TROUGH": "#1A1815",
+    "SCROLL_THUMB": "#B8B1A8",
+    "SCROLL_TRACK": "#1A1815",
+    "SCROLL_THUMB_FG": "#12110F",
     "PROGRESS_TROUGH": "#3B3630",
     "PREVIEW_BG": "#2A2118",
     "SUMMARY_BG": "#2A2118",
@@ -219,52 +256,55 @@ def button_colors(kind: str, bg: str, *, enabled: bool = True,
     dark_bg = is_dark_color(bg)
 
     if not enabled:
+        border = "" if kind == "ghost" else p["BORDER"]
         if kind in ("accent", "danger"):
             if use_dark:
-                return "#2A2622", p["TEXT_WEAK"], ""
-            return p["BORDER"], p["TEXT_WEAK"], ""
-        if use_dark or (kind == "ghost" and dark_bg):
-            return p["HEADING_BG"], p["TEXT_WEAK"], ""
-        return p["BORDER"], p["TEXT_WEAK"], ""
+                return "#2A2622", p["TEXT_WEAK"], border
+            return p["BORDER"], p["TEXT_WEAK"], border
+        if dark_bg:
+            return p["LOG_HEAD_HOVER"], p["TEXT_WEAK"], border
+        if use_dark:
+            return p["HEADING_BG"], p["TEXT_WEAK"], border
+        return p["BORDER"], p["TEXT_WEAK"], border
 
     if kind == "accent":
         if pressed:
-            return ("#F2A552" if use_dark else "#D97712"), INK, ""
+            return ("#F2A552" if use_dark else "#D97712"), INK, p["ACCENT_STRONG"]
         if hover:
-            return p["ACCENT_STRONG"], INK, ""
-        return p["ACCENT"], INK, ""
+            return p["ACCENT_STRONG"], INK, p["ACCENT_STRONG"]
+        return p["ACCENT"], INK, p["ACCENT_STRONG"]
 
     if kind == "danger":
         if use_dark:
             if pressed:
-                return "#D97B78", INK, ""
+                return "#D97B78", INK, p["DANGER"]
             if hover:
-                return "#F2A09D", INK, ""
-            return p["DANGER"], INK, ""
+                return "#F2A09D", INK, p["DANGER"]
+            return p["DANGER"], INK, p["DANGER"]
         if pressed:
-            return "#B03B37", "#FFFFFF", ""
+            return "#B03B37", "#FFFFFF", p["DANGER_TEXT"]
         if hover:
-            return "#C74642", "#FFFFFF", ""
-        return p["DANGER"], "#FFFFFF", ""
+            return "#C74642", "#FFFFFF", p["DANGER_TEXT"]
+        return p["DANGER"], "#FFFFFF", p["DANGER_TEXT"]
 
     if kind == "outline":
         if use_dark:
-            base, hover_bg, active = p["CARD"], p["HEADING_BG"], "#3A2D20"
+            base, hover_bg, active = p["CARD"], p["HEADING_BG"], p["SELECT_BG"]
         else:
-            base, hover_bg, active = p["CARD"], p["HEADING_BG"], p["ACCENT_TINT"]
+            base, hover_bg, active = p["CARD"], p["HEADING_BG"], p["SELECT_BG"]
         if pressed:
-            return active, p["TEXT"], p["BORDER"]
+            return active, p["TEXT"], p["BORDER_STRONG"]
         if hover:
-            return hover_bg, p["TEXT"], p["BORDER"]
+            return hover_bg, p["TEXT"], p["BORDER_STRONG"]
         return base, p["TEXT"], p["BORDER"]
 
     if kind == "ghost":
-        if use_dark or dark_bg:
-            fg = p["LOG_FG"] if dark_bg else p["TEXT"]
-            hover_bg = p["ACCENT_MIST"] if use_dark else "#26231F"
-            active = p["ACCENT_TINT"] if use_dark else "#302B26"
+        if dark_bg:
+            fg = p["LOG_FG"]
+            hover_bg = p["LOG_HEAD_HOVER"]
+            active = p["LOG_HEAD_ACTIVE"]
         else:
-            fg, hover_bg, active = p["TEXT"], p["ACCENT_MIST"], p["ACCENT_TINT"]
+            fg, hover_bg, active = p["TEXT"], p["HEADING_BG"], p["SELECT_BG"]
         if pressed:
             return active, fg, ""
         if hover:
@@ -277,7 +317,7 @@ def button_colors(kind: str, bg: str, *, enabled: bool = True,
     else:
         base, hover_bg, active = p["HEADING_BG"], "#E9E5DE", "#DFDAD2"
     if pressed:
-        return active, p["TEXT"], ""
+        return active, p["TEXT"], p["BORDER_STRONG"]
     if hover:
-        return hover_bg, p["TEXT"], ""
-    return base, p["TEXT"], ""
+        return hover_bg, p["TEXT"], p["BORDER_STRONG"]
+    return base, p["TEXT"], p["BORDER"]

@@ -1,10 +1,16 @@
 # MeowGo 软件界面视觉规范（Design Tokens）
 
-> 版本：v1.2 ｜ 适用：MeowGo 系列桌面端 / 移动端界面 / HTML 运行报告页 ｜ 依据：MeowGo 品牌 Logo（黑色圆润字标 + 黑猫剪影 + 暖橙点缀）
+> 版本：v1.3.2 ｜ 适用：MeowGo 系列桌面端 / 移动端界面 / HTML 运行报告页 ｜ 依据：MeowGo 品牌 Logo（黑色圆润字标 + 黑猫剪影 + 暖橙点缀）
 >
 > v1.1 起，桌面端的实际色值、字号、间距、圆角、控件高度与图标尺寸统一收敛到 `rpa/theme.py`；本文档描述设计意图与 token 语义，代码不得再各自维护一套色值。
 >
 > v1.2：新增语义色深变体令牌（`*-text`，用于浅色底上的小字），并把 HTML 运行报告页纳入规范（§12），报告页色值同样只从 `rpa/theme.py` 取。
+>
+> v1.3：按参考图重做滚动条、下拉选择与表格三类核心组件，并统一全部按钮（§8.1 / §8.8 / §8.9 / §8.10）。新增中性控件面令牌（§2.7）；橙色继续只作品牌点缀，不再作为表格 Hover 或输入焦点的默认色。自定义滚动条、下拉字段与表格容器都必须使用这些令牌，且同时支持浅色 / 暗色主题。
+>
+> v1.3.1：文本输入全部改用 `uikit.TextField`，内部 Entry 使用无边框 `Field.TEntry`，每个字段只保留外层一圈圆角描边，修复下拉 / 输入框的双边框；运行设置表单改为标签左对齐、控件右对齐；步骤表「#」编号列由 44px 提升到 66px（1.5 倍）。
+>
+> v1.3.2：步骤表首列图标槽由 30px 加宽到 40px，`#` 编号列由 66px 收窄到 56px；所有列宽均可在表头拖动调整，并写入 `rpa_settings.json` 的 `columns`，重启后恢复上次列宽。同时修复浅色主题下日志头「运行日志 / 复制 / 清空」ghost 按钮 hover / pressed 变成浅灰的问题。
 
 ---
 
@@ -31,7 +37,7 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 | 层 | 文件 | 职责 |
 |---|---|---|
 | 设计令牌 | `rpa/theme.py` | 浅/暗色板、字体阶梯、间距、圆角、控件高度、图标尺寸、按钮配色 |
-| 基础控件 | `rpa/uikit.py` | `RoundButton` / `RoundedCard` / `Switch` / `SearchableCombo`，只读令牌 |
+| 基础控件 | `rpa/uikit.py` | `RoundButton` / `RoundedCard` / `TextField` / `Switch` / `SearchableCombo` / `ReadonlySelect` / `SlimScrollbar`，只读令牌 |
 | 主界面 | `rpa/gui.py` | 顶栏、执行组面板、步骤表、日志、状态栏与全部对话框 |
 | 报告页（HTML） | `rpa/engine.py` | 运行报告索引页，色值同样注入自 `rpa/theme.py` |
 | 校验 | `tests/test_theme.py` | 色板键名一致、HEX 合法、文本对比度、尺寸阶梯、按钮配色、语义文字对比度 |
@@ -111,6 +117,29 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 | 墨黑 / 深灰 | ~60% | 内容、文字、结构性元素 |
 | 白 / 暖白 | ~30% | 背景、留白 |
 | 暖橙 | ~10% | 仅主操作、选中、徽章、猫元素点缀 |
+
+### 2.7 中性控件面（v1.3）
+
+滚动条、下拉字段和表格以中性灰阶层级表达「轨道 → 表面 → 选中」；浅色下用灰白，暗色下用暖黑，不把橙色铺进控件内部。所有值来自 `rpa/theme.py` 的浅 / 暗色板。
+
+| Token | 浅色 | 暗色 | 用途 |
+|---|---|---|---|
+| `SELECT_BG` | `#F0F0F0` | `#302C27` | 下拉当前项、表格选中行、菜单高亮 |
+| `TABLE_HEAD_BG` | `#F7F7F7` | `#24211D` | 表头底 |
+| `TABLE_HEAD_FG` | `#6B655E` | `#B8B1A8` | 表头文字 |
+| `TABLE_BORDER` | `#EAEAEA` | `#35312B` | 表格容器 / 单元格细分隔线 |
+| `TABLE_ROW_HOVER` | `#FAFAFA` | `#25221E` | 行 Hover（仅表格自身使用） |
+| `TABLE_ROW_SELECTED` | `#F0F0F0` | `#302C27` | 表格选中行 |
+| `MENU_BG` | `#F7F7F7` | `#24211D` | 下拉面板 / 菜单浮层 |
+| `MENU_BORDER` | `#E6E2DB` | `#35312B` | 下拉面板描边 |
+| `MENU_ROW_HOVER` | `#EFEFEF` | `#302C27` | 下拉项 Hover |
+| `MENU_ROW_SELECTED` | `#E9E9E9` | `#35312B` | 下拉当前项药丸底 |
+| `FIELD_FOCUS` | `#080806` | `#F5F2ED` | 输入 / 下拉字段聚焦描边 |
+| `SCROLL_TRACK` | `#F2F2F2` | `#1A1815` | 滚动条圆角轨道 |
+| `SCROLL_THUMB` | `#2D2D2D` | `#B8B1A8` | 滚动条滑块 |
+| `SCROLL_THUMB_FG` | `#FFFFFF` | `#12110F` | 滑块上的猫爪前景 |
+
+> 控件面与品牌橙分离：橙色只保留在主操作、类型图标和运行状态；表格 Hover、焦点描边、下拉当前项均使用上表的中性色。
 
 ---
 
@@ -200,18 +229,23 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 
 ## 8. 核心组件规范（Components）
 
-### 8.1 按钮 Button
+### 8.1 按钮 Button（v1.3 统一）
 
-| 类型 | 背景 | 文字 | 圆角 | 尺寸（高） |
+桌面端所有按钮统一由 `uikit.RoundButton` 绘制，不再使用原生 `tk.Button` / `ttk.Button`。按钮由「圆角实心底 + 1px 描边 + 左侧 16px 线性图标 + 12/13px 文字」组成；尺寸取 `CONTROL_XS / SM / MD / LG`，默认圆角 `RADIUS_M`。同组按钮等高、紧凑排列，主操作只保留一个。
+
+| 类型（kind） | 默认背景 | 文字 / 图标 | 边框 | 用途 |
 |---|---|---|---|---|
-| 主按钮（Primary） | `--mg-orange` | 白 `#FFFFFF`（或墨黑） | 12px | 36 / 40 / 44px |
-| 主按钮 Hover | `--mg-orange-strong` | 白 | 12px | — |
-| 次按钮（Secondary） | `--mg-surface-2` | `--mg-text-1` | 12px | 同上 |
-| 幽灵按钮（Ghost） | 透明，边框 `--mg-border` | `--mg-text-1` | 12px | 同上 |
-| 文字按钮（Text） | 透明 | `--mg-orange-strong` | 12px | — |
-| 禁用 | 灰底 `#E6E2DB` | `--mg-text-3` | 12px | 不响应 Hover |
+| `accent`（主操作） | `ACCENT` | `INK`（浅色墨黑 / 暗色暖白） | `ACCENT_STRONG` | 运行组、确认、保存 |
+| `solid`（默认次级） | `HEADING_BG` | `TEXT` | `BORDER` | 常规操作、工具按钮 |
+| `outline` | `CARD` | `TEXT` | `BORDER` | 需要从卡片中区分的操作 |
+| `ghost` | 透明 | `TEXT` / 次级图标 | 无 | 顶栏图标、卡片内低层级操作 |
+| `danger` | `DANGER` | 浅色白 / 暗色 `INK` | `DANGER_TEXT` / `DANGER` | 删除、清空等不可逆操作 |
 
-> 按钮内左侧可嵌入猫爪图标（可选），主按钮点击反馈 0.12s 缩放至 0.97。
+- Hover：`solid` / `outline` 进入 `HEADING_BG` 或 `SELECT_BG`，`ghost` 默认进入 `HEADING_BG`；位于深色日志头 / 控制台上的 ghost 按钮（「运行日志」「复制」「清空」）改用 `LOG_HEAD_HOVER`，Pressed 用 `LOG_HEAD_ACTIVE`，浅色主题下也保持深色，不能翻成浅灰。禁止用橙色整块填充表示 Hover。
+- Pressed：再深一级（`SELECT_BG` / 预设 active 色），边框提升到 `BORDER_STRONG`。
+- Disabled：统一 `BORDER` 底（`accent` / `danger` 暗色用 `#2A2622`）+ `TEXT_WEAK` 文字，保留 1px 边框，不响应 Hover / Pressed。
+- 圆角按钮内部若只有图标，保持方形点击区与居中图标；图标颜色随按钮前景色，不单独使用橙色。
+- 点击反馈仍为 0.12s 缩放至 0.97；开关 `uikit.Switch` 属于状态控件，不套用按钮配色，其橙色猫爪造型保持不变。
 
 ### 8.2 卡片 Card
 
@@ -219,11 +253,15 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 - 头部：标题 16px SemiBold + 右侧操作区；内容区留白 16–20px。
 - 选中态：2px 边框 `--mg-orange` + 底色 `--mg-orange-mist`。
 
-### 8.3 输入框 Input
+### 8.3 输入框 Input（v1.3.1 统一）
 
-- 高 36–40px，圆角 8px，边框 `--mg-border`，背景 `--mg-surface`。
-- 焦点：2px 边框 `--mg-orange` + 外发光 `0 0 0 3px rgba(253,174,99,0.25)`。
+- 桌面端普通文本输入统一使用 `uikit.TextField`：外层 `RoundedCard` 圆角外壳负责唯一一圈 1px `BORDER` 描边，内部 `ttk.Entry` 使用 `Field.TEntry`（`borderwidth=0`、无内层焦点框）；不得再在 Entry 外套第二个描边容器。
+- 高 36–40px，圆角 `RADIUS_S`（8px），背景 `ENTRY_BG`；搜索框、可输入下拉、只读下拉与普通文本输入共用同一圆角外壳和视觉高度。
+- 焦点：只切换外壳描边到 `FIELD_FOCUS`（浅色墨黑 / 暗色暖白），不使用橙色发光；输入内容保持 `TEXT`。
 - 占位符 `--mg-text-3`；错误态边框 `--mg-danger`。
+- 步骤内容、备注、分组、区域、图片目录、Webhook 等全部文本字段使用 `TextField`；搜索框把清除按钮放在同一字段外壳的右侧，不额外生成边框。
+- 步骤对话框中的「指令类型」字段左侧为可搜索输入区，右侧固定猫爪按钮；聚焦 / 已有选中值时猫爪加深为 `TEXT`，空值与失焦时回到 `MUTED`。下拉直接使用 `SearchableCombo(shell=True)`，不再嵌套外层 `RoundedCard`。
+- 运行设置表单：标签列左对齐，控件列统一 `sticky="e"` 右对齐；语言、倒计时、相似度、开关都贴着右侧边线，图像目录等需要伸展的行占满整个右列，形成左右两端对齐。
 
 ### 8.4 导航 Navigation
 
@@ -245,9 +283,41 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 - 居中像素猫插画（191×160 网格，显示约 145–200px）+ 标题 `--mg-fs-h2` + 辅助文字 `--mg-text-2` + 主按钮。
 - 插画表情与文案呼应（如"这里空空如也，喵～"）；待机时轻微呼吸并定时眨眼，动作幅度保持克制。
 
-### 8.8 表格 Table
+### 8.8 表格 Table（v1.3）
 
-- 表头 `--mg-surface-2` 底、13px SemiBold；行高 44px；隔行 `#FAF9F7`；Hover `--mg-orange-mist`；圆角容器 12px。
+- 外层：`RoundedCard` 圆角容器（`RADIUS_M`），底 `CARD`、1px `TABLE_BORDER`、无外阴影；内部表格与容器内缘留 2px 呼吸位。
+- 表头：`TABLE_HEAD_BG` 底、`TABLE_HEAD_FG` 13px SemiBold、左对齐、与单元格内容同起点；表头下缘由 `TABLE_BORDER` 细分隔线收口。
+- 行：白 / `CARD` 底；行高 `TABLE_ROW_HEIGHT`（38px 逻辑值，按 DPI 缩放）；斑马纹仍用 `ZEBRA`（浅色 `#F7F5F1` / 暗色 `#25221E`），保持现有奇偶行约定。
+- Hover：`TABLE_ROW_HOVER`；选中行：`TABLE_ROW_SELECTED`（浅色 `#F0F0F0` / 暗色 `#302C27`），文字保持 `TEXT`，不使用橙色整行。
+- 首列：`#0` 为 40px 类型图标槽（v1.3.2 由 30px 加宽），图标与表头均左对齐（图标配色仍沿用 `TYPE_COLORS`，作为唯一允许的橙色点缀）；紧随其后的「#」编号列宽 56px（v1.3.2 由 66px 收窄），表头与行号同样左对齐；「类型」列保持 140px。
+- 列宽：表头分隔线可拖动调整；每次松开后把 `#0 / # / 类型 / 内容 / 重复 / 备注` 六列宽度以逻辑像素写入 `rpa_settings.json` 的 `columns`（`#0` 键名为 `icon`），下次启动自动恢复。窗口变窄时仍用横向滚动条查看被挡住的列。
+- 内容：主文本 13–14px `TEXT`，次要说明 `MUTED`；超长内容在列宽内截断，必要时在文本末尾显示省略号（HTML 报告页用 `text-overflow: ellipsis`，桌面表格由列宽裁切）。
+- 状态：若表格含状态列，使用胶囊 pill；成功 / 失败 / 运行中分别取 `MARK_DONE` / `MARK_FAILED` / `MARK_RUNNING` 底与 `SUCCESS_TEXT` / `DANGER_TEXT` / `WARNING_TEXT` 字，圆角 pill，不改变行底色。
+- 分组树与步骤表共用 `Treeview` 中性样式；表格容器不嵌套橙边，避免和卡片选中态混淆。
+
+### 8.9 下拉选择 Select（v1.3）
+
+**只读字段（`ReadonlySelect`）**
+
+- 结构与输入框一致：白色 / 暗色 `ENTRY_BG` 圆角外壳、`BORDER` 1px 描边，右侧猫爪按钮；字段高度 `CONTROL_SM`。
+- 焦点：外壳描边切到 `FIELD_FOCUS`；猫爪同步变为 `TEXT`；失焦后回到 `BORDER` / 当前值对应的 `TEXT` 或 `MUTED`。
+- 点击字段或猫爪展开面板；语言、定时执行组、表格内联类型编辑均使用该组件，不再出现原生 `ttk.Combobox` 的白底方角下拉。
+
+**下拉面板（`_DropdownPanel`）**
+
+- 圆角 `RADIUS_M` 浅灰面板，底 `MENU_BG`、1px `MENU_BORDER`，可选轻微下沉阴影；内边距 6–8px。
+- 行高 30px 逻辑值（按字体行高自适应）；分组标题用 `TEXT_WEAK`，不可点；选项文字用 `TEXT`，保证可读性。
+- 当前项：整行 `MENU_ROW_SELECTED` 药丸底（圆角），左侧深色 `check` 图标；悬停 / 键盘当前行用 `MENU_ROW_HOVER`。
+- 最多显示 6 行，超出时面板内部滚动；滚动条使用 §8.10 的 `SlimScrollbar`，面板本身不产生系统滚动条。
+- 点击面板外自动收起，且这次点击仍要落到目标控件；方向键、回车、Esc 与输入过滤保持可用。
+
+### 8.10 滚动条 Scrollbar（v1.3）
+
+- 统一由 `uikit.SlimScrollbar` 绘制，替换 `ttk.Scrollbar`；轨道为圆角浅色胶囊，滑块为深色圆角胶囊，滑块中心有白色猫爪。
+- 轨道 `SCROLL_TRACK`、滑块 `SCROLL_THUMB`、猫爪 `SCROLL_THUMB_FG`；暗色模式轨道沉入背景、滑块提亮为暖灰。
+- 默认竖向宽约 10–12px（DPI 缩放）；滑块最小高度约 20px；内容不足一屏时只保留极浅轨道，不画滑块。
+- Hover 滑块提亮 10%；拖动按 `moveto`、滚轮按 `scroll units` 协议驱动目标控件；日志 / 控制台可换用 `variant="console"` 的深色轨道。
+- 滚动条不抢焦点（`takefocus=0`），不覆盖内容；下拉面板、表格、日志和列表统一使用该组件。
 
 ---
 
@@ -302,6 +372,8 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 | 结果 pill | 成功 `--mg-mark-done` 底 + `--mg-success-text` 字；失败 `--mg-mark-failed` + `--mg-danger-text`；已停止 `--mg-mark-running` + `--mg-warning-text`；胶囊圆角 |
 | 空状态 | `--mg-text-3` 居中文案 |
 
+> 注：§8.8 的桌面端中性表格（`TABLE_HEAD_BG` / `TABLE_ROW_SELECTED` / `TABLE_BORDER`）与报告页表格是两套落地：报告页保持浅色暖白品牌基调，仍按本表使用 `HEADING_BG` / `ZEBRA` / `ACCENT_MIST`。若未来把报告页切到中性表格，需同步修改 `rpa/engine.py` 与 §12。
+
 ---
 
 ## 附：Token 速查表
@@ -313,6 +385,9 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 | 文本 | `--mg-text-1 #080806`、`-2 #6B655E`、`-3 #A8A29A` |
 | 语义文字 | 成功 `--mg-success-text #2C7755`、警告 `--mg-warning-text #8F5600`、错误 `--mg-danger-text #B03B37` |
 | 边框 | `--mg-border #E6E2DB`、`-strong #D4CFC6` |
+| 控件中性面 | `SELECT_BG #F0F0F0`、`TABLE_HEAD_BG #F7F7F7`、`MENU_BG #F7F7F7`、`TABLE_BORDER #EAEAEA` |
+| 控件强调 | `FIELD_FOCUS #080806`、`SCROLL_TRACK #F2F2F2`、`SCROLL_THUMB #2D2D2D`、`SCROLL_THUMB_FG #FFFFFF` |
+| 深色日志头 | `LOG_HEAD_BG #1D1B18`、`LOG_HEAD_HOVER #2A2622`、`LOG_HEAD_ACTIVE #3A342C` |
 | 圆角 | 8 / 12 / 16 / 24 / 999 |
 | 间距 | 4 / 8 / 12 / 16 / 24 / 32 / 48 / 64 |
 | 阴影 | 4 档（见 §7） |

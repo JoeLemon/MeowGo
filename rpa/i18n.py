@@ -780,6 +780,8 @@ EN: dict[str, str] = {
         "leave blank to disable. Completion notifications are shared by all tasks.",
     "完成通知": "Completion notification",
     "展开 / 收起指令类型": "Expand / collapse step types",
+    "展开 / 收起选项": "Show / hide options",
+    "没有匹配的指令类型": "No matching step types",
     "搜索过滤中不能拖动排序，请先清空搜索框":
         "Cannot reorder while a search filter is active. Clear the search first.",
     "无法启动键盘录制（键盘钩子安装失败），请手动输入":

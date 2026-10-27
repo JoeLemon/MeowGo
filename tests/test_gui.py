@@ -1150,9 +1150,18 @@ def test_save_indicator_and_ui_state():
     state = app._ui_state()
     assert isinstance(state["log_visible"], bool)
     assert "window" in state
-    assert set(state["columns"]) == {"content", "note"}
-    app.settings.update(state)          # 模拟下次启动读到的配置
-    app._restore_ui_state()             # 不应炸
+    assert set(state["columns"]) == {
+        "icon", "no", "type", "content", "repeat", "note"}
+    original = dict(state["columns"])
+    target = original["no"] + 13
+    app.step_tree.column("no", width=app.s(target))
+    app.settings.update(app._ui_state())   # 模拟下次启动读到的配置
+    app.step_tree.column("no", width=app.s(original["no"]))
+    app._restore_ui_state()                # 恢复用户拖动后的列宽
+    assert round(app.step_tree.column("no", "width") / app.scale) == target
+    app.step_tree.column("no", width=app.s(original["no"]))
+    app.settings["columns"] = original
+    app._restore_ui_state()                # 不应炸
     mark("保存指示与界面状态")
 
 

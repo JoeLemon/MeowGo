@@ -321,6 +321,16 @@ def _draw(name: str, draw: "_ScaledDraw", color, lw: int) -> None:
         _polyline(draw, [(17, 8), (20, 6)], c, max(1, lw - 1))
         _polyline(draw, [(9, 19), (7, 21)], c, max(1, lw - 1))
         _polyline(draw, [(15, 19), (17, 21)], c, max(1, lw - 1))
+    elif name == "paw":
+        # 猫爪：掌垫 + 四个脚趾；和开关滑块使用同一套造型语言
+        draw.ellipse([7.1, 11.5, 16.9, 19.2], fill=c)
+        draw.ellipse([3.4, 6.9, 8.7, 12.1], fill=c)
+        draw.ellipse([8.0, 3.9, 12.5, 9.0], fill=c)
+        draw.ellipse([11.5, 3.9, 16.0, 9.0], fill=c)
+        draw.ellipse([15.3, 6.9, 20.6, 12.1], fill=c)
+    elif name == "more":
+        for x in (6.5, 12.0, 17.5):
+            draw.ellipse([x - 1.35, 10.65, x + 1.35, 13.35], fill=c)
     else:  # 兜底：方块
         draw.rounded_rectangle([6, 6, 18, 18], radius=2, fill=c)
 
@@ -572,6 +582,134 @@ class RoundedCard(tk.Frame):
         self._redraw()
 
 
+class TextField(tk.Frame):
+    """圆角文本输入框：外层圆角描边 + 内部无边框 Entry。
+
+    这是 v1.3 的统一输入组件：描边只由外层 ``RoundedCard`` 画一次，
+    内部 ttk Entry 使用 ``Field.TEntry``（borderwidth=0），因此不会再出现
+    「外层圆角框 + 内层方框」的双边框。用法与 Entry 基本兼容，常用方法
+    （get / insert / delete / configure / bind / focus_set / select_range）
+    都转发到内部 ``entry``。
+    """
+
+    def __init__(self, master, textvariable: tk.StringVar | None = None,
+                 width: int = 20, scale: float = 1.0, bg: str | None = None,
+                 font_size: int = theme.FONT_SIZE_NOTE,
+                 padding: int | None = None, radius: int | None = None,
+                 show: str | None = None, state: str = "normal"):
+        bg = bg or theme.token("CARD")
+        super().__init__(master, bg=bg)
+        self.scale = scale
+        self.bg = bg
+        self.var = textvariable if textvariable is not None else tk.StringVar()
+        pad = max(2, int(round(2 * scale))) if padding is None else padding
+        radius = max(6, int(round(theme.RADIUS_S * scale))) \
+            if radius is None else radius
+        self._card = RoundedCard(
+            self, radius=radius, bg=theme.token("ENTRY_BG"),
+            border=theme.token("BORDER"), outer_bg=bg, padding=pad,
+            shadow=False)
+        self._card.pack(fill="both", expand=True)
+        self.body = self._card.body
+        entry_opts = {
+            "textvariable": self.var, "width": width,
+            "style": "Field.TEntry",
+            "font": (theme.FONT_FAMILY, font_size), "state": state,
+        }
+        if show is not None:
+            entry_opts["show"] = show
+        self.entry = ttk.Entry(self.body, **entry_opts)
+        self.entry.pack(side="left", fill="both", expand=True)
+        self.entry.bind("<FocusIn>", self._on_focus_in, add="+")
+        self.entry.bind("<FocusOut>", self._on_focus_out, add="+")
+        # 点在外层圆角留白上时也把光标送进内部 Entry。
+        super().bind("<Button-1>", lambda _event: self.entry.focus_set(),
+                     add="+")
+
+    def _on_focus_in(self, _event=None) -> None:
+        self._card.set_colors(border=theme.token("FIELD_FOCUS"))
+
+    def _on_focus_out(self, _event=None) -> None:
+        self._card.set_colors(border=theme.token("BORDER"))
+
+    def set_colors(self, bg: str | None = None, border: str | None = None,
+                   outer_bg: str | None = None) -> None:
+        if outer_bg is not None:
+            self.bg = outer_bg
+            super().configure(bg=outer_bg)
+        if bg is not None:
+            self._card.set_colors(bg=bg)
+        if border is not None:
+            self._card.set_colors(border=border)
+        if outer_bg is not None:
+            self._card.set_colors(outer_bg=outer_bg)
+
+    def set_bg(self, color: str) -> None:
+        self.bg = color
+        super().configure(bg=color)
+        self._card.set_colors(bg=theme.token("ENTRY_BG"),
+                              border=theme.token("BORDER"),
+                              outer_bg=color)
+
+    # -- Entry 兼容接口 -----------------------------------------------------
+    def get(self) -> str:
+        return self.entry.get()
+
+    def set(self, value: str) -> None:
+        self.entry.delete(0, "end")
+        self.entry.insert(0, str(value))
+
+    def insert(self, index, text):
+        return self.entry.insert(index, text)
+
+    def delete(self, first, last=None):
+        return self.entry.delete(first, last)
+
+    def icursor(self, index):
+        return self.entry.icursor(index)
+
+    def index(self, index):
+        return self.entry.index(index)
+
+    def select_range(self, start, end):
+        return self.entry.select_range(start, end)
+
+    def select_clear(self):
+        return self.entry.select_clear()
+
+    def focus_set(self):
+        return self.entry.focus_set()
+
+    def bind(self, sequence=None, func=None, add=None):
+        return self.entry.bind(sequence, func, add)
+
+    def configure(self, **kwargs):
+        entry_keys = ("state", "foreground", "show", "font",
+                      "textvariable", "justify")
+        entry_opts = {key: kwargs.pop(key) for key in entry_keys
+                      if key in kwargs}
+        if entry_opts:
+            if "textvariable" in entry_opts:
+                self.var = entry_opts["textvariable"]
+            self.entry.configure(**entry_opts)
+        if kwargs:
+            super().configure(**kwargs)
+
+    config = configure
+
+    def cget(self, key: str):
+        if key in ("state", "foreground", "show", "font", "textvariable",
+                   "justify"):
+            return self.entry.cget(key)
+        return super().cget(key)
+
+    def __getattr__(self, name):
+        entry = self.__dict__.get("entry")
+        if entry is not None:
+            return getattr(entry, name)
+        raise AttributeError(name)
+
+
 def style_window(window: tk.Misc, dark: bool | None = None,
                  rounded: bool = True) -> None:
     """Windows 11 原生窗口圆角 + 深色标题栏（老系统静默忽略）。"""
@@ -595,6 +733,231 @@ def style_window(window: tk.Misc, dark: bool | None = None,
                                       ctypes.sizeof(flag))
     except Exception:  # noqa: BLE001 — 非 Win11 / 无 DWM 时保持系统默认
         pass
+
+
+class SlimScrollbar(tk.Canvas):
+    """参考图风格的细滚动条：浅色圆角轨道 + 深墨圆角滑块 + 白色猫爪。
+
+    接口与 ``ttk.Scrollbar`` 保持兼容（``set`` / ``get`` / ``command``），
+    因此可以直接替换 Treeview、Text、Canvas、Listbox 的原生滚动条。
+    竖向滑块较矮时自动收成纯色药丸，避免猫爪被压扁。
+    """
+
+    def __init__(self, master, orient: str = "vertical", command=None,
+                 *, width: int = 12, bg: str | None = None,
+                 variant: str = "default", scale: float = 1.0):
+        self.orient = "horizontal" if str(orient).startswith("h") else "vertical"
+        self.command = command
+        self.variant = variant
+        self.scale = scale
+        self.thickness = max(8, int(round(width * scale)))
+        if bg is None:
+            try:
+                bg = str(master.cget("bg"))
+            except tk.TclError:
+                bg = theme.token("CARD")
+        self.bg = bg
+        self._first = 0.0
+        self._last = 1.0
+        self._drag_offset = 0.0
+        self._dragging = False
+        self._hover = False
+        self._paw_photo = None
+        if self.orient == "vertical":
+            super().__init__(master, width=self.thickness, bg=bg,
+                             highlightthickness=0, bd=0, takefocus=0,
+                             cursor="arrow")
+        else:
+            super().__init__(master, height=self.thickness, bg=bg,
+                             highlightthickness=0, bd=0, takefocus=0,
+                             cursor="arrow")
+        self.bind("<Configure>", self._redraw)
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<MouseWheel>", self._on_wheel)
+
+    # -- ttk.Scrollbar 兼容接口 -------------------------------------------
+    def set(self, first, last) -> None:
+        try:
+            first, last = float(first), float(last)
+        except (TypeError, ValueError):
+            first, last = 0.0, 1.0
+        self._first = max(0.0, min(1.0, first))
+        self._last = max(self._first, min(1.0, last))
+        self._redraw()
+
+    def get(self):
+        return self._first, self._last
+
+    def configure(self, **kwargs):
+        command = kwargs.pop("command", None)
+        if command is not None:
+            self.command = command
+        bg = kwargs.pop("bg", None)
+        if bg is not None:
+            self.bg = str(bg)
+        return super().configure(bg=self.bg, **kwargs)
+
+    config = configure
+
+    # -- 绘制 -------------------------------------------------------------
+    def _extent(self) -> tuple[int, int, int, int]:
+        """返回轨道可用区域与圆角。"""
+        pad = max(2, int(round(2 * self.scale)))
+        if self.orient == "vertical":
+            w = max(1, self.winfo_width())
+            h = max(1, self.winfo_height())
+            return pad, pad, w - pad, h - pad
+        w = max(1, self.winfo_width())
+        h = max(1, self.winfo_height())
+        return pad, pad, w - pad, h - pad
+
+    def _colors(self) -> tuple[str, str, str]:
+        if self.variant == "console":
+            return (theme.token("LOG_BG"), theme.token("CONSOLE_SCROLL"),
+                    theme.token("LOG_HEAD_FG"))
+        return (theme.token("SCROLL_TRACK"), theme.token("SCROLL_THUMB"),
+                theme.token("SCROLL_THUMB_FG"))
+
+    def _redraw(self, _event=None) -> None:
+        self.delete("all")
+        self._paw_photo = None
+        if self.winfo_width() < 3 or self.winfo_height() < 3:
+            return
+        track, thumb, paw_fg = self._colors()
+        x1, y1, x2, y2 = self._extent()
+        radius = max(2, min(self.thickness / 2 - 1,
+                            (y2 - y1) / 2 if self.orient == "vertical"
+                            else (x2 - x1) / 2))
+        if self.orient == "vertical":
+            cx = (x1 + x2) / 2
+            tx1, tx2 = cx - (self.thickness - 2 * 2) / 2, \
+                cx + (self.thickness - 2 * 2) / 2
+            round_rect(self, tx1, y1, tx2, y2, radius, fill=track,
+                       outline="", tags=("track",))
+        else:
+            cy = (y1 + y2) / 2
+            ty1, ty2 = cy - (self.thickness - 2 * 2) / 2, \
+                cy + (self.thickness - 2 * 2) / 2
+            round_rect(self, x1, ty1, x2, ty2, radius, fill=track,
+                       outline="", tags=("track",))
+
+        visible = self._last - self._first
+        if visible >= 0.9995:
+            return
+        if self.orient == "vertical":
+            track_len = max(1.0, y2 - y1)
+            min_len = max(20.0, self.thickness * 1.7)
+            thumb_len = max(min_len, visible * track_len)
+            top = y1 + self._first * track_len
+            bottom = top + thumb_len
+            if bottom > y2:
+                top, bottom = y2 - thumb_len, y2
+            cx = (x1 + x2) / 2
+            pad = max(1.0, 1.0 * self.scale)
+            half = max(2.0, (self.thickness - 2 * 2) / 2 - pad)
+            fill = _mix(thumb, "#FFFFFF", 0.10) if self._hover else thumb
+            round_rect(self, cx - half, top, cx + half, bottom,
+                       min(half, (bottom - top) / 2), fill=fill,
+                       outline="", tags=("thumb",))
+            paw_size = int(max(7, min(half * 1.55, thumb_len * 0.50)))
+            if bottom - top >= paw_size + 8:
+                self._paw_photo = icon("paw", paw_size, paw_fg)
+                self.create_image(cx, (top + bottom) / 2,
+                                  image=self._paw_photo, tags=("thumb",))
+        else:
+            track_len = max(1.0, x2 - x1)
+            min_len = max(20.0, self.thickness * 1.7)
+            thumb_len = max(min_len, visible * track_len)
+            left = x1 + self._first * track_len
+            right = left + thumb_len
+            if right > x2:
+                left, right = x2 - thumb_len, x2
+            cy = (y1 + y2) / 2
+            pad = max(1.0, 1.0 * self.scale)
+            half = max(2.0, (self.thickness - 2 * 2) / 2 - pad)
+            fill = _mix(thumb, "#FFFFFF", 0.10) if self._hover else thumb
+            round_rect(self, left, cy - half, right, cy + half,
+                       min(half, (right - left) / 2), fill=fill,
+                       outline="", tags=("thumb",))
+
+    def _thumb_span(self) -> tuple[float, float, float, float]:
+        """返回滑块在当前画布上的起止位置（像素）。"""
+        x1, y1, x2, y2 = self._extent()
+        visible = max(0.0, self._last - self._first)
+        if self.orient == "vertical":
+            track_len = max(1.0, y2 - y1)
+            thumb_len = max(max(20.0, self.thickness * 1.7),
+                            visible * track_len)
+            top = y1 + self._first * track_len
+            if top + thumb_len > y2:
+                top = y2 - thumb_len
+            return y1, y2, top, top + thumb_len
+        track_len = max(1.0, x2 - x1)
+        thumb_len = max(max(20.0, self.thickness * 1.7), visible * track_len)
+        left = x1 + self._first * track_len
+        if left + thumb_len > x2:
+            left = x2 - thumb_len
+        return x1, x2, left, left + thumb_len
+
+    # -- 交互 -------------------------------------------------------------
+    def _on_enter(self, _event=None) -> None:
+        self._hover = True
+        self._redraw()
+
+    def _on_leave(self, _event=None) -> None:
+        self._hover = False
+        self._redraw()
+
+    def _on_press(self, event) -> str:
+        if self.command is None or self._last - self._first >= 0.9995:
+            return "break"
+        start, end, lo, hi = self._thumb_span()
+        pos = event.y if self.orient == "vertical" else event.x
+        self._dragging = True
+        if lo <= pos <= hi:
+            self._drag_offset = pos - lo
+        else:
+            self._drag_offset = (hi - lo) / 2
+            self._jump(pos - self._drag_offset)
+        return "break"
+
+    def _on_drag(self, event) -> str:
+        if not self._dragging or self.command is None:
+            return "break"
+        pos = event.y if self.orient == "vertical" else event.x
+        self._jump(pos - self._drag_offset)
+        return "break"
+
+    def _on_release(self, _event=None) -> None:
+        self._dragging = False
+
+    def _jump(self, thumb_start: float) -> None:
+        start, end, _lo, _hi = self._thumb_span()
+        track_len = max(1.0, end - start)
+        before = max(0.0, self._first)
+        visible = self._last - self._first
+        # 滑块中心落在点击位置；命令按标准 scrollbar 的 moveto 协议发送
+        target = max(0.0, min(1.0 - visible,
+                               (thumb_start - start) / track_len))
+        if abs(target - before) > 1e-6:
+            self.command("moveto", str(target))
+
+    def _on_wheel(self, event) -> str:
+        if self.command is not None:
+            self.command("scroll", -1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def set_bg(self, color: str) -> None:
+        self.bg = color
+        self.configure(bg=color)
+        self._redraw()
+
+    def refresh(self) -> None:
+        self._redraw()
 
 
 class Tooltip:
@@ -1094,7 +1457,8 @@ class RoundButton(tk.Canvas):
                  height: int = theme.CONTROL_MD, pad: tuple[int, int] = (14, 14),
                  icon_size: int = theme.ICON_MD, radius: int = theme.RADIUS_M,
                  tooltip: str = "", font_size: int = theme.FONT_SIZE_NOTE,
-                 bg: str | None = None, bold: bool = False):
+                 bg: str | None = None, bold: bool = False,
+                 icon_color: str | None = None):
         if isinstance(pad, (int, float)):
             pad = (pad, pad)
         bg = bg or theme.token("BG")
@@ -1102,6 +1466,7 @@ class RoundButton(tk.Canvas):
         self.kind = kind
         self.command = command
         self.icon_name = icon_name
+        self.icon_color = icon_color
         self._mg_i18n_source = text
         self.text = i18n.tr(text)
         self.height = int(round(height * scale))
@@ -1145,9 +1510,9 @@ class RoundButton(tk.Canvas):
         self.itemconfigure(self._shape, fill=fill, outline=border)
         # 纯图标 ghost 按钮静默时用次级文字色，悬停再回到主文字色：
         # 顶栏一排黑色图标会抢标题的注意力，弱化后层级更清楚。
-        icon_fg = fg
-        if (self.kind == "ghost" and not self.text and self._enabled
-                and not self._hover and not self._pressed):
+        icon_fg = self.icon_color or fg
+        if (self.icon_color is None and self.kind == "ghost" and not self.text
+                and self._enabled and not self._hover and not self._pressed):
             icon_fg = (theme.token("LOG_HEAD_MUTED")
                        if theme.is_dark_color(str(self["bg"]))
                        else theme.token("MUTED"))
@@ -1207,6 +1572,11 @@ class RoundButton(tk.Canvas):
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    def set_icon_color(self, color: str | None) -> None:
+        """覆盖图标颜色（下拉字段的猫爪随焦点/选中态变深）。"""
+        self.icon_color = color
+        self._rebuild()
 
     def set_text(self, text: str, icon_name: str | None = None) -> None:
         self._mg_i18n_source = text
@@ -1629,6 +1999,215 @@ def _fuzzy_match(query: str, text: str) -> bool:
     return True
 
 
+class _DropdownPanel(tk.Frame):
+    """参考图风格的下拉面板：圆角浅灰底、分组标题、选中行灰色药丸。
+
+    单独做成一个类，ReadonlySelect / SearchableCombo 共用同一套视觉；
+    面板仍然内嵌在宿主窗口里（不是 Toplevel），方便点击外部自动收起。
+    """
+
+    def __init__(self, host, rows, selected_value, *, x: int, y: int,
+                 width: int, height: int, scale: float, font: tkfont.Font,
+                 outer_bg: str, on_pick, on_hover=None):
+        super().__init__(host, bg=outer_bg, bd=0, highlightthickness=0)
+        self.rows = list(rows)
+        self.font = font
+        self.scale = scale
+        self.outer_bg = outer_bg
+        self.on_pick = on_pick
+        self.on_hover = on_hover
+        self.pad = max(6, int(round(6 * scale)))
+        self.row_h = max(int(round(30 * scale)),
+                         int(font.metrics("linespace")) + int(round(14 * scale)))
+        self.radius = max(8, int(round(14 * scale)))
+        self.bar_w = max(8, int(round(10 * scale))) if rows else 0
+        self.visible = max(1, (height - self.pad * 2) // self.row_h)
+        self.top = 0
+        self.selected_index = self._find(selected_value)
+        self.active_index = self.selected_index
+        if self.active_index is None:
+            self.active_index = next(
+                (i for i, (_t, value) in enumerate(self.rows)
+                 if value is not None), None)
+        self._scrollbar = None
+        self._images = []
+        self.canvas = tk.Canvas(self, bg=outer_bg, bd=0,
+                                highlightthickness=0, width=width,
+                                height=height)
+        self.canvas.pack(fill="both", expand=True)
+        if len(self.rows) > self.visible:
+            self._scrollbar = SlimScrollbar(
+                self, orient="vertical", command=self._on_scroll,
+                width=self.bar_w, bg=theme.token("MENU_BG"), scale=scale)
+            self._scrollbar.place(x=width - self.pad - self.bar_w,
+                                  y=self.pad, width=self.bar_w,
+                                  height=max(1, height - self.pad * 2))
+            try:
+                tk.Misc.lift(self._scrollbar)
+            except tk.TclError:
+                pass
+        self._ensure_visible(self.active_index)
+        # Canvas 内部的点击/悬停由面板自己处理；滚动条是子控件，不会抢错事件。
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        self.bind("<MouseWheel>", self._on_wheel)
+        self.canvas.bind("<Configure>", self._on_configure)
+        self.after_idle(self._redraw)
+
+    # -- 数据 -------------------------------------------------------------
+    def _find(self, value) -> int | None:
+        for index, (_text, row_value) in enumerate(self.rows):
+            if row_value == value:
+                return index
+        return None
+
+    def value_at(self, index: int):
+        if 0 <= index < len(self.rows):
+            return self.rows[index][1]
+        return None
+
+    def move(self, delta: int) -> None:
+        if self.active_index is None or not self.rows:
+            return
+        index = self.active_index
+        for _ in range(len(self.rows)):
+            index = (index + delta) % len(self.rows)
+            if self.value_at(index) is not None:
+                break
+        self.active_index = index
+        self._ensure_visible(index)
+        self._redraw()
+
+    def set_active(self, index: int | None) -> None:
+        self.active_index = index
+        self._redraw()
+
+    def _ensure_visible(self, index: int | None) -> None:
+        if index is None:
+            return
+        if index < self.top:
+            self.top = index
+        elif index >= self.top + self.visible:
+            self.top = index - self.visible + 1
+        self.top = max(0, min(self.top, max(0, len(self.rows)
+                                              - self.visible)))
+
+    # -- 滚动 -------------------------------------------------------------
+    def _on_scroll(self, *args) -> None:
+        if not self.rows:
+            return
+        if args and args[0] == "moveto":
+            self.top = int(round(float(args[1]) * len(self.rows)))
+        elif args and args[0] == "scroll":
+            step = int(args[1])
+            self.top += step
+        max_top = max(0, len(self.rows) - self.visible)
+        self.top = max(0, min(self.top, max_top))
+        self._redraw()
+
+    def _on_wheel(self, event) -> str:
+        if len(self.rows) > self.visible:
+            self.top += -1 if event.delta > 0 else 1
+            max_top = max(0, len(self.rows) - self.visible)
+            self.top = max(0, min(self.top, max_top))
+            self._redraw()
+        return "break"
+
+    # -- 交互 -------------------------------------------------------------
+    def _index_at(self, event_y: int) -> int | None:
+        if event_y < self.pad:
+            return None
+        index = self.top + (event_y - self.pad) // self.row_h
+        if self.top <= index < min(len(self.rows), self.top + self.visible):
+            return index
+        return None
+
+    def _on_click(self, event) -> str:
+        index = self._index_at(event.y)
+        value = self.value_at(index) if index is not None else None
+        if value is not None:
+            self.on_pick(value)
+        return "break"
+
+    def _on_motion(self, event) -> None:
+        index = self._index_at(event.y)
+        if index is None:
+            return
+        if self.value_at(index) is None:
+            return
+        if index != self.active_index:
+            self.active_index = index
+            self._redraw()
+            if self.on_hover is not None:
+                value = self.value_at(index)
+                if value is not None:
+                    self.on_hover(value)
+
+    def _on_configure(self, _event=None) -> None:
+        # 宽度 / 高度变化都重画；首帧画布很窄时，选中行药丸会只画出一小截。
+        height = max(1, self.winfo_height())
+        visible = max(1, (height - self.pad * 2) // self.row_h)
+        if visible != self.visible:
+            self.visible = visible
+        self._redraw()
+
+    # -- ?? 绘制 -------------------------------------------------------------
+    def _redraw(self) -> None:
+        try:
+            width = max(3, self.canvas.winfo_width())
+            height = max(3, self.canvas.winfo_height())
+        except tk.TclError:
+            return
+        self.canvas.delete("all")
+        self._images = []
+        shadow = _mix(self.outer_bg, "#000000", 0.10)
+        round_rect(self.canvas, 2, 3, width - 2, height - 1,
+                   self.radius, fill=shadow, outline="")
+        round_rect(self.canvas, 1, 1, width - 3, height - 3,
+                   self.radius, fill=theme.token("MENU_BG"),
+                   outline=theme.token("MENU_BORDER"), width=1)
+        row_right = width - self.pad
+        if self._scrollbar is not None:
+            row_right -= self.bar_w + self.pad
+        for index in range(self.top, min(len(self.rows),
+                                         self.top + self.visible)):
+            text, value = self.rows[index]
+            y = self.pad + (index - self.top) * self.row_h
+            cy = y + self.row_h / 2
+            if value is None:
+                self.canvas.create_text(
+                    self.pad + int(round(8 * self.scale)), cy,
+                    text=text, anchor="w", fill=theme.token("TEXT_WEAK"),
+                    font=self.font)
+                continue
+            selected = index == self.selected_index
+            active = index == self.active_index
+            if selected or active:
+                fill = (theme.token("MENU_ROW_SELECTED") if selected
+                        else theme.token("MENU_ROW_HOVER"))
+                round_rect(self.canvas, self.pad, y + 2, row_right,
+                           y + self.row_h - 2,
+                           max(4, int(round(8 * self.scale))),
+                           fill=fill, outline="")
+            text_x = self.pad + int(round(12 * self.scale))
+            if selected:
+                size = max(14, int(round(18 * self.scale)))
+                left = self.pad + int(round(8 * self.scale))
+                check = icon("check", max(9, int(round(size * 0.78))),
+                             theme.token("TEXT"))
+                self._images.append(check)
+                self.canvas.create_image(left + size / 2, cy, image=check)
+                text_x = left + size + int(round(6 * self.scale))
+            color = theme.token("TEXT")
+            self.canvas.create_text(text_x, cy, text=text, anchor="w",
+                                    fill=color, font=self.font)
+        if self._scrollbar is not None:
+            self._scrollbar.set(
+                self.top / max(1, len(self.rows)),
+                min(1.0, (self.top + self.visible) / max(1, len(self.rows))))
+
+
 class SearchableCombo(tk.Frame):
     """既可下拉选择、又能输入关键词过滤的输入框（支持分组标题）。
 
@@ -1642,12 +2221,14 @@ class SearchableCombo(tk.Frame):
 
     def __init__(self, master, options, variable: tk.StringVar | None = None,
                  command=None, scale: float = 1.0, bg: str | None = None,
-                 font_size: int = theme.FONT_SIZE_NOTE, width: int = 22):
+                 font_size: int = theme.FONT_SIZE_NOTE, width: int = 22,
+                 readonly: bool = False, shell: bool = False):
         bg = bg or theme.token("CARD")
         super().__init__(master, bg=bg)
         self.scale = scale
         self.bg = bg
         self.command = command
+        self.readonly = bool(readonly)
         self.font = tkfont.Font(family=theme.FONT_FAMILY, size=font_size)
         self.font_size = font_size
         self._items = []
@@ -1666,6 +2247,7 @@ class SearchableCombo(tk.Frame):
         self._value = ""
         self._popup: tk.Frame | None = None
         self._listbox: tk.Listbox | None = None
+        self._panel: _DropdownPanel | None = None
         self._rows: list[tuple[str, str | None]] = []
         self._enabled = True
         self._height = max(theme.CONTROL_XS,
@@ -1673,15 +2255,31 @@ class SearchableCombo(tk.Frame):
         self._suppress_focus = False
         self._outside_bind: str | None = None
 
-        self.entry = ttk.Entry(self, textvariable=self.var,
-                               width=width, style="Combo.TEntry",
-                               font=(theme.FONT_FAMILY, font_size))
+        # shell=True 时控件自带参考图同款圆角字段，供只读下拉和独立使用；
+        # 步骤对话框保留原来的外层容器，避免重复描边。
+        self._shell = None
+        field_parent = self
+        field_bg = bg
+        field_pad = max(1, int(round(2 * scale)))
+        if shell:
+            self._shell = RoundedCard(
+                self, radius=max(6, int(round(theme.RADIUS_S * scale))),
+                bg=theme.token("ENTRY_BG"), border=theme.token("BORDER"),
+                outer_bg=bg, padding=field_pad, shadow=False)
+            self._shell.pack(fill="both", expand=True)
+            field_parent = self._shell.body
+            field_bg = theme.token("ENTRY_BG")
+
+        self.entry = ttk.Entry(
+            field_parent, textvariable=self.var, width=width,
+            style="Field.TEntry", font=(theme.FONT_FAMILY, font_size),
+            state="readonly" if self.readonly else "normal")
         self.entry.pack(side="left", fill="x", expand=True)
-        self.btn = RoundButton(self, "", "chevron_down", self._toggle_popup,
-                               kind="ghost", scale=scale, bg=bg,
+        self.btn = RoundButton(field_parent, "", "paw", self._toggle_popup,
+                               kind="ghost", scale=scale, bg=field_bg,
                                height=self._height, pad=theme.SPACE_4,
-                               icon_size=theme.ICON_XS,
-                               tooltip="展开 / 收起指令类型")
+                               icon_size=theme.ICON_SM,
+                               tooltip=i18n.tr("展开 / 收起选项"))
         self.btn.pack(side="right", padx=(2, 0))
         self.entry.bind("<KeyRelease>", self._on_key)
         self.entry.bind("<Down>", self._on_down)
@@ -1691,7 +2289,18 @@ class SearchableCombo(tk.Frame):
         self.entry.bind("<Escape>", self._on_escape)
         self.entry.bind("<FocusIn>", self._on_focus_in)
         self.entry.bind("<FocusOut>", self._on_focus_out)
+        if self._shell is not None:
+            self.entry.bind(
+                "<FocusIn>",
+                lambda e: self._shell.set_colors(
+                    border=theme.token("FIELD_FOCUS")), add="+")
+            self.entry.bind(
+                "<FocusOut>",
+                lambda e: self._shell.set_colors(
+                    border=theme.token("BORDER")), add="+")
         self.bind("<Destroy>", self._on_destroy)
+        self._sync_value_from_var()
+        self._sync_paw()
 
     # -- 兼容 Combobox 的常用接口 ------------------------------------------
     def set(self, value: str) -> None:
@@ -1703,11 +2312,31 @@ class SearchableCombo(tk.Frame):
             if text in (option.value, option.label, option.source_label):
                 self._value = option.value
                 self.var.set(option.label)
+                self._sync_paw()
                 return
         self.var.set(text)
 
     def get(self) -> str:
         return self.var.get()
+
+    def _sync_value_from_var(self) -> None:
+        text = str(self.var.get()).strip()
+        for option in self._items:
+            if text in (option.value, option.label, option.source_label):
+                self._value = option.value
+                return
+        self._value = ""
+
+    def _sync_paw(self, focused: bool = False) -> None:
+        if not hasattr(self, "btn"):
+            return
+        if not self._enabled:
+            color = theme.token("TEXT_WEAK")
+        elif focused or self._value:
+            color = theme.token("TEXT")
+        else:
+            color = theme.token("MUTED")
+        self.btn.set_icon_color(color)
 
     @property
     def value(self) -> str:
@@ -1724,10 +2353,13 @@ class SearchableCombo(tk.Frame):
         state = kwargs.pop("state", None)
         if state is not None:
             self._enabled = str(state) != "disabled"
-            self.entry.configure(state="normal" if self._enabled else "disabled")
+            entry_state = ("readonly" if self.readonly else "normal") \
+                if self._enabled else "disabled"
+            self.entry.configure(state=entry_state)
             self.btn.set_enabled(self._enabled)
             if not self._enabled:
                 self._hide_popup()
+            self._sync_paw()
         if kwargs:
             super().configure(**kwargs)
 
@@ -1735,6 +2367,23 @@ class SearchableCombo(tk.Frame):
 
     def focus_set(self) -> None:  # type: ignore[override]
         self.entry.focus_set()
+
+    def set_bg(self, color: str) -> None:
+        """主题切换：同步外层字段与 paw 按钮的底色。"""
+        self.bg = color
+        self.configure(bg=color)
+        if self._shell is not None:
+            self._shell.set_colors(
+                bg=theme.token("ENTRY_BG"), border=theme.token("BORDER"),
+                outer_bg=color)
+            self.btn.set_bg(theme.token("ENTRY_BG"))
+        else:
+            self.btn.set_bg(color)
+        self._hide_popup()
+        self._sync_paw()
+
+    def refresh(self) -> None:
+        self.set_bg(self.bg)
 
     # -- 下拉列表 ----------------------------------------------------------
     def _label_of(self, value: str) -> str:
@@ -1779,9 +2428,13 @@ class SearchableCombo(tk.Frame):
         """计算下拉面板在宿主窗口内的位置与高度（放不下就向上展开）。"""
         host = self.winfo_toplevel()
         line = self.font.metrics("linespace")
-        row_h = line + 2
-        width = max(self.winfo_width(), int(round(200 * self.scale)))
-        desired = min(len(self._rows), 10) * row_h + 6
+        row_h = max(int(round(30 * self.scale)),
+                    line + int(round(14 * self.scale)))
+        pad = max(6, int(round(6 * self.scale)))
+        width = max(self.winfo_width(), int(round(240 * self.scale)))
+        # 最多显示 6 行，其余滚动：保持参考图的轻量面板，也避免在较矮的
+        # 步骤对话框里盖住下方备注输入框。
+        desired = min(len(self._rows), 6) * row_h + pad * 2
         x = self.winfo_rootx() - host.winfo_rootx()
         below = self.winfo_rooty() - host.winfo_rooty() \
             + self.winfo_height() + 2
@@ -1793,7 +2446,7 @@ class SearchableCombo(tk.Frame):
             y, height = above - desired, desired
         else:
             y = below
-            height = max(row_h + 6, host_h - y - 4)
+            height = max(row_h + pad * 2, host_h - y - 4)
         return x, y, width, height
 
     def _show_popup(self, query: str) -> None:
@@ -1801,53 +2454,19 @@ class SearchableCombo(tk.Frame):
             return
         self._rows = self._rows_for(query)
         self._destroy_popup()
-        # 下拉面板做成对话框里的内嵌 Frame（不是独立 Toplevel）：
-        # 这样不会抢 grab，点界面其它地方能正常触发点击并顺手收起。
+        # 面板内嵌在宿主窗口里（不是 Toplevel）：不会抢 grab，点其它地方
+        # 能照常触发点击并顺手收起。
         host = self.winfo_toplevel()
         x, y, width, height = self._popup_geometry()
-        row_h = self.font.metrics("linespace") + 2
-        visible = max(1, (height - 6) // row_h)
-        frame = tk.Frame(host, bg=MENU_BORDER, bd=0, highlightthickness=0)
-        inner = tk.Frame(frame, bg=MENU_CARD)
-        inner.pack(fill="both", expand=True, padx=1, pady=1)
-        self._popup = frame
-        self._listbox = tk.Listbox(
-            inner, bd=0, highlightthickness=0, relief="flat",
-            bg=MENU_CARD, fg=MENU_TEXT, selectbackground=MENU_HOVER,
-            selectforeground=MENU_TEXT, activestyle="none",
-            font=self.font, exportselection=False, takefocus=0)
-        self._listbox.pack(side="left", fill="both", expand=True)
-        if len(self._rows) > visible:
-            scroll = ttk.Scrollbar(inner, orient="vertical",
-                                   command=self._listbox.yview)
-            scroll.pack(side="right", fill="y")
-            self._listbox.configure(yscrollcommand=scroll.set)
-        for text, value in self._rows:
-            self._listbox.insert("end", f"  {text}" if value is None else
-                                 f"   {text}")
-            if value is None:
-                self._listbox.itemconfigure(
-                    "end", foreground=MENU_MUTED,
-                    background=_mix(MENU_CARD, MENU_TEXT, 0.05),
-                    selectbackground=_mix(MENU_CARD, MENU_TEXT, 0.05),
-                    selectforeground=MENU_MUTED)
-        # 当前值预高亮，打开就能看到上次选的类型；搜索后若原值不匹配，
-        # 默认落在第一条结果上，直接回车即可选中
-        active = self._index_of(self._value)
-        if active is None:
-            active = next((i for i, (_text, value) in enumerate(self._rows)
-                           if value is not None), None)
-        if active is not None:
-            self._listbox.selection_set(active)
-            self._listbox.activate(active)
-            self._listbox.see(active)
-            if active > 0 and self._row_value(active - 1) is None:
-                self._listbox.see(active - 1)   # 分组标题不要被滚出去
-        self._listbox.bind("<Button-1>", self._on_click)
-        self._listbox.bind("<Motion>", self._on_motion)
-        self._listbox.bind("<MouseWheel>", self._on_wheel)
-        frame.place(x=x, y=y, width=width, height=height)
-        frame.lift()
+        panel = _DropdownPanel(
+            host, self._rows, self._value, x=x, y=y, width=width,
+            height=height, scale=self.scale, font=self.font,
+            outer_bg=self.bg, on_pick=self._choose)
+        self._popup = panel
+        self._panel = panel
+        self._listbox = None
+        panel.place(x=x, y=y, width=width, height=height)
+        panel.lift()
         # 点面板之外的地方：先让点击照常落到目标控件，再收起下拉
         self._outside_bind = host.bind("<Button-1>", self._on_any_click,
                                        add="+")
@@ -1861,6 +2480,7 @@ class SearchableCombo(tk.Frame):
             except tk.TclError:
                 pass
         popup, self._popup = self._popup, None
+        self._panel = None
         self._listbox = None
         if popup is None:
             return
@@ -1893,8 +2513,8 @@ class SearchableCombo(tk.Frame):
         self._hide_popup()
 
     def _on_wheel(self, event) -> str:
-        if self._listbox is not None:
-            self._listbox.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        if self._panel is not None:
+            return self._panel._on_wheel(event)
         return "break"
 
     def _index_of(self, value: str) -> int | None:
@@ -1910,6 +2530,8 @@ class SearchableCombo(tk.Frame):
 
     # -- 交互 -------------------------------------------------------------
     def _on_key(self, event) -> None:
+        if self.readonly:
+            return
         if event.keysym in ("Down", "Up", "Return", "KP_Enter", "Escape",
                             "Tab", "Left", "Right", "Home", "End",
                             "Prior", "Next", "Shift_L", "Shift_R",
@@ -1929,24 +2551,14 @@ class SearchableCombo(tk.Frame):
     def _step(self, delta: int) -> None:
         if self._popup is None:
             self._show_popup("")
-        if self._listbox is None or not self._rows:
+        if self._panel is None or not self._rows:
             return
-        current = self._current_index()
-        index = current
-        for _ in range(len(self._rows)):
-            index = (index + delta) % len(self._rows)
-            if self._row_value(index) is not None:
-                break
-        self._listbox.selection_clear(0, "end")
-        self._listbox.selection_set(index)
-        self._listbox.activate(index)
-        self._listbox.see(index)
+        self._panel.move(delta)
 
     def _current_index(self) -> int:
-        if self._listbox is None:
+        if self._panel is None or self._panel.active_index is None:
             return -1
-        selection = self._listbox.curselection()
-        return int(selection[0]) if selection else -1
+        return int(self._panel.active_index)
 
     def _on_return(self, _event=None) -> str:
         if self._popup is not None:
@@ -1962,24 +2574,22 @@ class SearchableCombo(tk.Frame):
         return "break"
 
     def _on_click(self, event) -> str:
-        index = self._listbox.nearest(event.y) if self._listbox else -1
-        value = self._row_value(index)
+        if self._panel is None:
+            return "break"
+        index = self._panel._index_at(event.y)
+        value = self._row_value(index) if index is not None else None
         if value is not None:
             self._choose(value)
         return "break"
 
     def _on_motion(self, event) -> None:
-        if self._listbox is None:
-            return
-        index = self._listbox.nearest(event.y)
-        if self._row_value(index) is None:
-            return
-        self._listbox.selection_clear(0, "end")
-        self._listbox.selection_set(index)
+        if self._panel is not None:
+            self._panel._on_motion(event)
 
     def _choose(self, value: str) -> None:
         self._value = value
         self.var.set(self._label_of(value))
+        self._sync_paw()
         self._hide_popup()
         self._suppress_focus = True
         try:
@@ -1994,6 +2604,7 @@ class SearchableCombo(tk.Frame):
         self._suppress_focus = False
 
     def _on_focus_in(self, _event=None) -> None:
+        self._sync_paw(True)
         try:
             self.entry.select_range(0, "end")
         except tk.TclError:
@@ -2002,6 +2613,7 @@ class SearchableCombo(tk.Frame):
             self._show_popup("")
 
     def _on_focus_out(self, _event=None) -> None:
+        self.after(0, lambda: self._sync_paw(False))
         self.after(80, self._close_if_focus_left)
 
     def _close_if_focus_left(self) -> None:
@@ -2028,11 +2640,12 @@ class SearchableCombo(tk.Frame):
         super().destroy()
 
 
-class LocalizedCombobox(ttk.Combobox):
+class LocalizedCombobox(SearchableCombo):
     """只读下拉框：显示文字随语言变化，变量中始终保存内部源值。
 
     业务代码继续读写 ``variable``（例如 ``var_on_fail``）里的中文源值；
     界面上看到的是当前语言的译文。这样切换语言不会破坏保存逻辑。
+    视觉上和 SearchableCombo 一致：圆角字段、右侧猫爪、圆角下拉面板。
     """
 
     def __init__(self, master=None, *, values=(), variable=None, **kwargs):
@@ -2040,14 +2653,31 @@ class LocalizedCombobox(ttk.Combobox):
         self._source_var = variable if variable is not None else tk.StringVar()
         self._display_var = tk.StringVar()
         self._syncing = False
-        kwargs["values"] = [i18n.tr(value) for value in self._source_values]
-        kwargs["textvariable"] = self._display_var
-        super().__init__(master, **kwargs)
+        font = kwargs.pop("font", theme.FONT_NOTE)
+        font_size = font[1] if isinstance(font, (tuple, list)) and \
+            len(font) > 1 else theme.FONT_SIZE_NOTE
+        width = kwargs.pop("width", 18)
+        kwargs.pop("state", None)
+        kwargs.pop("textvariable", None)
+        options = [(source, i18n.tr(source), "", source)
+                   for source in self._source_values]
+        super().__init__(master, options, variable=self._display_var,
+                         readonly=True, shell=True, font_size=font_size,
+                         width=width, **kwargs)
         self._display_trace = self._display_var.trace_add(
             "write", self._on_display_change)
         self._source_trace = self._source_var.trace_add(
             "write", self._on_source_change)
         self._sync_display()
+        if self._source_var.get():
+            self.set(self._source_var.get())
+
+    def _rebuild_options(self) -> None:
+        self._items = [_ComboOption(source, i18n.tr(source), "",
+                                    source_label=source)
+                       for source in self._source_values]
+        self._group_order = [""]
+        self._sync_value_from_var()
 
     def _on_source_change(self, *_args) -> None:
         if self._syncing:
@@ -2060,6 +2690,7 @@ class LocalizedCombobox(ttk.Combobox):
         display = self._display_var.get()
         for source in self._source_values:
             if display in (source, i18n.tr(source)):
+                self._value = source
                 if self._source_var.get() != source:
                     self._syncing = True
                     try:
@@ -2067,9 +2698,13 @@ class LocalizedCombobox(ttk.Combobox):
                     finally:
                         self._syncing = False
                 return
+        self._value = ""
 
     def _sync_display(self) -> None:
         display = i18n.tr(self._source_var.get())
+        self._value = self._source_var.get()
+        if hasattr(self, "btn"):
+            self._sync_paw()
         if self._display_var.get() == display:
             return
         self._syncing = True
@@ -2078,15 +2713,85 @@ class LocalizedCombobox(ttk.Combobox):
         finally:
             self._syncing = False
 
+    def cget(self, key: str):
+        if key == "values":
+            return tuple(i18n.tr(value) for value in self._source_values)
+        return super().cget(key)
+
+    def configure(self, **kwargs):
+        values = kwargs.pop("values", None)
+        if values is not None:
+            self._source_values = [str(value) for value in values]
+            self._rebuild_options()
+            self._sync_display()
+        if kwargs:
+            super().configure(**kwargs)
+
+    config = configure
+
     def refresh_language(self) -> None:
-        self.configure(values=[i18n.tr(value) for value in self._source_values])
+        self._rebuild_options()
         self._sync_display()
+        self._hide_popup()
 
     def set(self, value: str) -> None:
         """按源值或当前译文选中。"""
         text = str(value)
         for source in self._source_values:
             if text in (source, i18n.tr(source)):
+                self._value = source
                 self._source_var.set(source)
+                self._sync_display()
                 return
         self._source_var.set(text)
+
+    def _on_destroy(self, event=None) -> None:
+        if event is not None and event.widget is not self:
+            return
+        for var, trace in ((self._display_var,
+                            getattr(self, "_display_trace", None)),
+                           (self._source_var,
+                            getattr(self, "_source_trace", None))):
+            if trace:
+                try:
+                    var.trace_remove("write", trace)
+                except (tk.TclError, ValueError):
+                    pass
+        super()._on_destroy(event)
+
+
+class ReadonlySelect(SearchableCombo):
+    """普通只读下拉框：值就是显示文字，用于语言 / 执行组等场景。"""
+
+    def __init__(self, master, values, variable: tk.StringVar | None = None,
+                 command=None, scale: float = 1.0, bg: str | None = None,
+                 font_size: int = theme.FONT_SIZE_NOTE, width: int = 18,
+                 **kwargs):
+        options = [(str(value), str(value), "") for value in values]
+        super().__init__(master, options, variable=variable,
+                         command=command, scale=scale, bg=bg,
+                         font_size=font_size, width=width, readonly=True,
+                         shell=True, **kwargs)
+
+    def cget(self, key: str):
+        if key == "values":
+            return tuple(option.label for option in self._items)
+        return super().cget(key)
+
+    def configure(self, **kwargs):
+        values = kwargs.pop("values", None)
+        if values is not None:
+            current = self.get()
+            self._items = [_ComboOption(str(value), str(value), "",
+                                        source_label=str(value))
+                           for value in values]
+            self._group_order = [""]
+            if current:
+                self.set(current)
+        if kwargs:
+            super().configure(**kwargs)
+
+    config = configure
+
+    def refresh_language(self) -> None:
+        self._hide_popup()
