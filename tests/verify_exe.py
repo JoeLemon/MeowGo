@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """打包产物验证：启动 dist 里的 exe，确认窗口真的出现，截图后关闭。
 
-按「进程 ID 属于刚启动的 exe」来找窗口：只按标题找会被同名的资源管理器
-窗口（比如正好开着 dist\\MeowGo 文件夹）蒙混过去。
+同时支持单文件夹（dist\\MeowGo\\MeowGo.exe）和单文件（dist\\MeowGo.exe）产物；
+两者都存在时优先验证单文件。按「进程 ID 属于刚启动的 exe」来找窗口：只按标题找
+会被同名的资源管理器窗口（比如正好开着 dist\\MeowGo 文件夹）蒙混过去。
 
 用法：
     python tests\\verify_exe.py
@@ -15,7 +16,9 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "dist", "MeowGo", "MeowGo.exe")
+ONEDIR_EXE = os.path.join(ROOT, "dist", "MeowGo", "MeowGo.exe")
+ONEFILE_EXE = os.path.join(ROOT, "dist", "MeowGo.exe")
+EXE = ONEFILE_EXE if os.path.exists(ONEFILE_EXE) else ONEDIR_EXE
 TITLE = "MeowGo"          # 窗口标题应当正是这个名字
 SW_RESTORE = 9
 
@@ -66,9 +69,12 @@ def main() -> int:
     if not os.path.exists(EXE):
         print(f"  FAIL  找不到打包产物：{EXE}")
         return 1
-    size = sum(os.path.getsize(os.path.join(base, name))
-               for base, _, names in os.walk(os.path.dirname(EXE))
-               for name in names)
+    if EXE == ONEFILE_EXE:
+        size = os.path.getsize(EXE)
+    else:
+        size = sum(os.path.getsize(os.path.join(base, name))
+                   for base, _, names in os.walk(os.path.dirname(EXE))
+                   for name in names)
     print(f"  INFO  产物大小 {size / 1024 / 1024:.1f} MB")
     print(f"  INFO  启动 {os.path.basename(EXE)}")
 

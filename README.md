@@ -582,9 +582,10 @@ python3 build.py
 `--skip-deps` 跳过装依赖、`--verify` 打包后冒烟自检、`--launcher` 生成双击启动脚本
 （macOS `.command` / Linux `.sh`）、`--name 名称` 改产物名、`--mirror 地址` 换 pip 镜像。
 
-产物：Windows 得到 `dist\MeowGo\MeowGo.exe`（单文件夹，约 170MB，含 OpenCV）；
+产物：Windows 默认得到 `dist\MeowGo\MeowGo.exe`（单文件夹，约 170MB，含 OpenCV）；
+加 `--onefile` 则只得到 `dist\MeowGo.exe`（单文件，无 `_internal`，首次启动会先解压到临时目录，稍慢）。
 macOS 额外得到 `dist\MeowGo.app`（Finder 双击；`MEOWGO_NO_APP=1` 可关闭）；
-Linux 得到 `dist\MeowGo\MeowGo`。执行组与截图会写到 exe 同目录下的
+Linux 默认得到 `dist\MeowGo\MeowGo`，单文件模式为 `dist\MeowGo`。执行组与截图会写到 exe 同目录下的
 `rpa_settings.json` 和 `images\`。
 
 也可以完全手动（旧方式）：

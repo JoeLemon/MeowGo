@@ -24,10 +24,15 @@
     --distpath 目录 PyInstaller 输出目录（默认 dist）
     -h              查看全部选项
 
-产物位置（单文件夹模式）：
-    Windows  dist/<名称>/<名称>.exe
-    macOS    dist/<名称>/<名称>（另附 dist/<名称>.app，可用 MEOWGO_NO_APP=1 关闭）
-    Linux    dist/<名称>/<名称>
+产物位置：
+    单文件夹（默认）
+        Windows  dist/<名称>/<名称>.exe
+        macOS    dist/<名称>/<名称>（另附 dist/<名称>.app，可用 MEOWGO_NO_APP=1 关闭）
+        Linux    dist/<名称>/<名称>
+    单文件（--onefile）
+        Windows  dist/<名称>.exe
+        macOS    dist/<名称>（另附 dist/<名称>.app，可用 MEOWGO_NO_APP=1 关闭）
+        Linux    dist/<名称>
 """
 
 from __future__ import annotations
@@ -230,6 +235,15 @@ def clean_artifacts() -> None:
             log(f"    已删除 {name}/")
 
 
+def artifact_path(args) -> str:
+    """返回产物主程序路径：单文件是 exe 本身，单文件夹是目录。"""
+    root = os.path.join(PROJECT_ROOT, args.distpath)
+    if args.onefile:
+        suffix = ".exe" if sys.platform.startswith("win") else ""
+        return os.path.join(root, args.name + suffix)
+    return os.path.join(root, args.name)
+
+
 def run_pyinstaller(python_exe: str, args, icon: "str | None") -> None:
     step("PyInstaller 打包")
     if not os.path.exists(os.path.join(PROJECT_ROOT, SPEC_FILE)):
@@ -248,18 +262,24 @@ def write_launcher(args) -> "str | None":
     if not args.launcher:
         return None
     step("生成启动脚本")
-    dist = os.path.join(PROJECT_ROOT, args.distpath, args.name)
-    if not os.path.isdir(dist):
-        fail(f"找不到产物目录 {dist}，无法生成启动脚本")
+    target = artifact_path(args)
+    if not os.path.exists(target):
+        fail(f"找不到产物 {target}，无法生成启动脚本")
     if sys.platform.startswith("win"):
         log("    Windows 下直接双击 <名称>.exe 即可，无需启动脚本")
         return None
+    if args.onefile:
+        launcher_dir = os.path.dirname(target)
+        exe_name = os.path.basename(target)
+    else:
+        launcher_dir = target
+        exe_name = args.name
     suffix = "command" if sys.platform == "darwin" else "sh"
-    path = os.path.join(dist, f"{args.name}.{suffix}")
+    path = os.path.join(launcher_dir, f"{args.name}.{suffix}")
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("#!/bin/bash\n"
                  'cd "$(dirname "$0")"\n'
-                 f"exec ./{args.name}\n")
+                 f"exec ./{exe_name}\n")
     os.chmod(path, 0o755)
     log(f"    [OK] 已生成 {os.path.relpath(path, PROJECT_ROOT)}（双击即可启动）")
     return path
@@ -268,15 +288,11 @@ def write_launcher(args) -> "str | None":
 def verify_artifact(args) -> None:
     """运行产物 --help，确认能正常起来。"""
     step("冒烟自检")
-    dist = os.path.join(PROJECT_ROOT, args.distpath, args.name)
-    if sys.platform.startswith("win"):
-        exe = os.path.join(dist, f"{args.name}.exe")
-    else:
-        exe = os.path.join(dist, args.name)
+    exe = artifact_path(args)
     if not os.path.exists(exe):
         fail(f"找不到产物 {exe}")
     log(f"    $ {exe} --help")
-    proc = subprocess.run([exe, "--help"], cwd=dist,
+    proc = subprocess.run([exe, "--help"], cwd=os.path.dirname(exe),
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if proc.returncode != 0:
         fail(f"自检失败：{exe} --help 返回退出码 {proc.returncode}")
@@ -285,17 +301,18 @@ def verify_artifact(args) -> None:
 
 def print_summary(args, started: float) -> None:
     step("打包完成")
-    dist = os.path.join(PROJECT_ROOT, args.distpath, args.name)
+    target = artifact_path(args)
     log(f"    平台   : {platform_label()} / {platform.machine()}")
     log(f"    模式   : {'单文件' if args.onefile else '单文件夹'}")
-    log(f"    产物   : {dist}")
-    if sys.platform.startswith("win"):
-        log(f"    主程序 : {os.path.join(dist, args.name + '.exe')}")
+    if args.onefile:
+        log(f"    单文件 : {target}")
     else:
-        log(f"    主程序 : {os.path.join(dist, args.name)}")
-        if sys.platform == "darwin" and not os.environ.get("MEOWGO_NO_APP"):
-            log(f"    应用包 : {os.path.join(PROJECT_ROOT, args.distpath, args.name + '.app')}"
-                "（Finder 双击运行；MEOWGO_NO_APP=1 可关闭）")
+        exe_name = args.name + (".exe" if sys.platform.startswith("win") else "")
+        log(f"    目录   : {target}")
+        log(f"    主程序 : {os.path.join(target, exe_name)}")
+    if sys.platform == "darwin" and not os.environ.get("MEOWGO_NO_APP"):
+        log(f"    应用包 : {os.path.join(PROJECT_ROOT, args.distpath, args.name + '.app')}"
+            "（Finder 双击运行；MEOWGO_NO_APP=1 可关闭）")
     log(f"    耗时   : {time.time() - started:.1f} 秒")
     log("")
     log("  说明：执行组配置（rpa_settings.json）、截图（images/）会写在 exe 同目录；")

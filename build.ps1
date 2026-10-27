@@ -24,6 +24,11 @@
     .\build.ps1
     默认打包：自动建虚拟环境、装依赖、转 .ico 图标、PyInstaller 单文件夹。
 
+.EXAMPLE
+    .\build.ps1 --onefile
+    单文件打包：只生成 dist\MeowGo.exe，不再带 _internal 文件夹；
+    首次启动会先解压到临时目录，启动速度比单文件夹模式稍慢。
+
 .NOTES
     首次运行如提示"禁止运行脚本"，执行：
         Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
