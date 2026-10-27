@@ -6687,21 +6687,21 @@ class SettingsDialog(BaseDialog):
             value=bool(settings.get("show_mini_bar", True)))
         uikit.Switch(self, self.var_mini, scale=parent.scale, bg=CARD).grid(
             row=4, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+            pady=parent.s(3))
 
         self.label("失败时保存屏幕截图", 5)
         self.var_shot = tk.BooleanVar(
             value=bool(settings.get("shot_on_fail", True)))
         uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
             row=5, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+            pady=parent.s(3))
 
         self.label("数据处理完成后写入结果文件", 6)
         self.var_results = tk.BooleanVar(
             value=bool(settings.get("save_results", True)))
         uikit.Switch(self, self.var_results, scale=parent.scale, bg=CARD).grid(
             row=6, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+            pady=parent.s(3))
 
         # 开机自启：开关状态直接反映注册表实况（Run 项在不在），
         # 不在 settings 里另存一份“真相”，避免两边不一致
@@ -6710,7 +6710,7 @@ class SettingsDialog(BaseDialog):
         uikit.Switch(self, self.var_autostart, scale=parent.scale,
                      bg=CARD).grid(
             row=7, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+            pady=parent.s(3))
 
         # 托盘：两个开关任一打开就会出现托盘图标；互不依赖
         self.label("启动后最小化至系统托盘", 8)
@@ -6719,7 +6719,7 @@ class SettingsDialog(BaseDialog):
         uikit.Switch(self, self.var_tray_min, scale=parent.scale,
                      bg=CARD).grid(
             row=8, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+            pady=parent.s(3))
 
         self.label("关闭窗口时最小化至系统托盘", 9)
         self.var_tray_close = tk.BooleanVar(
@@ -6727,7 +6727,7 @@ class SettingsDialog(BaseDialog):
         uikit.Switch(self, self.var_tray_close, scale=parent.scale,
                      bg=CARD).grid(
             row=9, column=1, sticky="w", padx=(0, parent.s(16)),
-            pady=parent.s(5))
+            pady=parent.s(3))
 
         # 说明文字横跨两列并自动换行，避免把左侧标签列撑得过宽
         tk.Label(self, text="相似度阈值越低，识别范围越宽，误匹配风险也越高。"

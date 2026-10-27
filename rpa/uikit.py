@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import font as tkfont, ttk
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import i18n, pixel_cat, theme
 
@@ -1267,10 +1267,10 @@ class Switch(tk.Canvas):
         self.scale = scale
         self.variable = variable
         self.command = command
-        self.track_w = max(32, int(round(44 * scale)))
-        self.track_h = max(19, int(round(24 * scale)))
-        self._margin = max(3, int(round(3 * scale)))
-        self._pad = max(2, int(round(2.6 * scale)))
+        self.track_w = max(46, int(round(48 * scale)))
+        self.track_h = max(24, int(round(26 * scale)))
+        self._margin = max(4, int(round(4 * scale)))
+        self._pad = max(2, int(round(2 * scale)))
         super().__init__(master,
                          width=self.track_w + self._margin * 2,
                          height=self.track_h + self._margin * 2,
@@ -1282,6 +1282,12 @@ class Switch(tk.Canvas):
         self._enabled = True
         self._anim_pos = 1.0 if self._on else 0.0
         self._anim_after: str | None = None
+        self._track_item: int | None = None
+        self._thumb_item: int | None = None
+        self._track_key = None
+        self._thumb_key = None
+        self._track_photo: ImageTk.PhotoImage | None = None
+        self._thumb_photo: ImageTk.PhotoImage | None = None
         self._trace = variable.trace_add("write", self._on_variable)
         self.bind("<Button-1>", self._toggle)
         self.bind("<space>", self._toggle)
@@ -1306,61 +1312,189 @@ class Switch(tk.Canvas):
         cy = (top + bottom) / 2
         return left, top, right, bottom, knob, cy
 
-    def _draw(self) -> None:
-        self.delete("all")
-        left, top, right, bottom, knob, cy = self._geometry()
+    def _track_spec(self) -> dict:
+        """当前状态对应的轨道 / 滑块配色。"""
         dark = theme.is_dark()
-
         if not self._enabled:
-            track = theme.token("HEADING_BG")
+            top = bottom = theme.token("HEADING_BG")
             border = theme.token("BORDER")
-            knob_fill = theme.token("BORDER")
-            knob_border = theme.token("BORDER_STRONG")
+            track_shadow = 70 if dark else 22
+            thumb = "#F7F5F2" if not dark else "#38332D"
+            thumb_border = theme.token("BORDER")
+            paw = theme.token("BORDER_STRONG")
+            thumb_shadow = 50 if dark else 18
         elif self._on:
-            track = (theme.token("ACCENT_STRONG") if self._hover
-                     else theme.token("ACCENT"))
+            base = (theme.token("ACCENT_STRONG") if self._hover
+                    else theme.token("ACCENT"))
+            top = _mix(base, "#FFFFFF", 0.05 if dark else 0.12)
+            bottom = _mix(base, "#000000", 0.10 if dark else 0.06)
             border = theme.token("ACCENT_STRONG")
-            knob_fill = "#FFF9F1" if not dark else "#F5F2ED"
-            knob_border = "#F2C38C" if not dark else "#FFD6A8"
+            track_shadow = 82 if dark else 36
+            thumb = "#F8F5F0" if dark else "#FFFFFF"
+            thumb_border = _mix(thumb, "#000000", 0.07 if not dark else 0.0)
+            if dark:
+                thumb_border = "#4A443C"
+            paw = theme.token("ACCENT_STRONG")
+            thumb_shadow = 95 if dark else 42
         else:
-            track = (theme.token("ACCENT_TINT") if self._hover
-                     else theme.token("HEADING_BG"))
-            border = (theme.token("ACCENT") if self._hover
-                      else theme.token("BORDER_STRONG"))
-            knob_fill = "#FFFFFF" if not dark else "#F5F2ED"
-            knob_border = theme.token("BORDER_STRONG")
+            heading = theme.token("HEADING_BG")
+            top = _mix(heading, "#FFFFFF", 0.04 if dark else 0.36)
+            bottom = heading
+            border = theme.token("BORDER_STRONG")
+            if self._hover:
+                top = _mix(top, theme.token("ACCENT_TINT"), 0.45)
+                bottom = _mix(bottom, theme.token("ACCENT_TINT"), 0.35)
+                border = theme.token("ACCENT")
+            track_shadow = 76 if dark else 24
+            thumb = "#F5F2ED" if dark else "#FFFFFF"
+            thumb_border = "#4A443C" if dark else _mix(thumb, "#000000", 0.06)
+            paw = "#7D756A" if dark else "#D8D3CB"
+            thumb_shadow = 88 if dark else 38
 
-        # 轨道：先描边再填充，避免 1px 圆角边缘发虚
-        radius = self.track_h / 2
-        round_rect(self, left, top, right, bottom, radius,
-                   fill=border, outline="")
-        inset = 1.0
-        round_rect(self, left + inset, top + inset,
-                   right - inset, bottom - inset, max(1, radius - inset),
-                   fill=track, outline="")
+        return {
+            "top": top, "bottom": bottom, "border": border,
+            "track_shadow": track_shadow, "thumb": thumb,
+            "thumb_border": thumb_border, "paw": paw,
+            "thumb_shadow": thumb_shadow,
+            "focus": theme.token("ACCENT_STRONG"), "dark": dark,
+        }
 
-        # 焦点环：键盘 Tab 到达时显示，鼠标点击后由 FocusIn 同步
+    def _track_image(self, spec: dict) -> ImageTk.PhotoImage:
+        """生成带柔和阴影的轨道图（4 倍超采样后缩放）。"""
+        cw = self.track_w + self._margin * 2
+        ch = self.track_h + self._margin * 2
+        key = (cw, ch, round(self.scale, 3), spec["top"], spec["bottom"],
+               spec["border"], spec["track_shadow"], spec["focus"],
+               self._focused and self._enabled)
+        if key == self._track_key and self._track_photo is not None:
+            return self._track_photo
+
+        w, h = cw * SUPER, ch * SUPER
+        m = self._margin * SUPER
+        box = (m, m, (self._margin + self.track_w) * SUPER,
+               (self._margin + self.track_h) * SUPER)
+        radius = (self.track_h / 2) * SUPER
+        image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+
+        shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        offset = max(1, int(round(1.3 * self.scale * SUPER)))
+        ImageDraw.Draw(shadow).rounded_rectangle(
+            (box[0], box[1] + offset, box[2], box[3] + offset),
+            radius=radius, fill=(0, 0, 0, spec["track_shadow"]))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(
+            max(1.0, 1.8 * self.scale * SUPER)))
+        image = Image.alpha_composite(image, shadow)
+
+        # 竖向轻微渐变：浅色轨道更接近参考图，开启态保持品牌橙色
+        gradient = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(gradient)
+        top_rgb = _hex_to_rgb(spec["top"])
+        bottom_rgb = _hex_to_rgb(spec["bottom"])
+        for y in range(h):
+            t = y / max(1, h - 1)
+            color = tuple(int(top_rgb[i] + (bottom_rgb[i] - top_rgb[i]) * t)
+                          for i in range(3))
+            draw.line(((0, y), (w, y)), fill=color + (255,))
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius, fill=255)
+        gradient.putalpha(mask)
+        image = Image.alpha_composite(image, gradient)
+
+        draw = ImageDraw.Draw(image)
+        width = max(1, int(round(1.0 * self.scale * SUPER)))
+        draw.rounded_rectangle(box, radius=radius,
+                               outline=spec["border"], width=width)
         if self._focused and self._enabled:
-            ring = max(1, int(round(1 * self.scale)))
-            round_rect(self, 0.5, 0.5,
-                       self.track_w + self._margin * 2 - 0.5,
-                       self.track_h + self._margin * 2 - 0.5,
-                       min(radius + 2, (self.track_h + 2) / 2),
-                       fill="", outline=theme.token("ACCENT_STRONG"),
-                       width=ring)
+            gap = max(1, int(round(1.1 * self.scale * SUPER)))
+            ring = max(1, int(round(1.2 * self.scale * SUPER)))
+            ring_box = (box[0] - gap, box[1] - gap,
+                        box[2] + gap, box[3] + gap)
+            draw.rounded_rectangle(
+                ring_box, radius=radius + gap,
+                outline=_hex_to_rgb(spec["focus"]) + (210,), width=ring)
 
-        # 滑块：位置由动画进度决定，0 = 左，1 = 右
-        travel = self.track_w - self._pad * 2 - knob * 2
+        image = image.resize((cw, ch), Image.LANCZOS)
+        self._track_key = key
+        self._track_photo = ImageTk.PhotoImage(image)
+        return self._track_photo
+
+    def _thumb_image(self, spec: dict, knob: float) -> ImageTk.PhotoImage:
+        """生成带投影和猫爪图案的滑块图。"""
+        shadow_pad = max(4, int(round(4 * self.scale)))
+        size = max(8, int(round((knob + shadow_pad) * 2)))
+        key = (size, round(knob, 2), spec["thumb"], spec["thumb_border"],
+               spec["paw"], spec["thumb_shadow"], spec["dark"],
+               self._enabled, self._on)
+        if key == self._thumb_key and self._thumb_photo is not None:
+            return self._thumb_photo
+
+        w = h = size * SUPER
+        center = w / 2
+        r = knob * SUPER
+        image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+
+        shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        offset = max(1, int(round(1.3 * self.scale * SUPER)))
+        ImageDraw.Draw(shadow).ellipse(
+            (center - r, center - r + offset,
+             center + r, center + r + offset),
+            fill=(0, 0, 0, spec["thumb_shadow"]))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(
+            max(1.0, 1.6 * self.scale * SUPER)))
+        image = Image.alpha_composite(image, shadow)
+
+        draw = ImageDraw.Draw(image)
+        border = max(1, int(round(0.8 * self.scale * SUPER)))
+        draw.ellipse((center - r, center - r, center + r, center + r),
+                     fill=spec["thumb"], outline=spec["thumb_border"],
+                     width=border)
+        self._draw_paw(draw, center, center, r, spec["paw"])
+
+        image = image.resize((size, size), Image.LANCZOS)
+        self._thumb_key = key
+        self._thumb_photo = ImageTk.PhotoImage(image)
+        return self._thumb_photo
+
+    @staticmethod
+    def _draw_paw(draw: ImageDraw.ImageDraw, cx: float, cy: float,
+                  radius: float, color: str) -> None:
+        """在滑块中央画一枚简洁的猫爪。"""
+        def ellipse(dx: float, dy: float, rx: float, ry: float) -> None:
+            draw.ellipse((cx + (dx - rx) * radius, cy + (dy - ry) * radius,
+                          cx + (dx + rx) * radius, cy + (dy + ry) * radius),
+                         fill=color)
+
+        # 掌垫：三个重叠椭圆形成轻微的爱心轮廓
+        ellipse(0, 0.24, 0.34, 0.21)
+        ellipse(-0.15, 0.16, 0.19, 0.17)
+        ellipse(0.15, 0.16, 0.19, 0.17)
+        # 四个脚趾：中间两枚更高，外侧两枚略低，留出细小间隙
+        ellipse(-0.35, -0.16, 0.10, 0.14)
+        ellipse(-0.12, -0.31, 0.10, 0.15)
+        ellipse(0.12, -0.31, 0.10, 0.15)
+        ellipse(0.35, -0.16, 0.10, 0.14)
+
+    def _draw(self) -> None:
+        left, top, right, bottom, knob, cy = self._geometry()
+        spec = self._track_spec()
+        track = self._track_image(spec)
+        if self._track_item is None:
+            self._track_item = self.create_image(
+                (self.track_w + self._margin * 2) / 2,
+                (self.track_h + self._margin * 2) / 2,
+                image=track)
+        else:
+            self.itemconfigure(self._track_item, image=track)
+
+        thumb = self._thumb_image(spec, knob)
+        travel = max(0.0, self.track_w - self._pad * 2 - knob * 2)
         cx = left + self._pad + knob + travel * self._anim_pos
-        shadow = max(1, int(round(1 * self.scale)))
-        self.create_oval(cx - knob, cy - knob + shadow,
-                         cx + knob, cy + knob + shadow,
-                         fill=theme.token("BORDER") if self._enabled
-                         else theme.token("BORDER"),
-                         outline="")
-        self.create_oval(cx - knob, cy - knob, cx + knob, cy + knob,
-                         fill=knob_fill, outline=knob_border,
-                         width=max(1, int(round(1 * self.scale))))
+        if self._thumb_item is None:
+            self._thumb_item = self.create_image(cx, cy, image=thumb)
+        else:
+            self.itemconfigure(self._thumb_item, image=thumb)
+            self.coords(self._thumb_item, cx, cy)
+        self.tag_raise(self._thumb_item)
 
     # -- 动画 -------------------------------------------------------------
     def _animate_to(self, target: float) -> None:
