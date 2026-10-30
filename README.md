@@ -461,6 +461,7 @@ Excel 直接打开不乱码）：保留原数据列，追加 `__行号 / __结�
 |---|---|
 | 提示缺少依赖 | 照弹窗里的命令 `pip install ...` 安装，或双击 `启动GUI.bat` 自动装 |
 | 图片识别不到 | 重新截图、缩小区域、降低相似度；先点「高级选项 → 检测图片」看当前屏幕能不能命中 |
+| 提示 `The confidence keyword argument is only available if OpenCV is installed` | 没装 OpenCV，命令行执行 `pip install opencv-python`，装好后重启 MeowGo |
 | 点击位置偏移 | 程序已声明 DPI 感知，请勿在多显示器缩放不同的情况下跨屏识别；可用「识别范围」限定区域 |
 | 提示「循环调用」 | 组之间互相调用成了环，去掉其中一条调用即可 |
 | 停不下来 | 按 F9，或鼠标甩到屏幕左上角 |

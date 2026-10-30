@@ -1481,6 +1481,22 @@ def test_capture_overlay_from_modal_dialog():
     saved_image_dir = app.image_dir
     app.image_dir = _TMP                  # 截图写临时目录，不污染 images/
     app.project.image_dir = _TMP
+    # 记录「截图 / 恢复主窗」的先后顺序：必须先拍后显示，否则主窗会盖住
+    # 选区，截到 MeowGo 自己的白底（真实报障：截图与实际不符）
+    calls = []
+    real_grab = gui_module.assets.grab_region
+    real_deiconify = app.deiconify
+
+    def spy_grab(*args, **kwargs):
+        calls.append("grab")
+        return real_grab(*args, **kwargs)
+
+    def spy_deiconify():
+        calls.append("deiconify")
+        return real_deiconify()
+
+    gui_module.assets.grab_region = spy_grab
+    app.deiconify = spy_deiconify
     try:
         dialog = _RealStepDialog(app, app.project, Step("click", ""))
         app.update()
@@ -1513,6 +1529,8 @@ def test_capture_overlay_from_modal_dialog():
         canvas.event_generate("<B1-Motion>", x=260, y=180)
         canvas.event_generate("<ButtonRelease-1>", x=260, y=180)
         settle()
+        assert calls[:2] == ["grab", "deiconify"], \
+            f"必须先截图再恢复主窗（否则截到 MeowGo 自己）: {calls[:4]}"
         name = dialog.var_content.get()
         assert name.endswith(".png"), f"拖拽后内容框应填上文件名: {name!r}"
         assert os.path.exists(os.path.join(_TMP, name)), \
@@ -1533,6 +1551,11 @@ def test_capture_overlay_from_modal_dialog():
     finally:
         app.image_dir = saved_image_dir
         app.project.image_dir = saved_image_dir
+        gui_module.assets.grab_region = real_grab
+        try:
+            del app.deiconify
+        except AttributeError:
+            pass
         gui_module.StepDialog = fake
     mark("对话框截图 grab 抢占与恢复")
 

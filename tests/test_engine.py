@@ -937,6 +937,62 @@ def test_locate_missing_file_aborts():
             shutil.rmtree(ex.base_dir, ignore_errors=True)
 
 
+def test_missing_opencv_reports_actionable_hint():
+    """没装 OpenCV：报可照做的中文提示，而不是 pyautogui 的裸英文错误。"""
+    from rpa import engine
+    from rpa.engine import StepError, validate_environment
+
+    with _fake_input_modules([], located=(100, 100), images=("x.png",)) as io:
+        old = engine.opencv_available
+        engine.opencv_available = lambda: False
+        try:
+            ex = Executor()
+            ex.base_dir = io.base_dir
+            try:
+                ex._locate("x.png")
+                raise AssertionError("缺 OpenCV 应抛 StepError")
+            except StepError as exc:
+                assert "opencv-python" in str(exc)
+
+            # 「检测图片」同样要给出安装命令，而不是「未找到匹配图像」
+            try:
+                engine.find_images("x.png", io.base_dir)
+                raise AssertionError("缺 OpenCV 应抛 StepError")
+            except StepError as exc:
+                assert "opencv-python" in str(exc)
+
+            # 运行前校验：有图片步骤才提示，纯坐标流程不受影响
+            groups = [Group("主", [Step("click", "x.png")])]
+            assert any("opencv-python" in p
+                       for p in validate_environment(groups))
+            assert validate_environment(
+                [Group("主", [Step("click_xy", "1,2"),
+                              Step("drag", "1,2|3,4")])]) == []
+        finally:
+            engine.opencv_available = old
+
+
+def test_blank_image_detection():
+    """纯色截图要被认出来（这种图会到处命中，界面会提醒重新截图）。"""
+    from PIL import Image
+
+    from rpa import assets
+
+    with tempfile.TemporaryDirectory() as tmp:
+        blank = os.path.join(tmp, "blank.png")
+        Image.new("RGB", (30, 20), (255, 255, 255)).save(blank)
+        assert assets.is_blank_image(blank)
+
+        colorful = os.path.join(tmp, "colorful.png")
+        image = Image.new("RGB", (30, 20), (255, 255, 255))
+        image.putpixel((0, 0), (0, 0, 0))
+        image.save(colorful)
+        assert not assets.is_blank_image(colorful)
+
+        # 读不了的文件不下结论（别把缺文件误报成纯色）
+        assert not assets.is_blank_image(os.path.join(tmp, "missing.png"))
+
+
 def test_estimate_counts_conditions():
     """进度估算：条件步骤要展开被调用组（含判断本身那一步）。"""
     from rpa.engine import estimate_steps

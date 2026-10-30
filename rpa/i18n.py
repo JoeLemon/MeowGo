@@ -716,6 +716,13 @@ EN: dict[str, str] = {
         "Maintain groups on the left and edit steps on the right. "
         "The Call group step reuses other groups.",
     "欢迎使用 MeowGo": "Welcome to MeowGo",
+    "未安装 OpenCV（opencv-python），图片识别步骤无法运行。"
+    "请在命令行执行：pip install opencv-python":
+        "OpenCV (opencv-python) is not installed, so image steps cannot run. "
+        "Run this in a command prompt: pip install opencv-python",
+    "截图几乎是纯色，可能没框到内容；请确认目标已显示后重新截图":
+        "The screenshot is almost a single color, so it may not contain the "
+        "target. Make sure the target is visible, then capture it again.",
     "运行日志": "Run log",
     "收起 / 展开日志": "Collapse / expand log",
     "未找到与“": "No steps matching “",

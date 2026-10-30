@@ -43,6 +43,18 @@ def grab_region(x1: int, y1: int, x2: int, y2: int, path: str) -> str:
     return path
 
 
+def is_blank_image(path: str) -> bool:
+    """图片是否只有一种颜色（纯色截图多半是没框到内容，匹配会到处命中）。"""
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            colors = image.convert("RGB").getcolors(maxcolors=2)
+    except Exception:  # noqa: BLE001 - 读不了就不下结论
+        return False
+    return bool(colors) and len(colors) == 1
+
+
 def unique_name(directory: str, prefix: str = "shot") -> str:
     """在目录下生成不重复的图片文件名。"""
     os.makedirs(directory, exist_ok=True)

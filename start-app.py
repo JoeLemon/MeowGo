@@ -37,6 +37,16 @@ def _missing() -> list[str]:
     return missing
 
 
+def _warn_optional() -> None:
+    """可选依赖缺失时给一句提醒（图片识别依赖 OpenCV）。"""
+    for module, package in OPTIONAL:
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            print(f"警告：未安装 {package}，图片识别步骤将无法运行。"
+                  f"安装命令：pip install {package}", file=sys.stderr)
+
+
 def _check_deps() -> bool:
     missing = _missing()
     if not missing:
@@ -107,7 +117,7 @@ def _run_headless(args) -> int:
         return 1
     project, state = loaded
 
-    from rpa.engine import Executor, validate_project
+    from rpa.engine import Executor, validate_environment, validate_project
 
     if args.list:
         print("执行组：")
@@ -139,8 +149,9 @@ def _run_headless(args) -> int:
             return 1
 
     image_dir = state.get("image_dir", "images")
-    problems = validate_project(project.groups, base_dir=image_dir,
-                                check_images=True)
+    problems = (validate_environment(project.groups) +
+                validate_project(project.groups, base_dir=image_dir,
+                                 check_images=True))
     if problems:
         print("运行前校验发现问题：")
         for problem in problems:
@@ -230,10 +241,12 @@ def main() -> int:
             parser.error("--loop 不能和 --data 一起用（数据驱动是按行跑一遍）")
         if not _check_deps():
             return 1
+        _warn_optional()
         return _run_headless(args)
 
     if not _check_deps():
         return 1
+    _warn_optional()
 
     from rpa.gui import enable_dpi_awareness, main as gui_main
 

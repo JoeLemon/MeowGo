@@ -23,7 +23,8 @@ from . import assets, autostart, i18n, theme, tray, uikit
 from .engine import (CONDITION_TYPES, IMAGE_STEP_TYPES, IMAGE_TYPES,
                      STEP_TYPES, Executor, Group, Project, Step,
                      estimate_steps, export_excel, find_images, import_excel,
-                     parse_region, validate_project)
+                     opencv_available, parse_region, validate_environment,
+                     validate_project)
 from .lock import InstanceLock, make_lock_name
 from .theme import (CONTROL_LG, CONTROL_MD, CONTROL_SM, CONTROL_XS,
                     DARK_PALETTE, FONT_BODY, FONT_BODY_BOLD, FONT_CAPTION,
@@ -646,6 +647,11 @@ class App(tk.Tk):
         self._log("info", i18n.tr("欢迎使用 MeowGo"))
         self._log("muted", i18n.tr(
             "左侧维护执行组，右侧编辑步骤；「调用执行组」指令可复用其它组。"))
+        if not opencv_available():
+            # 图片步骤全都会失败，启动时就说清楚，别等跑到第 N 步才报错
+            self._log("warn", i18n.tr(
+                "未安装 OpenCV（opencv-python），图片识别步骤无法运行。"
+                "请在命令行执行：pip install opencv-python"))
 
     def _warm_imports(self) -> None:
         """后台预热重依赖。
@@ -2829,23 +2835,38 @@ class App(tk.Tk):
             x2, y2 = event.x + left, event.y + top
             overlay.destroy()
             restore_grab()
-            self.deiconify()
-            self.lift()
             coords_callback = getattr(self, "_capture_coords_callback", None)
             self._capture_coords_callback = None
+
+            def restore_window() -> None:
+                self.deiconify()
+                self.lift()
+
             if abs(x2 - x1) < 8 or abs(y2 - y1) < 8:
+                restore_window()
                 self._set_status("框选区域太小，已取消")
                 return
             if coords_callback:
+                restore_window()
                 coords_callback(min(x1, x2), min(y1, y2),
                                 abs(x2 - x1), abs(y2 - y1))
                 return
             path = assets.unique_name(self.image_dir)
             try:
+                # 必须先截图、后恢复主窗口：反过来的话主窗口会盖住选区，
+                # 截到的是 MeowGo 自己的白底（表现为「截图与实际不符」）。
+                # 遮罩刚销毁，稍等一会儿让桌面重绘完再拍。
+                time.sleep(0.15)
                 assets.grab_region(x1, y1, x2, y2, path)
             except Exception as exc:  # noqa: BLE001
+                restore_window()
                 messagebox.showerror("截图失败", str(exc), parent=self)
                 return
+            restore_window()
+            if assets.is_blank_image(path):
+                # 纯色截图会到处命中（点击位置随机），当场提醒比跑挂了好
+                self._log("warn", i18n.tr(
+                    "截图几乎是纯色，可能没框到内容；请确认目标已显示后重新截图"))
             name = self._relative_image(path)
             self._log("info", f"已保存截图：{name}")
             callback = getattr(self, "_capture_callback", None)
@@ -3012,8 +3033,8 @@ class App(tk.Tk):
                     if step.type == "call":
                         keep.add(step.content.strip())
             groups = [g for g in groups if g.name in keep or g.name in wanted]
-        problems = validate_project(groups, base_dir=self.image_dir,
-                                    check_images=check_images)
+        problems = validate_environment(groups) + validate_project(
+            groups, base_dir=self.image_dir, check_images=check_images)
         if problems:
             messagebox.showwarning("配置有误", "\n".join(problems[:12]), parent=self)
             for text in problems[:12]:

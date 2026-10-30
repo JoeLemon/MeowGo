@@ -222,6 +222,25 @@ MAX_CALL_DEPTH = 20
 HEADERS = ["指令类型", "内容", "重复次数(-1无限)", "备注"]
 GENERIC_SHEET_NAMES = {"sheet1", "sheet", "工作表1", "sheet2"}
 
+# pyautogui 的 confidence 参数（相似度匹配）依赖 OpenCV；没装 cv2 时它只会抛
+# 一句「The confidence keyword argument is only available if OpenCV is
+# installed.」——对用户毫无帮助，所以这里统一换成能照着做的提示。
+OPENCV_HINT = ("未安装 OpenCV（opencv-python），图片识别无法运行。\n"
+               "请在命令行执行下面的命令，装好后重启 MeowGo：\n"
+               "pip install opencv-python")
+# 校验结果里用的单行版本
+OPENCV_PROBLEM = ("未安装 OpenCV（opencv-python），图片识别步骤无法运行。"
+                  "请在命令行执行：pip install opencv-python")
+
+
+def opencv_available() -> bool:
+    """当前环境能否做相似度匹配（pyautogui 的 confidence 需要 cv2）。"""
+    try:
+        import cv2  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001 - 缺失或 DLL 加载失败都按不可用处理
+        return False
+
 
 def find_images(text: str, base_dir: str = "",
                 confidence: float = DEFAULT_CONFIDENCE,
@@ -242,6 +261,8 @@ def find_images(text: str, base_dir: str = "",
             item["missing"] = True
             result.append(item)
             continue
+        if not opencv_available():
+            raise StepError(OPENCV_HINT)
         kwargs = {"confidence": confidence, "grayscale": grayscale}
         use_region = target.region or region
         if use_region:
@@ -647,7 +668,9 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
                         problems.append(
                             f"[{group.name}] 第 {index} 行：找不到图片文件 {item}")
             if check_images and step.type == "drag":
-                for item in image_names((step.content or "").split("|")[0]):
+                start = (step.content or "").split("|")[0].strip()
+                # 起点写坐标（100,200）时没有图片可查
+                for item in ([] if _valid_xy(start) else image_names(start)):
                     if item and not os.path.exists(
                             assets.resolve_image(item, base_dir or None)):
                         problems.append(
@@ -662,6 +685,27 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
 
     problems.extend(_find_cycles(index))
     return problems
+
+
+def validate_environment(groups: Iterable[Group]) -> list[str]:
+    """运行前的本机环境检查：有图片步骤却没装 OpenCV 时提前说清楚。
+
+    和 validate_project 分开，是因为这检查的是「这台机器」而不是配置；
+    只有纯坐标 / 文本流程的用户不需要 OpenCV，不该被拦。
+    """
+    if opencv_available():
+        return []
+    for group in groups:
+        for step in group.steps:
+            if step.type in IMAGE_TYPES or step.type in (
+                    "if_image", "if_not_image", "if_else"):
+                return [OPENCV_PROBLEM]
+            if step.type == "drag":
+                start = (step.content or "").split("|")[0].strip()
+                # 起点写坐标时不需要图片识别
+                if start and not _valid_xy(start):
+                    return [OPENCV_PROBLEM]
+    return []
 
 
 def _find_cycles(index: dict[str, Group]) -> list[str]:
@@ -1264,6 +1308,8 @@ class Executor:
         """在单张图上找第 nth 个（0 = 第一个）。"""
         import pyautogui
 
+        if not opencv_available():
+            raise StepError(OPENCV_HINT)
         kwargs = {"confidence": self.confidence, "grayscale": grayscale}
         if region:
             kwargs["region"] = region
