@@ -12,12 +12,11 @@ import os
 import random
 import re
 import subprocess
-import sys
-import time
 import threading
+import time
 from collections import namedtuple
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from . import assets, theme
 
@@ -25,8 +24,8 @@ try:  # 窗口操作只在 Windows 上有意义；其它平台导入 engine 不�
     import ctypes
     import ctypes.wintypes as wt
 except ImportError:  # pragma: no cover - 非 Windows
-    ctypes = None
-    wt = None
+    ctypes = None  # type: ignore[assignment]
+    wt = None  # type: ignore[assignment]
 
 if ctypes is not None:  # pragma: no cover - 非 Windows
     _WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
@@ -65,6 +64,18 @@ STEP_TYPES = {
     "copy": ("复制选中文字到变量", "变量名，如 订单号", False, ""),
     # ---- 鼠标 ----
     "drag": ("拖拽", "起点图|终点图；也可写 x1,y1|x2,y2", False, ""),
+    # ---- 文字 / 控件 / 网络 ----
+    "click_text": ("点击文字", "屏幕上的文字，如 提交；可加 @x,y,宽,高",
+                   False, ""),
+    "wait_text": ("等待文字出现", "要等的文字；可加 @x,y,宽,高", False, ""),
+    "assert_text": ("断言文字出现", "必须出现的文字；可加 @x,y,宽,高",
+                    False, ""),
+    "ui_click": ("点击控件", "控件名称，如 确定；可写 名称|控件类型",
+                 False, ""),
+    "if_var": ("条件：变量比较则执行", "变量名 运算符 值|组名，如 次数<5|重试",
+               False, ""),
+    "http": ("HTTP 请求", "GET https://…|变量名；POST 可再加 |请求体",
+             False, ""),
 }
 
 # Excel 中第 1 列使用的数字编号（1-9 与旧版 cmd.xls 完全兼容）
@@ -89,10 +100,22 @@ TYPE_TO_CODE = {
     "set": 18.0,
     "copy": 19.0,
     "drag": 20.0,
+    "click_text": 21.0,
+    "wait_text": 22.0,
+    "assert_text": 23.0,
+    "ui_click": 24.0,
+    "if_var": 25.0,
+    "http": 26.0,
 }
 CODE_TO_TYPE = {v: k for k, v in TYPE_TO_CODE.items()}
 
 IMAGE_TYPES = {"click", "dblclick", "rightclick"}
+# 需要 OCR / UIA 的步骤类型
+TEXT_STEP_TYPES = {"click_text", "wait_text", "assert_text"}
+UIA_STEP_TYPES = {"ui_click"}
+# 可以填「识别范围」的步骤类型（图片 + 文字）
+REGION_STEP_TYPES = IMAGE_TYPES | TEXT_STEP_TYPES | {
+    "if_image", "if_not_image", "if_else", "drag"}
 REPEAT_TYPES = {"click", "dblclick", "rightclick", "hotkey", "call",
                 "if_image", "if_not_image", "if_else", "if_window",
                 "click_xy"}
@@ -209,6 +232,9 @@ def target_groups(step: "Step") -> list[str]:
     if step.type == "if_else":
         parts = [p.strip() for p in text.split("|")]
         return [p for p in parts[1:3] if p]
+    if step.type == "if_var":
+        parts = [p.strip() for p in text.split("|")]
+        return [parts[1]] if len(parts) > 1 and parts[1] else []
     return []
 
 # 图片步骤超时后的处理方式（timeout > 0 时生效）
@@ -218,6 +244,55 @@ INPUT_MODES = ("paste", "type")
 
 DEFAULT_CONFIDENCE = 0.9
 POLL_INTERVAL = 0.1
+# 同一轮轮询里复用一帧截图：略小于 POLL_INTERVAL，既省 CPU 又保证
+# 下一次轮询一定拿到新画面
+SCREEN_CACHE_TTL = 0.08
+# 锁屏 / 安全桌面检查的节流间隔
+SESSION_CHECK_INTERVAL = 1.0
+
+
+def virtual_screen_rect() -> tuple[int, int, int, int]:
+    """整个虚拟桌面的 (left, top, width, height)；副屏在左侧时 left 为负。"""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            left = user32.GetSystemMetrics(76)      # SM_XVIRTUALSCREEN
+            top = user32.GetSystemMetrics(77)       # SM_YVIRTUALSCREEN
+            width = user32.GetSystemMetrics(78)     # SM_CXVIRTUALSCREEN
+            height = user32.GetSystemMetrics(79)    # SM_CYVIRTUALSCREEN
+            if width > 0 and height > 0:
+                return left, top, width, height
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        import pyautogui
+
+        width, height = pyautogui.size()
+        return 0, 0, int(width), int(height)
+    except Exception:  # noqa: BLE001
+        return 0, 0, 1920, 1080
+
+
+def session_locked() -> bool:
+    """当前输入桌面是否不可用（锁屏 / UAC 安全桌面 / RDP 断开）。
+
+    锁屏时截图是全黑的，继续找图只会白等——调用方应暂停并提示。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        desk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+        if not desk:
+            return True
+        user32.CloseDesktop(desk)
+        return False
+    except Exception:  # noqa: BLE001 - 取不到状态时按可用处理
+        return False
 MAX_CALL_DEPTH = 20
 HEADERS = ["指令类型", "内容", "重复次数(-1无限)", "备注"]
 GENERIC_SHEET_NAMES = {"sheet1", "sheet", "工作表1", "sheet2"}
@@ -263,7 +338,8 @@ def find_images(text: str, base_dir: str = "",
             continue
         if not opencv_available():
             raise StepError(OPENCV_HINT)
-        kwargs = {"confidence": confidence, "grayscale": grayscale}
+        kwargs: dict[str, Any] = {"confidence": confidence,
+                                  "grayscale": grayscale}
         use_region = target.region or region
         if use_region:
             kwargs["region"] = use_region
@@ -278,22 +354,51 @@ def find_images(text: str, base_dir: str = "",
     return result
 
 
+def _box_iou(box1: tuple[int, int, int, int],
+             box2: tuple[int, int, int, int]) -> float:
+    """两个 (x, y, w, h) 的重叠率，用于合并同一目标的相邻命中。"""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    inter_w = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+    inter_h = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    union = w1 * h1 + w2 * h2 - inter
+    return inter / union if union else 0.0
+
+
 class StepError(ValueError):
     """步骤配置错误。"""
 
 
+class Stopped(StepError):
+    """用户主动停止或触发急停：不是配置错误，按「已停止」收尾。"""
+
+
+def _is_failsafe(exc: BaseException) -> bool:
+    """pyautogui 的急停异常（鼠标移到屏幕角落时抛出）。
+
+    不在模块顶层 import pyautogui（导入要十几秒），按类名判断即可。
+    """
+    return type(exc).__name__ == "FailSafeException"
+
+
 def _valid_xy(text: str) -> bool:
-    """"500,300" 或 "500,300,right" 是否合法。"""
+    """"500,300" 或 "500,300,right" 是否合法。
+
+    允许负数：副屏在主屏左侧 / 上方时，桌面坐标本来就是负的。
+    """
     parts = [p.strip() for p in (text or "").split(",")]
     if len(parts) not in (2, 3):
         return False
     try:
-        x, y = float(parts[0]), float(parts[1])
+        float(parts[0]), float(parts[1])
     except ValueError:
         return False
     if len(parts) == 3 and parts[2] not in ("left", "right", "middle"):
         return False
-    return x >= 0 and y >= 0
+    return True
 
 
 def _parse_xy(text: str) -> tuple[float, float, str]:
@@ -303,6 +408,95 @@ def _parse_xy(text: str) -> tuple[float, float, str]:
     button = parts[2] if len(parts) > 2 and parts[2] in (
         "left", "right", "middle") else "left"
     return x, y, button
+
+
+_VAR_COND_RE = re.compile(
+    r"^\s*([^{}\s|]+)\s*(==|!=|>=|<=|>|<|contains|notcontains)\s*(.*?)\s*$",
+    re.IGNORECASE)
+HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+
+
+def _parse_var_condition(text: str) -> tuple[str, str, str]:
+    """解析「变量名 运算符 值」，返回 (变量名, 运算符, 目标值)。"""
+    match = _VAR_COND_RE.match(text or "")
+    if not match:
+        raise StepError("条件要写成 变量名 运算符 值"
+                        "（运算符：== != > < >= <= contains notcontains）")
+    return match.group(1), match.group(2).lower(), match.group(3)
+
+
+def _compare_values(actual: str, operator: str, expected: str) -> bool:
+    if operator in ("contains", "notcontains"):
+        found = str(expected).casefold() in str(actual).casefold()
+        return found if operator == "contains" else not found
+    try:
+        left, right = float(actual), float(expected)
+    except (TypeError, ValueError):
+        text_left, text_right = str(actual), str(expected)
+        if operator == "==":
+            return text_left == text_right
+        if operator == "!=":
+            return text_left != text_right
+        return False
+    if operator == "==":
+        return left == right
+    if operator == "!=":
+        return left != right
+    if operator == ">":
+        return left > right
+    if operator == "<":
+        return left < right
+    if operator == ">=":
+        return left >= right
+    return left <= right
+
+
+def _parse_http_spec(text: str) -> tuple[str, str, str, str]:
+    """解析「方法 URL|变量名[|请求体]」。"""
+    spec, sep, rest = (text or "").partition("|")
+    if not sep:
+        raise StepError("要写成 方法 URL|变量名，如 "
+                        "GET https://example.com|响应")
+    var, _, body = rest.partition("|")
+    var = var.strip()
+    if not var:
+        raise StepError("变量名不能为空")
+    method, _, url = spec.strip().partition(" ")
+    method = method.upper()
+    if method not in HTTP_METHODS:
+        url = spec.strip()
+        method = "GET"
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise StepError("只支持 http:// 或 https:// 地址")
+    return method, url, var, body
+
+
+def parse_text_target(text: str, region_text: str = ""):
+    """解析文字步骤的「文字@x,y,宽,高」，返回 (文字, 区域或 None)。"""
+    name = (text or "").strip()
+    region = _parse_region(region_text)
+    match = _REGION_RE.search(name)
+    if match:
+        x, y, width, height = (int(part) for part in match.groups())
+        region = (x, y, width, height)
+        name = name[:match.start()].strip()
+    return name, region
+
+
+def _read_temp_text(handle) -> str:
+    """读取子进程输出临时文件。Windows 中文环境下 cmd 输出多为 GBK。"""
+    import locale
+
+    try:
+        handle.flush()
+        handle.seek(0)
+        data = handle.read()
+    finally:
+        handle.close()
+    if isinstance(data, bytes):
+        data = data.decode(locale.getpreferredencoding(False), "replace")
+    return data.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +596,8 @@ class Step:
             if not text:
                 errors.append(f"{where}：需要填写图片文件名")
         elif self.type in ("input", "hotkey", "time", "cmd", "call", "copy",
-                           "set"):
+                           "set", "click_text", "wait_text", "assert_text",
+                           "ui_click", "if_var", "http"):
             if not text:
                 errors.append(f"{where}：内容不能为空")
         elif self.type == "wait":
@@ -426,9 +621,11 @@ class Step:
             if any(k.isdigit() for k in keys):
                 errors.append(f"{where}：单个数字键无法识别，请改用 num0 这类写法")
 
-        # 图片类、拖拽、条件都可以「最多等 N 秒」
-        if (self.type in IMAGE_TYPES or self.type == "drag"
-                or self.type in CONDITION_TYPES) and self.timeout:
+        # 图片类、拖拽、条件、命令、文字/控件都可以「最多等 N 秒」
+        if (self.type in IMAGE_TYPES or self.type in ("drag", "cmd")
+                or self.type in CONDITION_TYPES
+                or self.type in TEXT_STEP_TYPES
+                or self.type in UIA_STEP_TYPES) and self.timeout:
             try:
                 if float(self.timeout) < 0:
                     errors.append(f"{where}：等待超时不能为负数")
@@ -476,8 +673,26 @@ class Step:
         elif self.type in ("click_xy", "move_xy") and text:
             if not _valid_xy(text):
                 errors.append(f"{where}：坐标要写成 x,y，如 500,300")
+        elif self.type == "if_var" and text:
+            cond, sep, target = text.partition("|")
+            if not sep or not target.strip():
+                errors.append(f"{where}：变量条件要写成 "
+                              "变量名 运算符 值|组名")
+            else:
+                try:
+                    _parse_var_condition(cond)
+                except StepError as exc:
+                    errors.append(f"{where}：{exc}")
+        elif self.type == "http" and text:
+            try:
+                _parse_http_spec(text)
+            except StepError as exc:
+                errors.append(f"{where}：{exc}")
+        elif self.type == "ui_click" and text:
+            if not text.split("|", 1)[0].strip():
+                errors.append(f"{where}：控件名称不能为空")
 
-        if self.region and self.type in IMAGE_STEP_TYPES:
+        if self.region and self.type in REGION_STEP_TYPES:
             if _parse_region(self.region) is None:
                 errors.append(f"{where}：识别范围要写成 x,y,宽,高")
 
@@ -505,12 +720,12 @@ class Step:
 
     def to_row(self) -> list:
         """转换为 Excel 一行（4 列）。"""
-        repeat = self.repeat
-        if repeat in (0, 0.0, "", None):
-            repeat = ""
-        elif float(repeat) == int(float(repeat)):
-            repeat = float(int(float(repeat)))
-        return [TYPE_TO_CODE.get(self.type, 1.0), self.content, repeat, self.note]
+        value: float | str = self.repeat
+        if value in (0, 0.0, "", None):
+            value = ""
+        elif float(value) == int(float(value)):
+            value = float(int(float(value)))
+        return [TYPE_TO_CODE.get(self.type, 1.0), self.content, value, self.note]
 
     @classmethod
     def from_row(cls, values: Iterable) -> "Step":
@@ -676,36 +891,55 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
                         problems.append(
                             f"[{group.name}] 第 {index} 行：找不到图片文件 {item}")
 
-    index = {group.name: group for group in groups}
+    by_name = {group.name: group for group in groups}
     for group in groups:
         for step in group.steps:
             for target in target_groups(step):
-                if target not in index:
+                if target not in by_name:
                     problems.append(f"[{group.name}] 调用的执行组不存在：{target}")
 
-    problems.extend(_find_cycles(index))
+    problems.extend(_find_cycles(by_name))
     return problems
 
 
 def validate_environment(groups: Iterable[Group]) -> list[str]:
-    """运行前的本机环境检查：有图片步骤却没装 OpenCV 时提前说清楚。
+    """运行前的本机环境检查：缺 OCR / UIA / OpenCV 时提前说清楚。
 
     和 validate_project 分开，是因为这检查的是「这台机器」而不是配置；
     只有纯坐标 / 文本流程的用户不需要 OpenCV，不该被拦。
     """
-    if opencv_available():
-        return []
+    needs_opencv = False
+    needs_ocr = False
+    needs_uia = False
     for group in groups:
         for step in group.steps:
             if step.type in IMAGE_TYPES or step.type in (
                     "if_image", "if_not_image", "if_else"):
-                return [OPENCV_PROBLEM]
-            if step.type == "drag":
+                needs_opencv = True
+            elif step.type == "drag":
                 start = (step.content or "").split("|")[0].strip()
                 # 起点写坐标时不需要图片识别
                 if start and not _valid_xy(start):
-                    return [OPENCV_PROBLEM]
-    return []
+                    needs_opencv = True
+            if step.type in TEXT_STEP_TYPES:
+                needs_ocr = True
+            elif step.type in UIA_STEP_TYPES:
+                needs_uia = True
+
+    problems: list[str] = []
+    if needs_opencv and not opencv_available():
+        problems.append(OPENCV_PROBLEM)
+    if needs_ocr:
+        from . import ocr
+
+        if not ocr.available():
+            problems.append(ocr.OCR_INSTALL_HINT)
+    if needs_uia:
+        from . import uia
+
+        if not uia.available():
+            problems.append(uia.UIA_INSTALL_HINT)
+    return problems
 
 
 def _find_cycles(index: dict[str, Group]) -> list[str]:
@@ -932,10 +1166,10 @@ def write_results(data: list[dict], results: list[dict], path: str,
     merged: dict[int, dict] = {}
     for old in previous:
         try:
-            key = int(float(old.get("__行号", "")))
+            row_key = int(float(old.get("__行号", "")))
         except (TypeError, ValueError):
             continue
-        merged[key] = old
+        merged[row_key] = old
 
     columns: list[str] = []
     for row in data:
@@ -949,16 +1183,16 @@ def write_results(data: list[dict], results: list[dict], path: str,
             if key not in columns and key not in extra:
                 extra.append(key)
     reserved = {"__行号", "__结果", "__失败步骤"}
-    var_columns = []
+    var_columns: list[tuple[str, str]] = []
     for key in extra:
-        name = (key if key not in columns and key not in reserved
-                else f"结果_{key}")
-        while name in columns or name in reserved:
-            name = f"结果_{name}"
-        var_columns.append((key, name))
+        column_name = (key if key not in columns and key not in reserved
+                       else f"结果_{key}")
+        while column_name in columns or column_name in reserved:
+            column_name = f"结果_{column_name}"
+        var_columns.append((key, column_name))
 
     fieldnames = list(columns) + ["__行号", "__结果", "__失败步骤"]
-    fieldnames += [name for _key, name in var_columns]
+    fieldnames += [column_name for _key, column_name in var_columns]
 
     for item in results:
         row_no = int(item["row"])
@@ -968,8 +1202,8 @@ def write_results(data: list[dict], results: list[dict], path: str,
         record["__结果"] = "成功" if item.get("ok") else "失败"
         record["__失败步骤"] = item.get("failed_step", "")
         values = item.get("vars") or {}
-        for key, name in var_columns:
-            record[name] = values.get(key, "")
+        for key, column_name in var_columns:
+            record[column_name] = values.get(key, "")
         merged[row_no] = record
 
     # 旧文件里可能有这次没再出现的变量列，原样保留
@@ -1219,6 +1453,20 @@ class Executor:
     _progress_total: int = 0
     # 当前数据行里写过的变量名（结果回写只带本行产生/更新的列）
     _row_var_keys: set[str] = field(default_factory=set)
+    # 截图缓存：同一轮轮询复用一帧，避免每个候选图都重采全屏
+    _screen_frame: object = None
+    _screen_origin: tuple[int, int] = (0, 0)
+    _screen_at: float = 0.0
+    # 模板图缓存：path -> (mtime, ndarray)
+    _template_cache: dict[str, tuple[float, object]] = field(
+        default_factory=dict)
+    # 锁屏检测（节流）
+    _session_locked: bool = False
+    _session_checked_at: float = 0.0
+    _session_warned: bool = False
+    # 递归调用栈 / 当前数据行（reset 时清空，运行期由执行器维护）
+    _stack: list = field(default_factory=list)
+    _row: dict = field(default_factory=dict)
 
     # -- 生命周期 ---------------------------------------------------------
     def reset(self) -> None:
@@ -1233,6 +1481,11 @@ class Executor:
         self.row_results = []
         self._row_var_keys = set()
         self._progress_done = 0
+        self._screen_frame = None
+        self._screen_at = 0.0
+        self._session_locked = False
+        self._session_checked_at = 0.0
+        self._session_warned = False
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1263,11 +1516,31 @@ class Executor:
         return not self.stop_event.is_set()
 
     def _wait_ready(self) -> bool:
-        while self.pause_event.is_set():
+        while True:
             if self.stop_event.is_set():
                 return False
-            time.sleep(POLL_INTERVAL)
-        return not self.stop_event.is_set()
+            if self.pause_event.is_set():
+                time.sleep(POLL_INTERVAL)
+                continue
+            if self._session_blocked():
+                time.sleep(POLL_INTERVAL)
+                continue
+            return True
+
+    def _session_blocked(self) -> bool:
+        """锁屏 / 安全桌面时返回 True，并提示一次；解锁后自动继续。"""
+        now = time.time()
+        if now - self._session_checked_at >= SESSION_CHECK_INTERVAL:
+            self._session_checked_at = now
+            locked = session_locked()
+            if locked and not self._session_warned:
+                self._emit("warn", "检测到锁屏 / 安全桌面：已暂停等待，"
+                                   "解锁后自动继续（可随时停止）")
+            elif not locked and self._session_warned:
+                self._emit("info", "会话已恢复，继续执行")
+            self._session_warned = locked
+            self._session_locked = locked
+        return self._session_locked
 
     # -- 单步动作 ---------------------------------------------------------
     def _locate(self, image: str, step: Optional[Step] = None):
@@ -1302,33 +1575,135 @@ class Executor:
             raise StepError("找不到图片文件：" + "、".join(missing))
         return None
 
+    def _invalidate_screen(self) -> None:
+        """执行过鼠标/键盘动作后，下一轮必须重新截图。"""
+        self._screen_at = 0.0
+
+    def _capture_screen(self):
+        """采集一帧整个虚拟桌面，返回 (BGR ndarray, (left, top))。
+
+        副屏在主屏左侧时 left/top 为负。单独一层便于测试注入假屏幕。
+        """
+        import numpy as np
+
+        try:
+            from PIL import ImageGrab
+
+            image = ImageGrab.grab(all_screens=True)
+            frame = np.asarray(image)
+            if frame.ndim == 3 and frame.shape[2] >= 3:
+                frame = frame[:, :, :3][:, :, ::-1]      # RGB -> BGR
+            origin = virtual_screen_rect()[:2]
+        except Exception:  # noqa: BLE001 - ImageGrab 不可用时退回 pyautogui
+            import pyautogui
+
+            frame = np.asarray(pyautogui.screenshot())[:, :, ::-1]
+            origin = (0, 0)
+        return frame, origin
+
+    def _grab_screen(self):
+        """取一帧屏幕（带 TTL 缓存）。
+
+        同一轮轮询（≤ SCREEN_CACHE_TTL）内复用，避免每个候选图都重采
+        全屏。
+        """
+        import numpy as np
+
+        now = time.time()
+        if (self._screen_frame is not None
+                and now - self._screen_at <= SCREEN_CACHE_TTL):
+            return self._screen_frame, self._screen_origin
+        frame, origin = self._capture_screen()
+        frame = np.ascontiguousarray(frame)
+        self._screen_frame = frame
+        self._screen_origin = origin
+        self._screen_at = now
+        return frame, self._screen_origin
+
+    def _load_template(self, path: str):
+        """模板图预加载：文件没变就一直复用，避免每轮重复读盘解码。"""
+        import cv2
+        import numpy as np
+
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        cached = self._template_cache.get(path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        # cv2.imread 在 Windows 上不支持中文路径；先读字节再解码
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+            image = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+        except (OSError, ValueError):
+            image = None
+        if image is None:
+            image = cv2.imread(path, cv2.IMREAD_COLOR)
+        if image is None:
+            raise StepError(f"图片无法读取（文件损坏或格式不支持）：{path}")
+        if len(self._template_cache) >= 64:
+            self._template_cache.clear()
+        self._template_cache[path] = (mtime, image)
+        return image
+
     def _locate_one(self, path: str,
                     region: Optional[tuple[int, int, int, int]],
                     nth: int, grayscale: bool):
-        """在单张图上找第 nth 个（0 = 第一个）。"""
-        import pyautogui
+        """在单张模板图上找第 nth 个（0 = 第一个）。"""
+        import cv2
+        import numpy as np
 
         if not opencv_available():
             raise StepError(OPENCV_HINT)
-        kwargs = {"confidence": self.confidence, "grayscale": grayscale}
-        if region:
-            kwargs["region"] = region
-        try:
-            if nth and nth > 0:
-                boxes = list(pyautogui.locateAllOnScreen(path, **kwargs))
-                # 统一成「从上到下、从左到右」，用户写 #2 才有稳定含义
-                boxes.sort(key=lambda box: (box.top, box.left))
-                if nth >= len(boxes):
-                    return None
-                box = boxes[nth]
-                return Point(box.left + box.width / 2,
-                             box.top + box.height / 2)
-            return pyautogui.locateCenterOnScreen(path, **kwargs)
-        except pyautogui.ImageNotFoundException:
-            # pyautogui 默认「找不到就抛异常」，但引擎的语义是「返回 None，
-            # 由调用方的等待/重试/超时逻辑决定怎么办」——这里必须接住，
-            # 否则「等图片出现」整套逻辑都是死代码
+
+        template = self._load_template(path)
+        frame, (origin_x, origin_y) = self._grab_screen()
+        if frame.size == 0:
             return None
+        if region:
+            rx, ry, rw, rh = region
+            x0 = max(0, rx - origin_x)
+            y0 = max(0, ry - origin_y)
+            x1 = min(frame.shape[1], x0 + rw)
+            y1 = min(frame.shape[0], y0 + rh)
+            if x1 <= x0 or y1 <= y0:
+                return None
+            search = frame[y0:y1, x0:x1]
+            base_x, base_y = origin_x + x0, origin_y + y0
+        else:
+            search = frame
+            base_x, base_y = origin_x, origin_y
+
+        if grayscale:
+            search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+            template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        height, width = template.shape[:2]
+        if (height > search.shape[0] or width > search.shape[1]
+                or height == 0 or width == 0):
+            return None
+
+        result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+        result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        ys, xs = np.where(result >= float(self.confidence))
+        if len(xs) == 0:
+            return None
+        # 先把高分命中留下，再按重叠度去重（同一目标会产出一片相邻点）
+        order = np.argsort(-result[ys, xs])[:400]
+        boxes: list[tuple[float, int, int]] = []
+        for index in order:
+            x, y = int(xs[index]), int(ys[index])
+            score = float(result[y, x])
+            if any(_box_iou((x, y, width, height),
+                            (bx, by, width, height)) > 0.3
+                   for _, bx, by in boxes):
+                continue
+            boxes.append((score, x, y))
+        boxes.sort(key=lambda box: (box[2], box[1]))
+        if nth and nth >= len(boxes):
+            return None
+        _score, x, y = boxes[nth if nth and nth > 0 else 0]
+        return Point(base_x + x + width / 2, base_y + y + height / 2)
 
     def _click(self, image: str, clicks: int, button: str, repeat: float,
                timeout: float = 0, on_fail: str = "skip",
@@ -1350,6 +1725,7 @@ class Executor:
             if location is not None:
                 pyautogui.click(location.x, location.y, clicks=clicks,
                                 interval=0.2, duration=0.2, button=button)
+                self._invalidate_screen()
                 done += 1
                 self._emit("info", f"已{('点击' if clicks == 1 else '双击')} {image} ({done}/{times})")
             else:
@@ -1374,6 +1750,7 @@ class Executor:
         if repeat == -1:
             while self._wait_ready():
                 pyautogui.hotkey(*parts)
+                self._invalidate_screen()
                 self._emit("info", f"执行热键 {','.join(parts)}")
                 if not self._sleep(0.1):
                     return
@@ -1382,13 +1759,13 @@ class Executor:
             if not self._wait_ready():
                 return
             pyautogui.hotkey(*parts)
+            self._invalidate_screen()
             self._emit("info", f"执行热键 {','.join(parts)}")
             if not self._sleep(0.1):
                 return
 
     def run_step(self, step: Step, depth: int = 0) -> None:
         import pyautogui
-        import pyperclip
 
         text = render_content((step.content or "").strip(), self._row,
                               self._row_no, self.vars)
@@ -1416,6 +1793,7 @@ class Executor:
             if notches == 0 and distance != 0:
                 notches = 1 if distance > 0 else -1
             pyautogui.scroll(notches * 120)
+            self._invalidate_screen()
             self._emit("info", f"滚轮 {distance}（{notches} 格）")
             self._sleep(0.1)
         elif step.type == "hotkey":
@@ -1425,7 +1803,7 @@ class Executor:
             self._input_text(now)
             self._emit("info", f"粘贴时间：{now}")
         elif step.type == "cmd":
-            self._run_cmd(text)
+            self._run_cmd(text, step)
         elif step.type == "if_image":
             self._run_if_image(text, step, depth)
         elif step.type == "if_not_image":
@@ -1442,6 +1820,7 @@ class Executor:
             self._drag(text, step)
         elif step.type == "window":
             result = _window_action(text)
+            self._invalidate_screen()
             self._emit("info", result)
             self._sleep(0.2)
         elif step.type == "click_xy":
@@ -1452,12 +1831,22 @@ class Executor:
                     return
                 pyautogui.click(x, y, button=button, interval=0.2,
                                 duration=0.2)
+                self._invalidate_screen()
                 self._emit("info", f"点击坐标 ({x:g}, {y:g})")
                 self._sleep(0.1)
         elif step.type == "move_xy":
             x, y, _button = _parse_xy(text)
             pyautogui.moveTo(x, y, duration=0.2)
+            self._invalidate_screen()
             self._emit("info", f"鼠标移到 ({x:g}, {y:g})")
+        elif step.type in ("click_text", "wait_text", "assert_text"):
+            self._wait_text(text, step, click=(step.type == "click_text"))
+        elif step.type == "ui_click":
+            self._ui_click(text, step)
+        elif step.type == "if_var":
+            self._run_if_var(text, step, depth)
+        elif step.type == "http":
+            self._http_request(text)
         else:
             raise StepError(f"未知指令类型：{step.type}")
 
@@ -1473,6 +1862,7 @@ class Executor:
         if mode == "type":
             if all(ord(ch) < 128 for ch in text):
                 pyautogui.write(text, interval=0.02)
+                self._invalidate_screen()
                 self._emit("info", f"逐字输入：{text}")
                 self._sleep(0.2)
                 return
@@ -1484,6 +1874,7 @@ class Executor:
             previous = ""
         pyperclip.copy(text)
         pyautogui.hotkey("ctrl", "v")
+        self._invalidate_screen()
         self._emit("info", f"输入：{text}")
         self._sleep(0.5)
         try:
@@ -1492,29 +1883,222 @@ class Executor:
         except Exception:      # noqa: BLE001
             pass
 
-    def _run_cmd(self, text: str) -> None:
-        """执行系统命令，并按返回码判断这步是否成功。"""
+    def _run_cmd(self, text: str, step: Optional[Step] = None) -> None:
+        """执行系统命令，并按返回码判断这步是否成功。
+
+        用 Popen 轮询而不是 subprocess.run：命令执行期间也能响应「停止」，
+        并且支持步骤级超时（step.timeout，0 = 不限）。子进程输出写到临时
+        文件，避免管道写满导致死锁。
+        """
+        import tempfile
+
         self._emit("info", f"执行命令：{text}")
-        kwargs = {"shell": True, "capture_output": True, "text": True,
-                  "errors": "replace"}
+        kwargs: dict[str, Any] = {"shell": True, "stdin": subprocess.DEVNULL}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NO_WINDOW", 0)
+        out_file = tempfile.TemporaryFile()
+        err_file = tempfile.TemporaryFile()
         try:
-            proc = subprocess.run(text, **kwargs)
+            proc = subprocess.Popen(text, stdout=out_file,
+                                    stderr=err_file, **kwargs)
         except Exception as exc:  # noqa: BLE001
+            out_file.close()
+            err_file.close()
             self._step_ok = False
             self._emit("error", f"命令执行失败：{exc}")
             return
-        output = (proc.stdout or "").strip()
-        error = (proc.stderr or "").strip()
+
+        timeout = float(getattr(step, "timeout", 0) or 0)
+        deadline = time.time() + timeout if timeout > 0 else None
+        timed_out = False
+        while proc.poll() is None:
+            if self.stop_event.is_set():
+                self._kill_process(proc)
+                out_file.close()
+                err_file.close()
+                self._step_ok = False
+                self._emit("warn", "命令已终止（收到停止请求）")
+                return
+            if deadline is not None and time.time() >= deadline:
+                timed_out = True
+                self._kill_process(proc)
+                break
+            time.sleep(POLL_INTERVAL)
+
+        output = _read_temp_text(out_file)
+        error = _read_temp_text(err_file)
         if output:
             self._emit("info", output[:500])
+        if timed_out:
+            self._step_ok = False
+            self._emit("error", f"命令执行超时（{timeout:g} 秒），已强制结束")
+            if getattr(step, "on_fail", "skip") == "stop":
+                raise StepError(f"命令执行超时（{timeout:g} 秒），按设置中止执行")
+            return
         if proc.returncode:
             self._step_ok = False
             self._emit("error", f"命令返回 {proc.returncode}："
                                 f"{(error or output)[:300]}")
         self._sleep(0.2)
+
+    @staticmethod
+    def _kill_process(proc) -> None:
+        """结束命令及其子进程（Windows 下 taskkill /T 才管得到子进程）。"""
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            else:
+                proc.kill()
+        except Exception:  # noqa: BLE001 - 进程可能已经自己退出
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _locate_text(self, text: str, step: Step):
+        """OCR 找文字，返回屏幕坐标；找不到返回 None。"""
+        from . import ocr
+
+        if not ocr.available():
+            raise StepError(ocr.OCR_INSTALL_HINT)
+        name, region = parse_text_target(
+            text, getattr(step, "region", "") or "")
+        if not name:
+            raise StepError("要识别的文字不能为空")
+        frame, (origin_x, origin_y) = self._grab_screen()
+        if frame.size == 0:
+            return None
+        if region:
+            rx, ry, rw, rh = region
+            x0 = max(0, rx - origin_x)
+            y0 = max(0, ry - origin_y)
+            x1 = min(frame.shape[1], x0 + rw)
+            y1 = min(frame.shape[0], y0 + rh)
+            if x1 <= x0 or y1 <= y0:
+                return None
+            crop = frame[y0:y1, x0:x1]
+            base_x, base_y = origin_x + x0, origin_y + y0
+        else:
+            crop = frame
+            base_x, base_y = origin_x, origin_y
+        try:
+            point = ocr.find_text(crop, name)
+        except ocr.OcrUnavailable as exc:
+            raise StepError(str(exc)) from exc
+        if point is None:
+            return None
+        return Point(base_x + point[0], base_y + point[1])
+
+    def _wait_text(self, text: str, step: Step, click: bool = False) -> bool:
+        """等文字出现（click=True 时顺便点一下），超时按 on_fail 处理。"""
+        import pyautogui
+
+        deadline = (time.time() + step.timeout
+                    if step.timeout and step.timeout > 0 else None)
+        self._step_ok = True
+        while True:
+            if not self._wait_ready():
+                return False
+            point = self._locate_text(text, step)
+            if point is not None:
+                if click:
+                    pyautogui.click(point.x, point.y, duration=0.2)
+                    self._invalidate_screen()
+                    self._emit("info", f"已点击文字：{text}")
+                else:
+                    self._emit("info", f"已找到文字：{text}")
+                return True
+            if deadline is not None and time.time() >= deadline:
+                self._step_ok = False
+                self._emit("warn", f"等待文字「{text}」超时"
+                                   f"（{step.timeout:g} 秒）")
+                if step.on_fail == "stop":
+                    raise StepError(f"等待文字「{text}」超时，按设置中止执行")
+                return False
+            self._emit("warn", f"未找到文字「{text}」，重试中…")
+            if not self._sleep(POLL_INTERVAL):
+                return False
+
+    def _ui_click(self, text: str, step: Step) -> bool:
+        """按 UIA 控件名称点击（内容可写「名称|控件类型」）。"""
+        from . import uia
+
+        if not uia.available():
+            raise StepError(uia.UIA_INSTALL_HINT)
+        name, _, control_type = text.partition("|")
+        name, control_type = name.strip(), control_type.strip()
+        if not name:
+            raise StepError("控件名称不能为空")
+        deadline = (time.time() + step.timeout
+                    if step.timeout and step.timeout > 0 else None)
+        self._step_ok = True
+        while True:
+            if not self._wait_ready():
+                return False
+            try:
+                clicked = uia.click_control(name, control_type, timeout=0.5)
+            except uia.UiaUnavailable as exc:
+                raise StepError(str(exc)) from exc
+            if clicked:
+                self._invalidate_screen()
+                self._emit("info", f"已点击控件：{name}")
+                return True
+            if deadline is not None and time.time() >= deadline:
+                self._step_ok = False
+                self._emit("warn", f"等待控件「{name}」超时"
+                                   f"（{step.timeout:g} 秒）")
+                if step.on_fail == "stop":
+                    raise StepError(f"等待控件「{name}」超时，按设置中止执行")
+                return False
+            if not self._sleep(POLL_INTERVAL):
+                return False
+
+    def _http_request(self, text: str) -> None:
+        """发 HTTP 请求，把响应正文存入变量。"""
+        from urllib.error import HTTPError, URLError
+        from urllib.request import Request, urlopen
+
+        method, url, var, body = _parse_http_spec(text)
+        data = body.encode("utf-8") if body else None
+        request = Request(url, data=data, method=method)
+        request.add_header("User-Agent", "MeowGo/1.0")
+        if data:
+            request.add_header("Content-Type", "text/plain; charset=utf-8")
+        self._emit("info", f"HTTP {method} {url}")
+        try:
+            with urlopen(request, timeout=20) as response:  # noqa: S310
+                raw = response.read()
+                status = getattr(response, "status", 0)
+        except HTTPError as exc:
+            self._step_ok = False
+            self._emit("error", f"HTTP {method} {url} 返回 {exc.code}")
+            return
+        except (URLError, OSError, ValueError) as exc:
+            self._step_ok = False
+            self._emit("error", f"HTTP {method} {url} 失败：{exc}")
+            return
+        text_body = raw.decode("utf-8", "replace")
+        self.vars[var] = text_body
+        self._emit("info", f"响应 {status}，{len(text_body)} 字符，"
+                           f"已存入变量 {var}")
+
+    def _run_if_var(self, text: str, step: Step, depth: int) -> None:
+        condition, _, target = text.partition("|")
+        target = target.strip()
+        if not target:
+            raise StepError("变量条件要写成 变量名 运算符 值|组名")
+        name, operator, expected = _parse_var_condition(condition)
+        actual = self.vars.get(name, "")
+        matched = _compare_values(actual, operator, expected)
+        self._emit("info", f"变量条件：{name}={actual!r} {operator} "
+                           f"{expected!r} → {'满足' if matched else '不满足'}")
+        if matched:
+            self._run_group(target, depth + 1)
 
     def _wait_image(self, image: str, step: Step, want_present: bool):
         """按 step.timeout 等图片出现/消失；timeout=0 时只判断一次。"""
@@ -1707,12 +2291,14 @@ class Executor:
             if not self._sleep(0.1):
                 return False
             pyautogui.moveTo(end[0], end[1], duration=0.4)
+            self._invalidate_screen()
             self._emit("info", f"拖拽 ({start[0]:g}, {start[1]:g}) → "
                                f"({end[0]:g}, {end[1]:g})")
             return True
         finally:
             # 即使中途停止 / 移动失败，也一定把左键松开
             pyautogui.mouseUp()
+            self._invalidate_screen()
 
     # -- 组执行 -----------------------------------------------------------
     def _run_group(self, name: str, depth: int = 0) -> None:
@@ -1760,8 +2346,16 @@ class Executor:
                     failed = True
                     fatal = exc
                 except Exception as exc:  # 单步失败不应终止整体
-                    failed = True
-                    self._emit("error", f"第 {index + 1} 步出错：{exc}")
+                    if _is_failsafe(exc):
+                        # 急停必须真的停下来：不能重试，也不能继续下一步
+                        failed = True
+                        self._step_ok = False
+                        self.stop_event.set()
+                        fatal = Stopped(
+                            "检测到急停（鼠标已移到屏幕角落），本次运行已停止")
+                    else:
+                        failed = True
+                        self._emit("error", f"第 {index + 1} 步出错：{exc}")
 
                 ok = not failed and self._step_ok
                 if ok or fatal is not None or attempts >= max_attempts:
@@ -1892,6 +2486,11 @@ class Executor:
                     self._record_row(row_no, stat_start)
             self._emit("info", "执行完成")
             return "finished"
+        except Stopped as exc:
+            self._emit("warn", str(exc))
+            if not loop:
+                self._record_row(self._row_no, stat_start, force_failed=True)
+            return "stopped"
         except StepError as exc:
             self._emit("error", str(exc))
             if not loop:

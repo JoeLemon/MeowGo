@@ -604,19 +604,34 @@ python -m PyInstaller --noconfirm "MeowGo.spec"
 python tests\verify_exe.py     :: 启动 exe、按进程 ID 找到窗口、截图 tests/exe_preview.png 后关闭
 ```
 
-## 测试
+## 测试与检查
 
 ```bat
-python -m pytest tests\test_engine.py tests\test_autostart.py tests\test_gui.py tests\test_lock.py -q  :: 逻辑 + 自启 + 界面 + 锁（共 126 项）
-python tests\test_tray.py    :: 托盘模块：图标生成 / 启停 / 菜单分发 / 会话结束钩子
-python tests\test_e2e.py       :: 真实屏幕端到端：识图点击/双击、输入、滚轮、
-                               :: 拖拽、条件二选一、复制到变量、等图片出现再点，
-                               :: 约 25 秒（会真实移动鼠标，跑的时候别碰鼠标）
-python tests\probe_macro_e2e.py:: 宏录制全链路探针（真钩子 + 合成事件，约 5 秒）
-python tests\preview_menubar.py:: 菜单栏下拉、点别处/别的程序窗口关闭、菜单外右键换菜单，
-                               :: 以及窗口拖到副屏（负坐标）后右键菜单仍弹在副屏上
-                               :: 输出 tests/menubar_preview.png（只有一块屏时自动跳过副屏那几项）
+pip install -r requirements-dev.txt
+
+python -m pytest -q                                 :: 全部用例（约 40 秒）
+python -m pytest -q -m "not slow"                   :: 跳过真实屏幕用例（CI 用）
+python -m pytest -q -m engine                       :: 只跑纯逻辑（引擎 / 日志 / 主题）
+python -m pytest -q --cov=rpa --cov-report=term-missing
+
+python -m ruff check rpa start-app.py build.py      :: 语法 / 未定义名 / 未用导入 / 导入顺序
+python -m mypy                                      :: 类型检查（gui / uikit 暂缓）
 ```
+
+真实屏幕 / 系统资源的探针不在默认用例里，需要时单独跑：
+
+```bat
+python -m pytest -q -m slow           :: 端到端：识图点击/双击、输入、滚轮、拖拽、
+                                      :: 条件二选一、复制到变量、等图片出现再点，
+                                      :: 约 25 秒（会真实移动鼠标，跑的时候别碰鼠标）
+python tests\probe_macro_e2e.py       :: 宏录制全链路探针（真钩子 + 合成事件，约 5 秒）
+python tests\preview_menubar.py       :: 菜单栏下拉、点别处/别的程序窗口关闭、菜单外右键换菜单，
+                                      :: 以及窗口拖到副屏（负坐标）后右键菜单仍弹在副屏上
+                                      :: 输出 tests/menubar_preview.png（只有一块屏时自动跳过副屏那几项）
+```
+
+CI（`.github/workflows/ci.yml`）在 Windows 上执行 ruff、mypy 和
+`pytest -m "not slow"`，覆盖率低于 65% 时失败。
 
 引擎测试还覆盖：图片后缀解析（候选 / 范围 / 第几个 / 偏移）、条件等待、
 失败重试与截图、命令退出码、输入方式与中文回退、数据断点续跑、结果回写、

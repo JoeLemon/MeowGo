@@ -2,8 +2,11 @@
 """设计令牌的一致性测试：色板、控件尺寸、按钮配色。"""
 from __future__ import annotations
 
+import pytest
+
 from rpa import theme
 
+pytestmark = pytest.mark.engine
 
 CORE_TOKENS = {
     "BG", "CARD", "ACCENT", "ACCENT_STRONG", "ACCENT_TINT", "ACCENT_MIST",

@@ -1,0 +1,52 @@
+# 开发工具配置：ruff / mypy / pytest / coverage。
+# 运行方式见 README「开发与检查」一节；CI 在 .github/workflows/ci.yml。
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["build", "dist", "backups", "images", "reports"]
+
+[tool.ruff.lint]
+# 只启用「一定是问题」的规则：语法错误 / 未定义名字 / 未使用导入 / 导入顺序。
+# 更主观的风格规则（UP、SIM、BLE 等）等代码逐步收紧后再开。
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rpa"]
+# 保持现有紧凑写法：不在末尾逗号处强行拆成一列一项
+split-on-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.10"
+files = ["rpa", "start-app.py", "build.py"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# 界面代码（Tk 控件频繁动态属性）暂未补齐类型，先不阻断合并；
+# 新增的逻辑模块（engine / logs / lock / recorder 等）必须通过检查。
+module = ["rpa.gui", "rpa.uikit"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# 运行时给 Tk 类打补丁做多语言，静态类型看不到这些动态属性。
+module = ["rpa.i18n"]
+disable_error_code = ["method-assign", "attr-defined", "call-overload", "misc", "call-arg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "engine: 纯逻辑测试（引擎 / Excel / 日志 / 主题 / i18n）",
+    "gui: 需要 Tk 窗口的界面测试",
+    "system: 触及系统资源（注册表 / 托盘），不碰鼠标键盘",
+    "slow: 会驱动真实屏幕或长时间等待",
+]
+filterwarnings = ["error::DeprecationWarning:rpa.*"]
+
+[tool.coverage.run]
+source = ["rpa"]
+omit = ["rpa/__init__.py"]
+
+[tool.coverage.report]
+skip_empty = true

@@ -8,9 +8,13 @@ import os
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa import tray  # noqa: E402
+
+pytestmark = pytest.mark.system
 
 _ok: list[str] = []
 _bad: list[str] = []

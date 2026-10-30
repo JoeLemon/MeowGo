@@ -12,10 +12,14 @@ import threading
 import time
 import tkinter as tk
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa.engine import Executor, Step  # noqa: E402
 from rpa.gui import enable_dpi_awareness as _enable_dpi_awareness  # noqa: E402
+
+pytestmark = [pytest.mark.gui, pytest.mark.slow]
 
 _enable_dpi_awareness()
 

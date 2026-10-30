@@ -37,7 +37,6 @@ _source_attr = "_mg_i18n_source"
 EN: dict[str, str] = {
     # 通用
     "确定": "OK",
-    "取消": "Cancel",
     "保存": "Save",
     "关闭": "Close",
     "删除": "Delete",
@@ -87,7 +86,6 @@ EN: dict[str, str] = {
     "宏录制鼠标操作…": "Record mouse actions…",
     "录成坐标步骤": "Save as coordinate steps",
     "运行当前组": "Run current group",
-    "循环运行当前组": "Loop current group",
     "运行全部组": "Run all groups",
     "带数据运行…": "Run with data…",
     "单步调试运行这个组": "Debug this group",
@@ -95,7 +93,6 @@ EN: dict[str, str] = {
     "单步调试开关：开": "Step debug: On",
     "单步调试开关：关": "Step debug: Off",
     "定时运行…": "Scheduled runs…",
-    "暂停 / 继续": "Pause / Resume",
     "停止": "Stop",
     "F9 全局": "F9 global",
     "收起运行日志": "Collapse run log",
@@ -139,13 +136,7 @@ EN: dict[str, str] = {
     "内容": "Content",
     "重复": "Repeat",
     "备注": "Note",
-    "此执行组尚未添加步骤": "This group has no steps yet",
-    "请添加第一个步骤，或通过右键菜单批量导入。":
-        "Add the first step, or import steps from the right-click menu.",
     "在文件夹中显示": "Show in folder",
-    "运行日志": "Run log",
-    "收起 / 展开日志": "Collapse / expand log",
-    "收起 / 展开日志": "Collapse / expand log",
     "复制全部日志到剪贴板": "Copy all logs to clipboard",
     "收起摘要": "Collapse summary",
     "打开报告": "Open report",
@@ -156,9 +147,6 @@ EN: dict[str, str] = {
     "在步骤表里标出失败的那一步": "Highlight the failed step in the table",
     "已保存 · ": "Saved · ",
     "未保存…": "Unsaved…",
-    "已暂停": "Paused",
-    "执行完成": "Completed",
-    "执行出错": "Failed",
     "搜索步骤…": "Search steps…",
     "没有找到“": "No steps matching “",
     "”的步骤": "”",
@@ -216,6 +204,15 @@ EN: dict[str, str] = {
     "用当前任务的时间和执行组创建每天运行的计划任务":
         "Create a daily Windows task with this task's time and group",
     "删除计划任务": "Delete task",
+    "查询状态": "Check status",
+    "查看计划任务的上次运行结果与下次运行时间":
+        "Show the last run result and next run time of the scheduled task",
+    "查询失败：尚未创建该计划任务，或任务计划程序不可用":
+        "Query failed: the task has not been created, or Task Scheduler is unavailable.",
+    "上次运行：": "Last run: ",
+    " · 下次：": " · Next: ",
+    "正在运行": "Running",
+    "尚未运行过": "Not run yet",
     "还没有定时任务": "No scheduled tasks",
     "点左侧「新增」创建；开关可快速启停。":
         "Click Add on the left to create one. Use the switch to enable or disable it.",
@@ -345,7 +342,6 @@ EN: dict[str, str] = {
     "高级选项": "Advanced options",
     "识别范围、第几个、灰度、等待、重试、输入方式":
         "Region, occurrence, grayscale, wait, retry, input method",
-    "等待": "Wait",
     "秒（0 = 一直等）": "seconds (0 = wait indefinitely)",
     "超时后": "On timeout",
     "跳过这步": "Skip this step",
@@ -405,7 +401,6 @@ EN: dict[str, str] = {
     "先填写图片名": "Enter an image name first.",
     "识别范围格式不对，要写 x,y,宽,高": "Invalid region format. Use x,y,width,height.",
     "检查中…": "Testing…",
-    "基础": "Basics",
     "（还没有其它组）": "(no other groups)",
     "可调用：": "Available groups: ",
     "也可点右侧键盘按钮直接按组合键录入（Ctrl+Shift+A 这种）":
@@ -505,7 +500,6 @@ EN: dict[str, str] = {
     "恢复失败": "Restore failed",
     "恢复配置备份": "Restore configuration backup",
     "已恢复配置备份：": "Configuration backup restored: ",
-    "打开失败": "Open failed",
     "重名": "Duplicate name",
     "执行组「": "Group “",
     "」已存在": "” already exists",
@@ -534,16 +528,13 @@ EN: dict[str, str] = {
     "已新增步骤：": "Step added: ",
     "请先在右侧选择一个步骤": "Select a step on the right first.",
     "编辑步骤": "Edit step",
-    "已复制步骤": "Step duplicated.",
     "确定删除第 ": "Delete step ",
     " 步（": " (",
     "确定删除选中的 ": "Delete the selected ",
     "已删除 ": "Deleted ",
     "移动步骤": "Move step",
     "已移动 ": "Moved ",
-    "没有可撤销的操作": "Nothing to undo.",
     "已撤销：": "Undone: ",
-    "没有可重做的操作": "Nothing to redo.",
     "已重做：": "Redone: ",
     "撤销（无）": "Undo (none)",
     "重做（无）": "Redo (none)",
@@ -574,12 +565,10 @@ EN: dict[str, str] = {
         "Drag to select the match region (coordinates only, no screenshot). Press Esc to cancel.",
     "按住鼠标拖拽框选要识别的区域，Esc 取消":
         "Drag to select the match region. Press Esc to cancel.",
-    "框选区域太小，已取消": "Selected region is too small; canceled.",
     "截图失败": "Screenshot failed",
     "已保存截图：": "Screenshot saved: ",
     "不能使用图片。\n请选中一个图片类步骤，或在「新增步骤」里选择图片类指令。":
         " cannot use an image.\nSelect an image-based step, or choose an image instruction in Add step.",
-    "日志为空，没有可复制的内容": "The log is empty; nothing to copy.",
     " 行日志到剪贴板": " log lines copied to clipboard.",
     "配置有误": "Invalid configuration",
     "正在运行中，请先停止": "A run is already in progress. Stop it first.",
@@ -600,7 +589,6 @@ EN: dict[str, str] = {
     "已有运行在进行": "A run is already in progress.",
     "另一个 MeowGo 正在运行（可能是计划任务），\n等它结束后再试。":
         "Another MeowGo instance is running (possibly a scheduled task).\nTry again after it finishes.",
-    "运行中…": "Running…",
     "（循环）": " (loop)",
     "（单步调试）": " (step debug)",
     "单步调试：每一步执行前都会确认":
@@ -611,7 +599,6 @@ EN: dict[str, str] = {
     "已开启": "enabled",
     "已关闭": "disabled",
     "（下次运行生效）": " (takes effect on the next run)",
-    "正在停止…": "Stopping…",
     "定时运行跳过：找不到执行组「": "Scheduled run skipped: group “",
     "找不到执行组「": "Group “",
     "定时运行触发：当前组": "Scheduled run started: current group",
@@ -675,7 +662,6 @@ EN: dict[str, str] = {
     "正在执行：": "Executing: ",
     " · 第 ": " · step ",
     "已定位：": "Go to: ",
-    "这次运行没有失败的步骤": "This run has no failed steps.",
     "全局停止热键 F9 注册失败（可能被占用）":
         "Failed to register the global stop hotkey F9 (it may be in use).",
     "全局运行热键 F5 注册失败（可能被占用）":
@@ -687,6 +673,7 @@ EN: dict[str, str] = {
     " 个坐标步骤（可用拖拽调整顺序）":
         " coordinate steps (drag to reorder).",
     "关于": "About",
+    "版本：": "Version: ",
     "确认退出": "Confirm exit",
     "任务仍在运行，确定退出？": "A run is still in progress. Exit anyway?",
     "显示主窗口": "Show main window",
@@ -781,6 +768,12 @@ EN: dict[str, str] = {
     "设置变量": "Set variable",
     "复制选中文字到变量": "Copy selection to variable",
     "拖拽": "Drag",
+    "点击文字": "Click text",
+    "等待文字出现": "Wait for text",
+    "断言文字出现": "Assert text",
+    "点击控件": "Click control",
+    "条件：变量比较则执行": "Condition: variable matches",
+    "HTTP 请求": "HTTP request",
     "基础": "Basics",
 
     # 指令提示
@@ -809,6 +802,18 @@ EN: dict[str, str] = {
     "变量名，如 订单号": "Variable name, e.g. order_id",
     "起点图|终点图；也可写 x1,y1|x2,y2":
         "Start image|end image; or x1,y1|x2,y2",
+    "屏幕上的文字，如 提交；可加 @x,y,宽,高":
+        "Text on screen, e.g. Submit; optionally add @x,y,w,h",
+    "要等的文字；可加 @x,y,宽,高":
+        "Text to wait for; optionally add @x,y,w,h",
+    "必须出现的文字；可加 @x,y,宽,高":
+        "Text that must appear; optionally add @x,y,w,h",
+    "控件名称，如 确定；可写 名称|控件类型":
+        "Control name, e.g. OK; optionally Name|ControlType",
+    "变量名 运算符 值|组名，如 次数<5|重试":
+        "Variable operator value|group, e.g. count<5|retry",
+    "GET https://…|变量名；POST 可再加 |请求体":
+        "GET https://…|variable; for POST append |body",
     "重复次数：": "Repeat count: ",
     "点击次数": "click count",
     "双击次数": "double-click count",
@@ -821,6 +826,9 @@ EN: dict[str, str] = {
     "展开 / 收起指令类型": "Expand / collapse step types",
     "展开 / 收起选项": "Show / hide options",
     "没有匹配的指令类型": "No matching step types",
+    "请尝试其他关键词，或清除搜索以显示全部步骤。":
+        "Try another keyword, or clear the search to show all steps.",
+    "输入方式": "Input method",
     "搜索过滤中不能拖动排序，请先清空搜索框":
         "Cannot reorder while a search filter is active. Clear the search first.",
     "无法启动键盘录制（键盘钩子安装失败），请手动输入":
@@ -864,6 +872,25 @@ EN: dict[str, str] = {
     "若个别应用不支持粘贴，可在「高级选项」中改为逐字输入。":
         "If an application does not accept paste, switch to character-by-character "
         "input under Advanced options.",
+    "左侧填写屏幕上要识别的文字；可夹 @x,y,宽,高 限定范围。":
+        "Enter the text to detect on screen on the left; optionally append @x,y,w,h "
+        "to limit the region.",
+    "文字识别依赖 OCR 组件（中文需安装 chi_sim 语言包）。":
+        "Text detection requires the OCR component (install the chi_sim language pack "
+        "for Chinese).",
+    "左侧填写控件名称，可用「名称|控件类型」限定，如 确定|Button。":
+        "Enter the control name on the left; optionally restrict it with Name|ControlType, "
+        "e.g. OK|Button.",
+    "控件识别依赖 uiautomation 组件。":
+        "Control detection requires the uiautomation component.",
+    "左侧填写比较条件，右侧填写满足后执行的执行组。":
+        "Enter the comparison on the left and the group to run on match on the right.",
+    "运算符：== != > < >= <= contains notcontains，如 计数>3。":
+        "Operators: == != > < >= <= contains notcontains, e.g. count>3.",
+    "要写成 方法 地址|变量名[|请求体]，如 GET https://example.com|响应。":
+        "Write Method URL|variable[|body], e.g. GET https://example.com|response.",
+    "响应内容会存入指定变量。":
+        "The response body is stored in the specified variable.",
     "截图或选图后，请点击「预览」核对内容。":
         "After capturing or choosing an image, click Preview to verify it.",
     "若定位有误，可在「高级选项」中框选识别范围或指定第几个匹配项。":
@@ -1025,7 +1052,8 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], .
         (r"^(左键单击|左键双击|右键单击|输入文本|等待|滚轮|热键组合|粘贴当前时间|"
          r"系统命令|调用执行组|条件：出现图片则执行|窗口操作|坐标点击|移动鼠标|"
          r"条件：没出现图片则执行|条件：二选一|条件：窗口存在则执行|设置变量|"
-         r"复制选中文字到变量|拖拽)：(.+)$",
+         r"复制选中文字到变量|拖拽|点击文字|等待文字出现|断言文字出现|点击控件|"
+         r"条件：变量比较则执行|HTTP 请求)：(.+)$",
          lambda m: f"{tr(m.group(1))}: {m.group(2)}"),
     )
 )

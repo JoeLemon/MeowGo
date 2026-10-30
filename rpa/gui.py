@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -19,21 +20,65 @@ from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
 
-from . import assets, autostart, i18n, theme, tray, uikit
-from .engine import (CONDITION_TYPES, IMAGE_STEP_TYPES, IMAGE_TYPES,
-                     STEP_TYPES, Executor, Group, Project, Step,
-                     estimate_steps, export_excel, find_images, import_excel,
-                     list_run_reports, opencv_available, parse_region,
-                     parse_report_table, validate_environment,
-                     validate_project)
+from . import __version__ as APP_VERSION
+from . import assets, autostart, dialogs, i18n, logs, theme, tray, uikit
+from .dialogs import BaseDialog, GroupDialog, ShortcutsDialog
+from .engine import (
+    CONDITION_TYPES,
+    IMAGE_STEP_TYPES,
+    IMAGE_TYPES,
+    REGION_STEP_TYPES,
+    STEP_TYPES,
+    TEXT_STEP_TYPES,
+    UIA_STEP_TYPES,
+    Executor,
+    Group,
+    Project,
+    Step,
+    estimate_steps,
+    export_excel,
+    find_images,
+    import_excel,
+    list_run_reports,
+    opencv_available,
+    parse_region,
+    parse_report_table,
+    validate_environment,
+    validate_project,
+)
 from .lock import InstanceLock, make_lock_name
-from .theme import (CONTROL_LG, CONTROL_MD, CONTROL_SM, CONTROL_XS,
-                    DARK_PALETTE, FONT_BODY, FONT_BODY_BOLD, FONT_CAPTION,
-                    FONT_CAPTION_BOLD, FONT_DISPLAY, FONT_HERO, FONT_MONO,
-                    FONT_NOTE, FONT_NOTE_BOLD, FONT_SECTION, FONT_TITLE,
-                    FONT_TITLE_LARGE, FONT_SIZE_BODY, FONT_SIZE_CAPTION,
-                    FONT_SIZE_NOTE, ICON_LG, ICON_MD, ICON_SM, ICON_XS,
-                    LIGHT_PALETTE, TABLE_ROW_HEIGHT)
+from .recorder import (
+    KeyRecorder,
+    MacroRecorder,
+    vk_to_key_name,  # noqa: F401 - 保持旧的 gui.vk_to_key_name 导入路径
+)
+from .theme import (
+    CONTROL_LG,
+    CONTROL_MD,
+    CONTROL_SM,
+    CONTROL_XS,
+    DARK_PALETTE,
+    FONT_BODY,
+    FONT_BODY_BOLD,
+    FONT_CAPTION,
+    FONT_CAPTION_BOLD,
+    FONT_DISPLAY,
+    FONT_HERO,
+    FONT_MONO,
+    FONT_NOTE,
+    FONT_NOTE_BOLD,
+    FONT_SECTION,
+    FONT_SIZE_BODY,
+    FONT_SIZE_CAPTION,
+    FONT_SIZE_NOTE,
+    FONT_TITLE,
+    FONT_TITLE_LARGE,
+    ICON_MD,
+    ICON_SM,
+    ICON_XS,
+    LIGHT_PALETTE,
+    TABLE_ROW_HEIGHT,
+)
 
 APP_TITLE = "MeowGo"
 APP_LOGO_FILE = "meowgo_logo_transparent.png"
@@ -182,9 +227,104 @@ def schedule_day_text(target: datetime, now: Optional[datetime] = None) -> str:
         return i18n.tr("明天")
     return i18n.tr("周" + "一二三四五六日"[target.weekday()])
 
-# 配色唯一来源是 rpa.theme；这里把浅色令牌铺成模块常量，既有代码可直接用
-# BG / CARD / ACCENT ...。_apply_theme 切主题时同样整组替换。
-globals().update(LIGHT_PALETTE)
+# 配色唯一来源是 rpa.theme；这里把用到的浅色令牌点名为模块常量，既有代码
+# 可直接写 BG / CARD / ACCENT ...。_apply_theme 切主题时由 _apply_palette
+# 整组替换。显式赋值（而不是 globals().update）是为了让 linter / IDE 能看见
+# 这些名字，拼错色板名时能在静态检查阶段报出来。
+BG = LIGHT_PALETTE["BG"]
+CARD = LIGHT_PALETTE["CARD"]
+ACCENT = LIGHT_PALETTE["ACCENT"]
+ACCENT_STRONG = LIGHT_PALETTE["ACCENT_STRONG"]
+ACCENT_MIST = LIGHT_PALETTE["ACCENT_MIST"]
+TEXT = LIGHT_PALETTE["TEXT"]
+MUTED = LIGHT_PALETTE["MUTED"]
+TEXT_WEAK = LIGHT_PALETTE["TEXT_WEAK"]
+BORDER = LIGHT_PALETTE["BORDER"]
+SUCCESS = LIGHT_PALETTE["SUCCESS"]
+WARNING = LIGHT_PALETTE["WARNING"]
+DANGER = LIGHT_PALETTE["DANGER"]
+INFO = LIGHT_PALETTE["INFO"]
+SUCCESS_TEXT = LIGHT_PALETTE["SUCCESS_TEXT"]
+DANGER_TEXT = LIGHT_PALETTE["DANGER_TEXT"]
+LOG_BG = LIGHT_PALETTE["LOG_BG"]
+LOG_FG = LIGHT_PALETTE["LOG_FG"]
+LOG_HEAD_BG = LIGHT_PALETTE["LOG_HEAD_BG"]
+LOG_HEAD_MUTED = LIGHT_PALETTE["LOG_HEAD_MUTED"]
+LOG_INFO = LIGHT_PALETTE["LOG_INFO"]
+LOG_WARN = LIGHT_PALETTE["LOG_WARN"]
+LOG_ERROR = LIGHT_PALETTE["LOG_ERROR"]
+LOG_TIME = LIGHT_PALETTE["LOG_TIME"]
+CONSOLE_SCROLL = LIGHT_PALETTE["CONSOLE_SCROLL"]
+ZEBRA = LIGHT_PALETTE["ZEBRA"]
+HEADING_BG = LIGHT_PALETTE["HEADING_BG"]
+SELECT_BG = LIGHT_PALETTE["SELECT_BG"]
+TABLE_HEAD_BG = LIGHT_PALETTE["TABLE_HEAD_BG"]
+TABLE_HEAD_FG = LIGHT_PALETTE["TABLE_HEAD_FG"]
+TABLE_BORDER = LIGHT_PALETTE["TABLE_BORDER"]
+TABLE_ROW_SELECTED = LIGHT_PALETTE["TABLE_ROW_SELECTED"]
+FIELD_FOCUS = LIGHT_PALETTE["FIELD_FOCUS"]
+ENTRY_BG = LIGHT_PALETTE["ENTRY_BG"]
+SCROLL_THUMB = LIGHT_PALETTE["SCROLL_THUMB"]
+SCROLL_TRACK = LIGHT_PALETTE["SCROLL_TRACK"]
+PROGRESS_TROUGH = LIGHT_PALETTE["PROGRESS_TROUGH"]
+PREVIEW_BG = LIGHT_PALETTE["PREVIEW_BG"]
+MARK_RUNNING = LIGHT_PALETTE["MARK_RUNNING"]
+MARK_DONE = LIGHT_PALETTE["MARK_DONE"]
+MARK_FAILED = LIGHT_PALETTE["MARK_FAILED"]
+
+
+def _apply_palette(palette: dict) -> None:
+    """把色板写回上面的模块级常量（切主题时调用）。"""
+    global BG, CARD, ACCENT, ACCENT_STRONG, ACCENT_MIST, TEXT, MUTED
+    global TEXT_WEAK, BORDER, SUCCESS, WARNING, DANGER, INFO
+    global SUCCESS_TEXT, DANGER_TEXT
+    global LOG_BG, LOG_FG, LOG_HEAD_BG, LOG_HEAD_MUTED
+    global LOG_INFO, LOG_WARN, LOG_ERROR, LOG_TIME, CONSOLE_SCROLL
+    global ZEBRA, HEADING_BG, SELECT_BG
+    global TABLE_HEAD_BG, TABLE_HEAD_FG, TABLE_BORDER, TABLE_ROW_SELECTED
+    global FIELD_FOCUS, ENTRY_BG, SCROLL_THUMB, SCROLL_TRACK
+    global PROGRESS_TROUGH, PREVIEW_BG
+    global MARK_RUNNING, MARK_DONE, MARK_FAILED
+    BG = palette["BG"]
+    CARD = palette["CARD"]
+    ACCENT = palette["ACCENT"]
+    ACCENT_STRONG = palette["ACCENT_STRONG"]
+    ACCENT_MIST = palette["ACCENT_MIST"]
+    TEXT = palette["TEXT"]
+    MUTED = palette["MUTED"]
+    TEXT_WEAK = palette["TEXT_WEAK"]
+    BORDER = palette["BORDER"]
+    SUCCESS = palette["SUCCESS"]
+    WARNING = palette["WARNING"]
+    DANGER = palette["DANGER"]
+    INFO = palette["INFO"]
+    SUCCESS_TEXT = palette["SUCCESS_TEXT"]
+    DANGER_TEXT = palette["DANGER_TEXT"]
+    LOG_BG = palette["LOG_BG"]
+    LOG_FG = palette["LOG_FG"]
+    LOG_HEAD_BG = palette["LOG_HEAD_BG"]
+    LOG_HEAD_MUTED = palette["LOG_HEAD_MUTED"]
+    LOG_INFO = palette["LOG_INFO"]
+    LOG_WARN = palette["LOG_WARN"]
+    LOG_ERROR = palette["LOG_ERROR"]
+    LOG_TIME = palette["LOG_TIME"]
+    CONSOLE_SCROLL = palette["CONSOLE_SCROLL"]
+    ZEBRA = palette["ZEBRA"]
+    HEADING_BG = palette["HEADING_BG"]
+    SELECT_BG = palette["SELECT_BG"]
+    TABLE_HEAD_BG = palette["TABLE_HEAD_BG"]
+    TABLE_HEAD_FG = palette["TABLE_HEAD_FG"]
+    TABLE_BORDER = palette["TABLE_BORDER"]
+    TABLE_ROW_SELECTED = palette["TABLE_ROW_SELECTED"]
+    FIELD_FOCUS = palette["FIELD_FOCUS"]
+    ENTRY_BG = palette["ENTRY_BG"]
+    SCROLL_THUMB = palette["SCROLL_THUMB"]
+    SCROLL_TRACK = palette["SCROLL_TRACK"]
+    PROGRESS_TROUGH = palette["PROGRESS_TROUGH"]
+    PREVIEW_BG = palette["PREVIEW_BG"]
+    MARK_RUNNING = palette["MARK_RUNNING"]
+    MARK_DONE = palette["MARK_DONE"]
+    MARK_FAILED = palette["MARK_FAILED"]
 
 TYPE_ICONS = {
     "click": "image", "dblclick": "image", "rightclick": "image",
@@ -194,15 +334,17 @@ TYPE_ICONS = {
     "click_xy": "mouse", "move_xy": "mouse",
     "if_not_image": "check", "if_else": "check", "if_window": "open",
     "set": "text", "copy": "copy", "drag": "mouse",
+    "click_text": "text", "wait_text": "clock", "assert_text": "check",
+    "ui_click": "mouse", "if_var": "check", "http": "link",
 }
 
 # 条件步骤里「图片 | 组名」两段式的类型（对话框用图形化双输入框）
-PIPE_CONDITION_TYPES = ("if_image", "if_not_image", "if_window")
+PIPE_CONDITION_TYPES = ("if_image", "if_not_image", "if_window", "if_var")
 
 # 新增步骤对话框里「执行组」分类：这些类型会调用 / 进入其它执行组。
 # 其余类型统一归入「基础」，方便在下拉里按分组浏览。
 TYPE_GROUP_EXEC = {"call", "if_image", "if_not_image", "if_else",
-                   "if_window"}
+                   "if_window", "if_var"}
 
 # 每种步骤类型的图标色调：遵循「墨黑为主、暖橙点睛、语义色克制」。
 # 鼠标 / 操作类用暖橙，输入类用信息蓝，等待类用警告黄，键盘类用成功绿，
@@ -218,6 +360,8 @@ TYPE_COLORS = {
     "call": TEXT_WEAK,
     "if_image": DANGER, "if_not_image": DANGER, "if_else": DANGER,
     "if_window": DANGER, "window": DANGER,
+    "click_text": INFO, "wait_text": WARNING, "assert_text": DANGER,
+    "ui_click": ACCENT_STRONG, "if_var": DANGER, "http": SUCCESS,
 }
 TYPE_ICON_COLOR = MUTED
 # 深色下把类型图标提亮一档，避免深底看不清（_apply_theme 时整组替换）
@@ -235,6 +379,10 @@ TYPE_COLORS_DARK.update({
     "if_image": DARK_PALETTE["DANGER"], "if_not_image": DARK_PALETTE["DANGER"],
     "if_else": DARK_PALETTE["DANGER"], "if_window": DARK_PALETTE["DANGER"],
     "window": DARK_PALETTE["DANGER"],
+    "click_text": DARK_PALETTE["INFO"], "wait_text": DARK_PALETTE["WARNING"],
+    "assert_text": DARK_PALETTE["DANGER"],
+    "ui_click": DARK_PALETTE["ACCENT"], "if_var": DARK_PALETTE["DANGER"],
+    "http": DARK_PALETTE["SUCCESS"],
 })
 
 # 步骤搜索框的占位文字（失焦为空时显示，不计入过滤条件）
@@ -370,19 +518,31 @@ def enable_tree_drag(tree, on_drop, show_line: bool = True) -> None:
 def enable_dpi_awareness() -> None:
     """声明 DPI 感知，使 Tk 坐标与屏幕物理像素一致（截图/点击才准确）。
 
-    必须在创建 Tk 根窗口之前调用。
+    必须在创建 Tk 根窗口之前调用。优先 per-monitor v2：多屏各自缩放时
+    坐标不会互相漂移；老系统逐级退回 per-monitor → system aware。
     """
     if sys.platform != "win32":
         return
     import ctypes
 
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Win8.1+
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4（Win10 1703+）
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(
+                ctypes.c_void_p(-4)):
+            pass
+        else:
+            raise OSError("SetProcessDpiAwarenessContext 失败")
     except Exception:
         try:
-            ctypes.windll.user32.SetProcessDPIAware()  # 旧系统
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
         except Exception:
-            pass
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)  # system
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()  # 旧系统
+                except Exception:
+                    pass
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MeowGo.GUI")
     except Exception:
@@ -561,6 +721,8 @@ class App(tk.Tk):
         self.debug_mode = bool(self.settings.get("debug_mode", False))
         self._debug_once = False       # 一次性调试：只作用下一程运行
         self._dirty = False
+        self._last_saved_payload: Optional[str] = None
+        self._last_save_error = ""
         self._icons: dict[tuple, object] = {}
         # 运行辅助：失败步骤定位、日志行→步骤映射、上次报告路径
         self._failed_step: Optional[tuple[str, int]] = None
@@ -569,6 +731,8 @@ class App(tk.Tk):
         self._step_marks: dict[str, dict[int, str]] = {}
         self._last_report_path = ""
         self._last_result_path = ""
+        self._last_run_log_path = ""
+        self._run_log: Optional[logs.RunLog] = None
         self._data_path = ""
         self._run_lock: Optional[InstanceLock] = None
         # 运行进度：estimate_steps 的总步数（-1 表示不可估）、迷你置顶条
@@ -972,9 +1136,9 @@ class App(tk.Tk):
         has = index is not None
         multi = len(rows) > 1
         return [
-            MI(self._undo_label(), "up", self.undo, "Ctrl+Z",
+            MI(self._undo_label(), "undo", self.undo, "Ctrl+Z",
                enabled=bool(self._undo_stack)),
-            MI(self._redo_label(), "down", self.redo, "Ctrl+Y",
+            MI(self._redo_label(), "redo", self.redo, "Ctrl+Y",
                enabled=bool(self._redo_stack)),
             "-",
             MI("新建执行组", "add", self.add_group, "Ctrl+G", accent=True),
@@ -1606,8 +1770,8 @@ class App(tk.Tk):
         previous = self._last_palette
         self.dark = bool(dark)
         theme.set_dark(dark)
-        for key, value in palette.items():
-            globals()[key] = value
+        _apply_palette(palette)
+        dialogs.apply_palette(palette)
         TYPE_COLORS.clear()
         TYPE_COLORS.update(TYPE_COLORS_DARK if dark else LIGHT_TYPE_COLORS)
         uikit.set_dark_mode(dark)
@@ -1714,19 +1878,64 @@ class App(tk.Tk):
         self._save_state()
         self._log("info", f"已切换到{'深色' if self.dark else '浅色'}主题")
 
-    def _save_state(self) -> None:
+    def _save_state(self) -> bool:
         """把执行组与设置写回程序目录的状态文件（没有“项目”概念）。
 
-        写之前先把旧文件备份到 backups/（只留最近几份），改坏了能找回。
+        先用临时文件写完整内容，再 os.replace 原子替换：写到一半断电 / 磁盘
+        满时，旧文件仍然完好。写之前把旧文件备份到 backups/（只留最近几份）。
+        返回 False 表示这次没写成功，调用方可据此决定是否提示。
         """
-        self._backup_settings()
         try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
-                json.dump(self._state_dict(), fh, ensure_ascii=False, indent=2)
+            payload = json.dumps(self._state_dict(), ensure_ascii=False,
+                                 indent=2)
+        except (TypeError, ValueError) as exc:
+            self._on_save_failed(f"配置无法序列化：{exc}")
+            return False
+        if payload == self._last_saved_payload and os.path.exists(
+                SETTINGS_PATH):
+            # 内容没变就别重写，也别再备份一份同样的文件
             self._dirty = False
             self._set_saved_label()
-        except OSError:
-            pass
+            return True
+
+        self._backup_settings()
+        directory = os.path.dirname(SETTINGS_PATH) or "."
+        tmp_path = ""
+        try:
+            os.makedirs(directory, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".rpa_settings_", suffix=".tmp", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, SETTINGS_PATH)
+        except OSError as exc:
+            self._on_save_failed(exc.strerror or str(exc))
+            return False
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+        self._last_saved_payload = payload
+        self._last_save_error = ""
+        self._dirty = False
+        self._set_saved_label()
+        return True
+
+    def _on_save_failed(self, reason: str) -> None:
+        """保存失败：状态栏显示原因，保留 dirty 让自动保存继续重试。"""
+        self._dirty = True
+        text = f"保存失败：{reason}"
+        if getattr(self, "autosave_label", None) is not None:
+            self.autosave_label.configure(text=text, fg=DANGER)
+        # 自动保存每 2 秒重试一次，同一个错误只记一行，避免刷屏
+        if reason != self._last_save_error:
+            self._last_save_error = reason
+            self._log("error", f"配置保存失败：{reason}（会自动重试）")
 
     def _set_saved_label(self) -> None:
         """状态栏保存指示：已保存 · 时间。"""
@@ -2985,6 +3194,9 @@ class App(tk.Tk):
 
     # --------------------------------------------------------------- 日志
     def _enqueue_log(self, level: str, message: str) -> None:
+        run_log = self._run_log
+        if run_log is not None:
+            run_log.write(level, message, self._current_run_step)
         self.log_queue.put((level, message))
 
     def _log(self, level: str, message: str) -> None:
@@ -3310,6 +3522,12 @@ class App(tk.Tk):
         self.running = True
         self.paused = False
         self._debug_once = False        # 一次性开关跑完即弃
+        # 每次运行单独落一份过程日志，事后能按时间/步骤回查
+        self._run_log = logs.RunLog(REPORTS_DIR,
+                                    entry or "全部执行组")
+        self._last_run_log_path = self._run_log.path
+        if self._run_log.opened:
+            self._log("info", f"运行日志：{self._run_log.path}")
         for button in (self.btn_run, self.btn_loop):
             button.set_enabled(False)
         self.btn_pause.set_enabled(True)
@@ -3377,6 +3595,17 @@ class App(tk.Tk):
             self._set_log_state(result_text)
             if self._failed_step is not None:
                 self.btn_locate.pack(side="right", padx=(0, self.s(6)))
+            run_log = self._run_log
+            if run_log is not None:
+                try:
+                    report = self.executor.report()
+                    summary = (f"运行结束：{result_text} · "
+                               f"{report['steps']} 步，失败 {report['failed']}，"
+                               f"耗时 {report['seconds']:g} 秒")
+                except Exception:  # noqa: BLE001 — 统计失败不影响收尾
+                    summary = f"运行结束：{result_text}"
+                run_log.close(summary)
+                self._run_log = None
 
     def _show_summary(self, result: str) -> None:
         """运行结束摘要：写到软件最底行状态栏（不再占用日志上方空间）。"""
@@ -3633,6 +3862,9 @@ class App(tk.Tk):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(report_markdown(self.executor.report(), result,
                                          report_dir=REPORTS_DIR))
+            if self._last_run_log_path:
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n运行日志：`{self._last_run_log_path}`\n")
             self._last_report_path = path
             write_report_index(REPORTS_DIR)
             self._log("info", f"运行报告已保存：{path}")
@@ -3744,19 +3976,27 @@ class App(tk.Tk):
             messagebox.showerror("打开失败", str(exc), parent=self)
 
     def _check_dpi_setup(self) -> None:
-        """多显示器 + 界面被放大时，提醒一次跨屏识别的风险。"""
-        if self.scale == 1.0:
-            return
+        """多显示器时说明当前的 DPI 感知级别（per-monitor 下负坐标可直接用）。"""
         try:
             import ctypes
 
             screens = ctypes.windll.user32.GetSystemMetrics(80)  # SM_CMONITORS
         except Exception:  # noqa: BLE001
             return
-        if screens > 1:
-            self._log("warn",
-                      "检测到多显示器：图片识别请在同一屏幕内完成，"
-                      "跨屏（尤其缩放不同时）可能识别不到")
+        if screens <= 1:
+            return
+        awareness = ctypes.c_int(0)
+        try:
+            ctypes.windll.shcore.GetProcessDpiAwareness(
+                None, ctypes.byref(awareness))
+        except Exception:  # noqa: BLE001 - 老系统没有 shcore
+            awareness.value = 0
+        if awareness.value >= 2:
+            self._log("info", "检测到多显示器：已启用 per-monitor DPI，"
+                              "副屏坐标（含负数）可直接使用")
+        else:
+            self._log("warn", "检测到多显示器但未启用 per-monitor DPI，"
+                              "副屏缩放与主屏不同时坐标可能偏移")
 
     def toggle_pause(self) -> None:
         if not self.running:
@@ -3770,6 +4010,9 @@ class App(tk.Tk):
     def _mark_running_step(self, group_name: str, index: int, step: Step) -> None:
         """工作线程调用，只入队。"""
         self._current_run_step = (group_name, index)
+        if self._run_log is not None:
+            self._run_log.step_start(group_name, index, step.label(),
+                                     (step.content or "").strip())
         self.ui_queue.put(("step", (group_name, index)))
 
     def _mark_step_done(self, group_name: str, index: int, step: Step,
@@ -4021,12 +4264,14 @@ class App(tk.Tk):
 
     def show_about(self) -> None:
         message = (
-            f"{APP_TITLE}\n\n"
+            "MeowGo\n\n"
             "将原 Excel 配置迁移至客户端界面：可视化维护执行组与步骤，\n"
             "支持执行组间调用复用、屏幕截图、运行前校验、日志记录与全局停止热键。\n\n"
             "执行组自动保存于程序目录的 rpa_settings.json；\n"
             "支持 Excel 单组或全部工作表导入导出（兼容旧版 cmd.xls）。")
-        messagebox.showinfo("关于", i18n.tr(message), parent=self)
+        message = (i18n.tr(message) + "\n\n"
+                   + i18n.tr("版本：") + APP_VERSION)
+        messagebox.showinfo("关于", message, parent=self)
 
     # --------------------------------------------------------------- 关闭
     def on_close(self) -> None:
@@ -4142,635 +4387,6 @@ class App(tk.Tk):
         if ending:
             self.after(0, self._quit)      # 真关机：立刻退，别挡系统
 
-
-# ---------------------------------------------------------------------------
-# 按键录制：底层键盘钩子（WH_KEYBOARD_LL）
-# ---------------------------------------------------------------------------
-
-class _KBDLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [("vkCode", ctypes.wintypes.DWORD),
-                ("scanCode", ctypes.wintypes.DWORD),
-                ("flags", ctypes.wintypes.DWORD),
-                ("time", ctypes.wintypes.DWORD),
-                ("dwExtraInfo", ctypes.c_void_p)]
-
-
-_HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int,
-                             ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
-
-_WH_KEYBOARD_LL = 13
-_WM_KEYDOWN, _WM_KEYUP = 0x100, 0x101
-_WM_SYSKEYDOWN, _WM_SYSKEYUP = 0x104, 0x105
-_MAPVK_VK_TO_CHAR = 2
-
-# VK → 引擎键名（这些键不随键盘布局变化）
-_VK_KEYMAP = {
-    0x08: "backspace", 0x09: "tab", 0x0D: "enter", 0x1B: "esc",
-    0x20: "space", 0x2D: "insert", 0x2E: "delete", 0x24: "home",
-    0x23: "end", 0x21: "pageup", 0x22: "pagedown", 0x25: "left",
-    0x26: "up", 0x27: "right", 0x28: "down", 0x14: "capslock",
-    0x90: "numlock", 0x91: "scrolllock", 0x2C: "printscreen",
-    0x13: "pause", 0x5D: "apps",
-    0x10: "shift", 0xA0: "shift", 0xA1: "shift",
-    0x11: "ctrl", 0xA2: "ctrl", 0xA3: "ctrl",
-    0x12: "alt", 0xA4: "alt", 0xA5: "alt",
-    0x5B: "win", 0x5C: "win",
-    0x6B: "add", 0x6D: "subtract", 0x6A: "multiply", 0x6F: "divide",
-    0x6E: "decimal",
-}
-
-# 美式布局的 OEM 标点兜底（按当前布局取不到字符时使用）
-_VK_OEM_US = {0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".",
-              0xBF: "/", 0xC0: "`", 0xDB: "[", 0xDC: "\\", 0xDD: "]",
-              0xDE: "'", 0xE2: "\\"}
-
-# 定稿时修饰键统一排在前头的顺序
-_MODIFIER_ORDER = ("ctrl", "alt", "shift", "win")
-
-_user32: Optional[ctypes.WinDLL] = None
-
-
-def _win_user32() -> ctypes.WinDLL:
-    """user32 的私有 ctypes 句柄（单独设 argtypes，不影响其它调用方）。"""
-    global _user32
-    if _user32 is None:
-        user32 = ctypes.WinDLL("user32")
-        user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
-        user32.GetWindowThreadProcessId.argtypes = [
-            ctypes.wintypes.HWND, ctypes.wintypes.LPDWORD]
-        user32.GetKeyboardLayout.argtypes = [ctypes.wintypes.DWORD]
-        user32.GetKeyboardLayout.restype = ctypes.wintypes.HKL
-        user32.MapVirtualKeyExW.argtypes = [ctypes.wintypes.UINT,
-                                            ctypes.wintypes.UINT,
-                                            ctypes.wintypes.HKL]
-        user32.MapVirtualKeyExW.restype = ctypes.wintypes.UINT
-        user32.SetWindowsHookExW.argtypes = [
-            ctypes.c_int, _HOOKPROC, ctypes.wintypes.HINSTANCE,
-            ctypes.wintypes.DWORD]
-        user32.SetWindowsHookExW.restype = ctypes.wintypes.HHOOK
-        user32.UnhookWindowsHookEx.argtypes = [ctypes.wintypes.HHOOK]
-        user32.UnhookWindowsHookEx.restype = ctypes.wintypes.BOOL
-        user32.CallNextHookEx.argtypes = [
-            ctypes.wintypes.HHOOK, ctypes.c_int, ctypes.wintypes.WPARAM,
-            ctypes.wintypes.LPARAM]
-        user32.CallNextHookEx.restype = ctypes.c_long
-        _user32 = user32
-    return _user32
-
-
-def vk_to_key_name(vk: int, scan: int = 0) -> Optional[str]:
-    """把 Windows 虚拟键码翻译成引擎（pyautogui）认识的键名。
-
-    - 修饰键 / 功能键 / 编辑键 / 小键盘：查表，与键盘布局无关
-    - 字母与标点：按当前键盘布局取字符，非 ASCII 时退回美式布局，
-      保证任何输入法下都能录到正确的键
-    - 顶层数字键返回 None：引擎旧版限制不识别，由调用方提示改小键盘
-    """
-    if vk in _VK_KEYMAP:
-        return _VK_KEYMAP[vk]
-    if 0x70 <= vk <= 0x87:          # F1 ~ F24
-        return f"f{vk - 0x6F}"
-    if 0x60 <= vk <= 0x69:          # 小键盘 0 ~ 9
-        return f"num{vk - 0x60}"
-    if 0x30 <= vk <= 0x39:          # 顶层数字键：引擎不识别
-        return None
-    return _layout_key_char(vk) or _VK_OEM_US.get(vk)
-
-
-def _layout_key_char(vk: int) -> Optional[str]:
-    """按当前键盘布局取按键字符；失败或非 ASCII 时返回 None（兜底表接管）。"""
-    try:
-        user32 = _win_user32()
-        hkl = user32.GetKeyboardLayout(user32.GetWindowThreadProcessId(
-            user32.GetForegroundWindow(), None))
-        code = user32.MapVirtualKeyExW(vk, _MAPVK_VK_TO_CHAR, hkl)
-    except Exception:
-        return None
-    if not code:
-        return None
-    char = chr(code & 0xFFFF)
-    if char.isascii() and (char.isalpha() or not char.isalnum()):
-        return char.lower() if char.isalpha() else char
-    return None
-
-
-class KeyRecorder:
-    """把用户直接按下的组合键录成引擎的热键格式（英文逗号分隔）。
-
-    录制期间安装全局底层键盘钩子（WH_KEYBOARD_LL）：
-    - 取的是原始虚拟键码，不受输入法/键盘布局影响——中文输入法下也能录
-    - 按键被钩子吞掉，不会漏进输入框、也不会触发界面快捷键
-    - 全部松开自动定稿；单独按 Esc 取消并恢复原内容
-
-    线程模型（关键）：钩子回调里只做纯 Python 的「攒事件」——绝不调外部
-    函数、不碰 Tk（那会释放 GIL，可能触发 PyEval_RestoreThread 致命错误），
-    原始事件进 _pending 队列，由 Tk 侧的 _poll 定时取出并驱动状态机。
-
-    回调（都在 Tk 主线程的 _poll 里同步触发）：
-      on_state(active)   录制开始/结束：禁用或恢复其它控件
-      on_preview(names)  实时预览：已按下的键（修饰键排在前）
-      on_done(text)      定稿：引擎格式，如 "ctrl,shift,a"
-      on_cancel()        取消：调用方负责恢复原内容
-      on_hint(text)      提示文字
-    """
-
-    _POLL_MS = 15                      # 轮询原始按键事件的间隔
-
-    def __init__(self, widget, on_state, on_preview, on_done, on_cancel,
-                 on_hint):
-        self.widget = widget            # 用来挂轮询定时器的 Tk 控件
-        self.on_state = on_state
-        self.on_preview = on_preview
-        self.on_done = on_done
-        self.on_cancel = on_cancel
-        self.on_hint = on_hint
-        self.active = False
-        self._held: list[str] = []      # 按住中的键（按下顺序、去重）
-        self._last: list[str] = []      # 最近一次完整按下序列（定稿用）
-        self._pending: list[tuple] = []  # 钩子攒下的原始事件
-        self._poll_id = None
-        self._hook = None
-        self._proc = None               # 持有 CFUNCTYPE 引用，防止被回收
-
-    # ------------------------------------------------------------ 安装/卸载
-    def start(self, previous: str = "") -> bool:
-        """开始录制。previous 是取消时要恢复的内容；装不上钩子返回 False。"""
-        if self.active:
-            return True
-        if sys.platform != "win32":
-            self.on_hint("按键录入只支持 Windows")
-            return False
-        if not self._install_hook():
-            return False
-        self._held = []
-        self._last = []
-        self._pending = []
-        self.active = True
-        self.on_state(True)
-        self.on_hint("录制中：直接按组合键，全部松开自动录入；单独按 Esc 取消")
-        self.on_preview([])
-        self._poll_id = self.widget.after(self._POLL_MS, self._poll)
-        return True
-
-    def _install_hook(self) -> bool:
-        """安装全局键盘钩子；失败时清理回调引用并返回 False。"""
-        user32 = _win_user32()
-        user32.SetWindowsHookExW.argtypes = [
-            ctypes.c_int, _HOOKPROC, ctypes.wintypes.HINSTANCE,
-            ctypes.wintypes.DWORD]
-        self._proc = _HOOKPROC(self._on_hook)
-        hook = user32.SetWindowsHookExW(_WH_KEYBOARD_LL, self._proc, None, 0)
-        if not hook:
-            self._proc = None
-            return False
-        self._hook = hook
-        return True
-
-    def stop(self) -> None:
-        """无条件结束录制并卸载钩子（幂等）。"""
-        self.active = False
-        if self._poll_id is not None:
-            try:
-                self.widget.after_cancel(self._poll_id)
-            except Exception:
-                pass
-            self._poll_id = None
-        self._pending = []
-        self._uninstall()
-
-    def _uninstall(self) -> None:
-        if self._hook is not None:
-            try:
-                _win_user32().UnhookWindowsHookEx(self._hook)
-            except Exception:
-                pass
-            self._hook = None
-            self._proc = None
-
-    # ------------------------------------------------------------ 钩子回调
-    def _on_hook(self, nCode, wParam, lParam):
-        """钩子回调：只攒原始事件，不做任何外部调用/UI 调用（见类文档）。"""
-        try:
-            if not self.active:
-                return _win_user32().CallNextHookEx(None, nCode, wParam,
-                                                    lParam)
-            if nCode >= 0 and wParam in (_WM_KEYDOWN, _WM_SYSKEYDOWN,
-                                         _WM_KEYUP, _WM_SYSKEYUP):
-                info = ctypes.cast(lParam,
-                                   ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-                self._pending.append(
-                    (info.vkCode, info.scanCode,
-                     wParam in (_WM_KEYDOWN, _WM_SYSKEYDOWN)))
-            return 1                     # 录制中吞掉所有按键
-        except Exception:
-            return 1
-
-    def _poll(self) -> None:
-        """Tk 侧轮询：取出钩子攒下的事件，逐条驱动状态机。"""
-        if not self.active:
-            return
-        events, self._pending = self._pending, []
-        for vk, scan, down in events:
-            self._track(vk, scan, down)
-            if not self.active:          # 处理途中定稿/取消了
-                break
-        if self.active:
-            self._poll_id = self.widget.after(self._POLL_MS, self._poll)
-
-    # ------------------------------------------------------------ 状态机
-    def _track(self, vk: int, scan: int, down: bool) -> None:
-        if not self.active:
-            return
-        if down:
-            if vk == 0x1B and not self._held:
-                self._cancel()           # 单独 Esc = 取消
-                return
-            name = vk_to_key_name(vk, scan)
-            if name is None:
-                if 0x30 <= vk <= 0x39:   # 顶层数字键：引擎不识别，给提示
-                    self.on_hint("⚠ 引擎不识别顶层数字键（旧版限制），"
-                                 "请改按小键盘数字 num0~num9")
-                return
-            if name not in self._held:
-                self._held.append(name)
-            self._last = self._ordered()
-            self.on_preview(self._ordered())
-        else:
-            name = vk_to_key_name(vk, scan)
-            if name is not None and name in self._held:
-                self._held.remove(name)
-            if not self._held:
-                self._finish()
-
-    def _finish(self) -> None:
-        if not self.active or self._held:
-            return                     # 又来新按键了，等下一次全部松开
-        names = self._last
-        self._teardown()
-        if names:
-            self.on_done(",".join(names))
-        else:
-            self.on_cancel()           # 什么都没录到（只按了不可用的键）
-
-    def _cancel(self) -> None:
-        if not self.active:
-            return
-        self._teardown()
-        self.on_cancel()
-
-    def _teardown(self) -> None:
-        self.stop()
-        self.on_state(False)
-
-    def _ordered(self) -> list[str]:
-        """修饰键排在前（ctrl/alt/shift/win），其余保持按下顺序。"""
-        mods = [k for k in _MODIFIER_ORDER if k in self._held]
-        rest = [k for k in self._held if k not in _MODIFIER_ORDER]
-        return mods + rest
-
-
-# ---------------------------------------------------------------------------
-# 对话框
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# 宏录制：底层鼠标钩子（WH_MOUSE_LL）
-# ---------------------------------------------------------------------------
-
-_WH_MOUSE_LL = 14
-_WM_MOUSEMOVE = 0x0200
-_WM_LBUTTONDOWN, _WM_LBUTTONUP = 0x0201, 0x0202
-_WM_RBUTTONDOWN, _WM_RBUTTONUP = 0x0204, 0x0205
-_WM_MOUSEWHEEL = 0x020A
-
-# 位移小于这个像素不生成「移动鼠标」步骤（避免满屏都是移动）
-_MOVE_MIN_DISTANCE = 60
-# 两次点击间隔小于这个毫秒、且位置很近 → 合并成双击
-_DOUBLE_CLICK_MS = 450
-
-
-class _MSLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [("pt", ctypes.wintypes.POINT),
-                ("mouseData", ctypes.wintypes.DWORD),
-                ("flags", ctypes.wintypes.DWORD),
-                ("time", ctypes.wintypes.DWORD),
-                ("dwExtraInfo", ctypes.c_void_p)]
-
-
-_MOUSEHOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int,
-                                  ctypes.wintypes.WPARAM,
-                                  ctypes.wintypes.LPARAM)
-
-
-class MacroRecorder:
-    """把真实鼠标操作录成一组步骤（click_xy / move_xy / scroll）。
-
-    与 KeyRecorder 同样的安全模型：钩子回调只攒原始事件（纯 Python），
-    由 Tk 侧轮询驱动状态机——绝不在回调里调外部函数。
-    鼠标事件**不吞掉**：录制期间用户还能正常点界面（比如点「停止」）。
-    """
-
-    def __init__(self, widget, on_state, on_done, on_cancel, on_hint):
-        self.widget = widget
-        self.on_state = on_state
-        self.on_done = on_done
-        self.on_cancel = on_cancel
-        self.on_hint = on_hint
-        self.active = False
-        self._hook = None
-        self._proc = None
-        self._events: list[tuple] = []
-        self._steps: list[Step] = []
-        self._down: Optional[tuple] = None     # 按下中的 (x, y, ms, button)
-        self._last_click: Optional[tuple] = None
-        self._last_pos = (0, 0)
-        self._ignore_rect: Optional[tuple] = None
-        self._wheel_rest = 0                    # 不足一格的滚轮增量余量
-
-    # ------------------------------------------------------------ 安装/卸载
-    def start(self, ignore_rect: Optional[tuple] = None) -> bool:
-        """开始录制；ignore_rect 内的事件忽略（控制条自己的按钮）。"""
-        if self.active:
-            return True
-        if sys.platform != "win32":
-            self.on_hint("宏录制只支持 Windows")
-            return False
-        if not self._install_hook():
-            return False
-        self._ignore_rect = ignore_rect
-        self._events = []
-        self._steps = []
-        self._down = None
-        self._last_click = None
-        self._last_pos = (0, 0)
-        self._wheel_rest = 0
-        self.active = True
-        self.on_state(True)
-        self.on_hint("录制中：正常操作鼠标，点本窗口的「停止」结束")
-        self._schedule_poll()
-        return True
-
-    def _install_hook(self) -> bool:
-        """安装全局鼠标钩子；失败时清理回调引用并返回 False。"""
-        user32 = _win_user32()
-        user32.SetWindowsHookExW.argtypes = [
-            ctypes.c_int, _MOUSEHOOKPROC, ctypes.wintypes.HINSTANCE,
-            ctypes.wintypes.DWORD]
-        self._proc = _MOUSEHOOKPROC(self._on_hook)
-        hook = user32.SetWindowsHookExW(_WH_MOUSE_LL, self._proc, None, 0)
-        if not hook:
-            self._proc = None
-            return False
-        self._hook = hook
-        return True
-
-    def stop(self) -> None:
-        """停止录制并生成步骤（幂等）。"""
-        if not self.active:
-            return
-        self.active = False
-        self._uninstall()
-        self._drain()
-        self.on_state(False)
-        if self._steps:
-            self.on_done(list(self._steps))
-        else:
-            self.on_cancel()
-
-    def cancel(self) -> None:
-        """放弃本次录制。"""
-        if not self.active:
-            return
-        self.active = False
-        self._uninstall()
-        self.on_state(False)
-        self.on_cancel()
-
-    def _uninstall(self) -> None:
-        if self._hook is not None:
-            try:
-                _win_user32().UnhookWindowsHookEx(self._hook)
-            except Exception:
-                pass
-            self._hook = None
-            self._proc = None
-
-    # ------------------------------------------------------------ 钩子回调
-    def _on_hook(self, nCode, wParam, lParam):
-        try:
-            if not self.active:
-                return _win_user32().CallNextHookEx(None, nCode, wParam,
-                                                    lParam)
-            if nCode >= 0:
-                info = ctypes.cast(lParam,
-                                   ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
-                x, y = info.pt.x, info.pt.y
-                rect = self._ignore_rect
-                if rect and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
-                    return 1          # 控制条区域内的操作不录
-                message = int(wParam)
-                if message == _WM_MOUSEWHEEL:
-                    delta = ctypes.c_short(info.mouseData >> 16).value
-                    self._events.append(("wheel", x, y, delta))
-                elif message == _WM_LBUTTONDOWN:
-                    self._events.append(("down", x, y, "left"))
-                elif message == _WM_LBUTTONUP:
-                    self._events.append(("up", x, y, "left"))
-                elif message == _WM_RBUTTONDOWN:
-                    self._events.append(("down", x, y, "right"))
-                elif message == _WM_RBUTTONUP:
-                    self._events.append(("up", x, y, "right"))
-                elif message == _WM_MOUSEMOVE:
-                    self._events.append(("move", x, y, ""))
-            # 鼠标事件不吞：用户还要能点界面上的「停止」
-            return _win_user32().CallNextHookEx(None, nCode, wParam, lParam)
-        except Exception:
-            return _win_user32().CallNextHookEx(None, nCode, wParam, lParam)
-
-    # ------------------------------------------------------------ 状态机
-    def _schedule_poll(self) -> None:
-        if self.active:
-            try:
-                self.widget.after(15, self._poll)
-            except tk.TclError:
-                pass
-
-    def _poll(self) -> None:
-        if not self.active:
-            return
-        self._drain()
-        self._schedule_poll()
-
-    def _drain(self) -> None:
-        now = time.monotonic() * 1000
-        for kind, x, y, extra in self._events:
-            if kind == "down":
-                self._down = (x, y, now, extra)
-            elif kind == "up":
-                if self._down is None:
-                    continue
-                dx, dy, _t, button = self._down
-                self._down = None
-                if abs(x - dx) > 8 or abs(y - dy) > 8:
-                    # 拖拽：记 起点点击 + 终点移动
-                    self._steps.append(Step("click_xy", f"{dx},{dy}"))
-                    self._steps.append(Step("move_xy", f"{x},{y}"))
-                else:
-                    self._add_click(x, y, now, button)
-                self._last_pos = (x, y)
-            elif kind == "move":
-                if self._down is not None:
-                    continue          # 按住拖动：交给 up 时统一记
-                lx, ly = self._last_pos
-                if (x - lx) ** 2 + (y - ly) ** 2 > _MOVE_MIN_DISTANCE ** 2:
-                    self._steps.append(Step("move_xy", f"{x},{y}"))
-                    self._last_pos = (x, y)
-            elif kind == "wheel":
-                # Windows 以 120 为 1 格；普通鼠标每格正好 ±120，但平滑滚轮 /
-                # 触摸板会发一堆小增量——用余量累加，凑满一格才记一步，
-                # 剩下的留给下一次，避免亚格滚动被白白丢掉。
-                self._wheel_rest += int(extra)
-                notches = 0
-                while abs(self._wheel_rest) >= 120:
-                    step_dir = 1 if self._wheel_rest > 0 else -1
-                    notches += step_dir
-                    self._wheel_rest -= step_dir * 120
-                if notches:
-                    self._steps.append(Step("scroll", str(notches * 100)))
-        self._events.clear()
-
-    def _add_click(self, x: int, y: int, now: float, button: str) -> None:
-        content = f"{x},{y}" + (f",{button}" if button != "left" else "")
-        # 与上一次点击足够近 → 合并成双击
-        last = self._last_click
-        if (last is not None and now - last[2] < _DOUBLE_CLICK_MS
-                and abs(x - last[0]) < 8 and abs(y - last[1]) < 8
-                and self._steps and self._steps[-1].type == "click_xy"
-                and self._steps[-1].content == content
-                and self._steps[-1].repeat < 2):
-            self._steps[-1].repeat = 2
-            self._last_click = None
-            return
-        self._steps.append(Step("click_xy", content))
-        self._last_click = (x, y, now)
-
-
-class BaseDialog(tk.Toplevel):
-    """统一风格的模态对话框。"""
-
-    def __init__(self, parent: App, title: str, width: int = 420,
-                 height: int = 260):
-        super().__init__(parent)
-        self.app = parent
-        self.result = None
-        self.title(title)
-        self.configure(bg=CARD)
-        self.transient(parent)
-        self.resizable(False, False)
-        self.geometry(f"{parent.s(width)}x{parent.s(height)}")
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-        self.bind("<Escape>", lambda e: self.cancel())
-        self.after_idle(lambda: uikit.style_window(self, bool(parent.dark)))
-
-    def fit_content(self, width: int = 0, min_height: int = 0) -> None:
-        """按内容收缩窗口，去掉底部/右侧的大块空白。
-
-        width 传物理像素；0 表示用内容请求宽度。min_height 是逻辑像素下限。
-        """
-        self.update_idletasks()
-        w = width or max(self.winfo_reqwidth(), self.winfo_width())
-        h = max(self.winfo_reqheight(), self.app.s(min_height))
-        self.geometry(f"{int(w)}x{int(h)}")
-
-    def center(self) -> None:
-        self.update_idletasks()
-        x = self.app.winfo_rootx() + (self.app.winfo_width() - self.winfo_width()) // 2
-        y = self.app.winfo_rooty() + (self.app.winfo_height() - self.winfo_height()) // 3
-        self.app.place_window(self, x, y, self.winfo_width(), self.winfo_height())
-        self.wait_visibility(self)
-        self.grab_set()
-        self.focus_force()
-
-    def wait(self):
-        """模态阻塞：等用户关闭对话框后返回结果。
-
-        调用方必须走这个方法拿结果，不能在构造函数返回后直接读
-        .result——那时用户还没来得及输入，result 恒为 None。
-        """
-        self.wait_window(self)
-        return self.result
-
-    def cancel(self) -> None:
-        self.result = None
-        self.destroy()
-
-    def destroy(self) -> None:
-        teardown = getattr(self, "_teardown", None)
-        if teardown is not None:
-            try:
-                teardown()             # 子类在这里释放资源（如键盘钩子）
-            except Exception:
-                pass
-        super().destroy()
-
-    def label(self, text: str, row: int, muted: bool = False):
-        label = tk.Label(self, text=text, bg=CARD, fg=MUTED if muted else TEXT,
-                         font=FONT_NOTE)
-        label.grid(
-            row=row, column=0, sticky="w", padx=(self.app.s(16), self.app.s(8)),
-            pady=self.app.s(5))
-        return label
-
-    def footer(self, row: int, ok_text: str = "确定", ok_icon: str = "check",
-               on_ok=None, cancel_text: str = "取消", ok_kind: str = "accent",
-               pad_top: int = 8, pad_bottom: int = 14):
-        """统一的对话框底栏：主按钮靠右，取消按钮在它左边。"""
-        frame = tk.Frame(self, bg=CARD)
-        frame.grid(row=row, column=0, columnspan=2, sticky="ew",
-                   padx=self.app.s(16),
-                   pady=(self.app.s(pad_top), self.app.s(pad_bottom)))
-        ok = uikit.RoundButton(
-            frame, ok_text, ok_icon, on_ok or self.ok, kind=ok_kind,
-            scale=self.app.scale, bg=CARD, height=CONTROL_MD)
-        ok.pack(side="right")
-        cancel = None
-        if cancel_text:
-            cancel = uikit.RoundButton(
-                frame, cancel_text, "close", self.cancel, kind="ghost",
-                scale=self.app.scale, bg=CARD, height=CONTROL_MD)
-            cancel.pack(side="right", padx=(0, self.app.s(8)))
-        return frame, ok, cancel
-
-
-class GroupDialog(BaseDialog):
-    """输入 / 修改执行组名称。"""
-
-    def __init__(self, parent: App, title: str, initial: str = ""):
-        super().__init__(parent, title, width=380, height=170)
-        self.label("执行组名称", 0)
-        self.var = tk.StringVar(value=initial)
-        entry = uikit.TextField(self, textvariable=self.var,
-                                scale=parent.scale, bg=CARD,
-                                font_size=FONT_SIZE_BODY)
-        entry.grid(row=0, column=1, sticky="ew", padx=(0, parent.s(16)),
-                   pady=parent.s(5))
-        self.columnconfigure(1, weight=1)
-        tk.Label(self, text="尽量简短，便于在「调用执行组」里引用",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION, justify="left",
-                 anchor="w", wraplength=parent.s(340)).grid(
-            row=1, column=0, columnspan=2, sticky="ew",
-            padx=(parent.s(16), parent.s(16)),
-            pady=(0, parent.s(2)))
-        self.footer(2, pad_top=6)
-        entry.bind("<Return>", lambda e: self.ok())
-        entry.focus_set()
-        entry.select_range(0, "end")
-        self.fit_content(width=parent.s(380))
-        self.center()
-
-    def ok(self) -> None:
-        self.result = self.var.get().strip()
-        self.destroy()
 
 
 class StepDialog(BaseDialog):
@@ -5218,8 +4834,13 @@ class StepDialog(BaseDialog):
         if key == "hotkey":
             text += "\n也可点击右侧键盘按钮录入组合键（如 Ctrl+Shift+A）。"
         if key in PIPE_CONDITION_TYPES:
-            text += ("\n左侧填写判断图像，右侧填写条件满足后执行的执行组"
-                     "（可点击「选组」）。")
+            if key == "if_var":
+                text += ("\n左侧填写比较条件，右侧填写满足后执行的执行组。"
+                         "\n运算符：== != > < >= <= contains notcontains，"
+                         "如 计数>3。")
+            else:
+                text += ("\n左侧填写判断图像，右侧填写条件满足后执行的执行组"
+                         "（可点击「选组」）。")
         if key == "if_else":
             text += "\n下方两个输入框分别填写图像出现与未出现时执行的执行组" \
                     "（均可点击「选组」）。"
@@ -5237,6 +4858,15 @@ class StepDialog(BaseDialog):
         if key == "input":
             text += ("\n默认通过剪贴板粘贴（支持中文）。"
                      "\n若个别应用不支持粘贴，可在「高级选项」中改为逐字输入。")
+        if key in TEXT_STEP_TYPES:
+            text += ("\n左侧填写屏幕上要识别的文字；可夹 @x,y,宽,高 限定范围。"
+                     "\n文字识别依赖 OCR 组件（中文需安装 chi_sim 语言包）。")
+        if key == "ui_click":
+            text += ("\n左侧填写控件名称，可用「名称|控件类型」限定，"
+                     "如 确定|Button。\n控件识别依赖 uiautomation 组件。")
+        if key == "http":
+            text += ("\n要写成 方法 地址|变量名[|请求体]，如 "
+                     "GET https://example.com|响应。\n响应内容会存入指定变量。")
         if needs_image:
             text += ("\n截图或选图后，请点击「预览」核对内容。"
                      "\n若定位有误，可在「高级选项」中框选识别范围或指定第几个匹配项。")
@@ -5286,20 +4916,24 @@ class StepDialog(BaseDialog):
         for widget in (self.label_group2, self.group2_entry,
                        self.btn_pick_group2):
             widget.grid() if is_else else widget.grid_remove()
-        # 等待策略：图片 / 拖拽 / 条件（最多等几秒）
-        has_timeout = is_image or key == "drag" or key in CONDITION_TYPES
+        # 等待策略：图片 / 拖拽 / 条件 / 命令 / 文字 / 控件（最多等几秒）
+        has_timeout = (is_image or key in ("drag", "cmd")
+                       or key in CONDITION_TYPES or key in TEXT_STEP_TYPES
+                       or key in UIA_STEP_TYPES)
         for widget in self._adv_timeout:
             widget.grid() if has_timeout else widget.grid_remove()
         try:
             timeout = float(self.var_timeout.get() or 0)
         except ValueError:
             timeout = 0
-        show_fail = (is_image or key == "drag") and timeout > 0
+        show_fail = (is_image or key in ("drag", "cmd")
+                     or key in TEXT_STEP_TYPES or key in UIA_STEP_TYPES) \
+            and timeout > 0
         for widget in self._adv_fail:
             widget.grid() if show_fail else widget.grid_remove()
-        # 识别范围 / 第几个 / 灰度只对图片相关类型有意义
+        # 识别范围对图片 / 文字 / 控件都有效；「第几个」和灰度只对图片
         for widget in self._adv_image:
-            widget.grid() if needs_image else widget.grid_remove()
+            widget.grid() if key in REGION_STEP_TYPES else widget.grid_remove()
         for widget in self._adv_nth:
             widget.grid() if needs_image else widget.grid_remove()
         self.lbl_match.configure(text="匹配 / 重试" if needs_image else "重试")
@@ -5455,8 +5089,9 @@ class StepDialog(BaseDialog):
             except ValueError:
                 messagebox.showwarning("格式错误", "重复次数必须是数字", parent=self)
                 return
-        has_timeout = (key in IMAGE_TYPES or key == "drag"
-                       or key in CONDITION_TYPES)
+        has_timeout = (key in IMAGE_TYPES or key in ("drag", "cmd")
+                       or key in CONDITION_TYPES or key in TEXT_STEP_TYPES
+                       or key in UIA_STEP_TYPES)
         if has_timeout:
             try:
                 step.timeout = float(self.var_timeout.get() or 0)
@@ -5464,7 +5099,8 @@ class StepDialog(BaseDialog):
                 messagebox.showwarning("格式错误", "等待超时必须是数字",
                                        parent=self)
                 return
-        if key in IMAGE_TYPES or key == "drag":
+        if key in IMAGE_TYPES or key in ("drag", "cmd") \
+                or key in TEXT_STEP_TYPES or key in UIA_STEP_TYPES:
             step.on_fail = "stop" if self.var_on_fail.get() == "停止执行" \
                 else "skip"
         if key in IMAGE_STEP_TYPES:
@@ -5479,6 +5115,8 @@ class StepDialog(BaseDialog):
             step.nth = nth - 1
             step.region = self.var_region.get().strip()
             step.grayscale = bool(self.var_gray.get())
+        elif key in TEXT_STEP_TYPES:
+            step.region = self.var_region.get().strip()
         try:
             step.retry = max(0, int(self.var_retry.get() or 0))
         except ValueError:
@@ -5944,6 +5582,12 @@ class ScheduleDialog(BaseDialog):
             kind="ghost", scale=app.scale, bg=CARD, height=CONTROL_SM,
             pad=app.s(8), font_size=FONT_SIZE_NOTE)
         self.btn_task_delete.pack(side="left", padx=app.s(4))
+        self.btn_task_status = uikit.RoundButton(
+            row_task, "查询状态", "refresh", self._on_task_status_click,
+            kind="ghost", scale=app.scale, bg=CARD, height=CONTROL_SM,
+            pad=app.s(8), font_size=FONT_SIZE_NOTE,
+            tooltip="查看计划任务的上次运行结果与下次运行时间")
+        self.btn_task_status.pack(side="left", padx=app.s(4))
         self.lbl_task = tk.Label(right, text="", bg=CARD, fg=MUTED,
                                  font=FONT_CAPTION,
                                  wraplength=app.s(445), justify="left",
@@ -6050,19 +5694,118 @@ class ScheduleDialog(BaseDialog):
         safe = re.sub(r'[\\/:*?"<>|\s]+', "_", group).strip("_")[:50]
         return f"MeowGo_{safe or '当前组'}"
 
-    def _task_command(self, group: str) -> str:
-        """计划任务要执行的命令行（无窗口，跑完自动退出）。"""
+    def _task_parts(self, group: str) -> tuple[str, str]:
+        """计划任务的 (程序, 参数)，供 schtasks 与状态查询复用。"""
         if getattr(sys, "frozen", False):
-            return f'"{sys.executable}" --run "{group}"'
+            return sys.executable, f'--run "{group}"'
         python = sys.executable
         pythonw = os.path.join(os.path.dirname(python), "pythonw.exe")
         if os.path.exists(pythonw):
             python = pythonw
         script = os.path.join(APP_DIR, "start-app.py")
-        return f'"{python}" "{script}" --run "{group}"'
+        return python, f'"{script}" --run "{group}"'
 
-    def _schtasks(self, args: list[str]):
-        kwargs = {"capture_output": True, "text": True, "errors": "replace"}
+    def _task_command(self, group: str) -> str:
+        """计划任务要执行的命令行（无窗口，跑完自动退出）。"""
+        program, arguments = self._task_parts(group)
+        return f'"{program}" {arguments}'
+
+    @staticmethod
+    def _powershell(script: str, timeout: float = 20):
+        """跑一段 PowerShell（用于读取任务状态 / 修改任务设置）。"""
+        kwargs = {"capture_output": True, "text": True, "errors": "replace",
+                  "timeout": timeout}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            **kwargs)
+
+    @staticmethod
+    def _ps_quote(value: str) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _query_task_info(self, name: str):
+        """返回 {last, result, next}；任务不存在 / 查询失败返回 None。"""
+        if os.name != "nt":
+            return None
+        quoted = self._ps_quote(name)
+        script = (
+            f"$i=Get-ScheduledTaskInfo -TaskName {quoted} -ErrorAction Stop;"
+            "$l=if($i.LastRunTime){$i.LastRunTime.ToString("
+            "'yyyy-MM-dd HH:mm:ss')}else{''};"
+            "$n=if($i.NextRunTime){$i.NextRunTime.ToString("
+            "'yyyy-MM-dd HH:mm:ss')}else{''};"
+            '"$l|$($i.LastTaskResult)|$n"')
+        try:
+            proc = self._powershell(script)
+        except (OSError, AttributeError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        parts = (proc.stdout or "").strip().split("|")
+        if len(parts) != 3:
+            return None
+        try:
+            result = int(parts[1])
+        except ValueError:
+            result = -1
+        return {"last": parts[0], "result": result, "next": parts[2]}
+
+    @staticmethod
+    def _task_result_text(code: int) -> str:
+        if code == 0:
+            return "成功"
+        if code in (267009, 0x41301):
+            return "正在运行"
+        if code in (267011, 0x41303):
+            return "尚未运行过"
+        return f"结果代码 {code}"
+
+    def _format_task_info(self, info: dict) -> str:
+        result = self._task_result_text(info.get("result", -1))
+        if info.get("last"):
+            text = (i18n.tr("上次运行：") + info["last"]
+                    + "（" + i18n.tr(result) + "）")
+        else:
+            text = i18n.tr(result)
+        if info.get("next"):
+            text += i18n.tr(" · 下次：") + info["next"]
+        return text
+
+    def _on_task_status_click(self) -> None:
+        self._refresh_task_status(show_error=True)
+
+    def _refresh_task_status(self, show_error: bool = False) -> None:
+        name = self._task_name(self._task_group())
+        info = self._query_task_info(name)
+        if info is None:
+            if show_error:
+                self.lbl_task.configure(
+                    text="查询失败：尚未创建该计划任务，或任务计划程序不可用",
+                    fg=WARNING)
+            return
+        self.lbl_task.configure(text=self._format_task_info(info), fg=SUCCESS)
+
+    def _enable_catch_up(self, name: str) -> None:
+        """开启「错过计划时间后尽快补跑」（StartWhenAvailable）。"""
+        if os.name != "nt":
+            return
+        quoted = self._ps_quote(name)
+        script = (
+            f"$t=Get-ScheduledTask -TaskName {quoted} -ErrorAction Stop;"
+            "$t.Settings.StartWhenAvailable=$true;"
+            f"Set-ScheduledTask -TaskName {quoted} -Settings $t.Settings "
+            "| Out-Null")
+        try:
+            self._powershell(script)
+        except (OSError, AttributeError, subprocess.TimeoutExpired):
+            pass                       # 补跑设置失败不影响任务创建
+
+    def _schtasks(self, args: list[str], timeout: float = 20):
+        kwargs = {"capture_output": True, "text": True, "errors": "replace",
+                  "timeout": timeout}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NO_WINDOW", 0)
@@ -6082,20 +5825,29 @@ class ScheduleDialog(BaseDialog):
         hour, minute = self._task_time()
         name = self._task_name(group)
         command = self._task_command(group)
+        args = [
+            "/Create", "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
+            "/TN", name, "/TR", command, "/F"]
+        user = os.environ.get("USERNAME", "").strip()
+        if user:
+            # /IT：仅在当前用户登录时交互运行，无需保存密码
+            args += ["/RU", user, "/IT"]
         try:
             # 计划任务启动时读磁盘上的配置，先确保当前项目已保存
             self.app._save_state()
-            proc = self._schtasks([
-                "/Create", "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
-                "/TN", name, "/TR", command, "/F"])
-        except (OSError, AttributeError) as exc:
+            proc = self._schtasks(args)
+        except (OSError, AttributeError, subprocess.TimeoutExpired) as exc:
             messagebox.showerror("创建失败", f"调用 schtasks 失败：{exc}",
                                  parent=self)
             return
         if proc.returncode == 0:
-            text = f"已创建：{name}（每天 {hour:02d}:{minute:02d} → {group}）"
-            self.lbl_task.configure(text=text, fg=SUCCESS)
+            self._enable_catch_up(name)
             self.app._log("info", f"Windows 计划任务已创建：{name}")
+            self._refresh_task_status()
+            if not self.lbl_task.cget("text"):
+                self.lbl_task.configure(
+                    text=f"已创建：{name}（每天 {hour:02d}:{minute:02d}"
+                         f" → {group}）", fg=SUCCESS)
         else:
             detail = (proc.stderr or proc.stdout or "").strip()[:500]
             self.lbl_task.configure(text="创建失败：" + detail,
@@ -6114,7 +5866,7 @@ class ScheduleDialog(BaseDialog):
             return
         try:
             proc = self._schtasks(["/Delete", "/TN", name, "/F"])
-        except (OSError, AttributeError) as exc:
+        except (OSError, AttributeError, subprocess.TimeoutExpired) as exc:
             messagebox.showerror("删除失败", f"调用 schtasks 失败：{exc}",
                                  parent=self)
             return
@@ -7411,52 +7163,8 @@ class DebugStepDialog(BaseDialog):
         self.destroy()
 
 
-class ShortcutsDialog(BaseDialog):
-    """快捷键速查卡（右下角「?」按钮）。"""
-
-    ROWS = [
-        ("Ctrl+G", "新建执行组"),
-        ("Ctrl+Enter", "新增步骤"),
-        ("Ctrl+A", "全选当前组的步骤（可批量删除/复制/移动）"),
-        ("F2", "编辑选中的步骤"),
-        ("Delete", "删除选中的步骤"),
-        ("F5", "运行当前组（全局，任何时候有效）"),
-        ("F8", "单步调试开关（每步执行前确认）"),
-        ("F9", "停止（全局，任何时候有效）"),
-        ("Ctrl+D", "深色 / 浅色主题切换"),
-        ("Ctrl+Z / Ctrl+Y", "撤销 / 重做"),
-        ("?", "打开本速查卡"),
-        ("Esc", "关闭对话框 / 取消倒计时"),
-    ]
-
-    def __init__(self, parent: App):
-        super().__init__(parent, "快捷键速查", width=440, height=470)
-        self.columnconfigure(1, weight=1)
-        for row, (key, text) in enumerate(self.ROWS):
-            tk.Label(self, text=key, bg=CARD, fg=ACCENT,
-                     font=FONT_MONO).grid(
-                row=row, column=0, sticky="w", padx=(parent.s(18), parent.s(10)),
-                pady=parent.s(4))
-            tk.Label(self, text=text, bg=CARD, fg=TEXT,
-                     font=FONT_NOTE).grid(
-                row=row, column=1, sticky="w")
-        tk.Label(self, text="运行安全：将鼠标快速移至屏幕左上角，"
-                            "可立即中断执行。", bg=CARD, fg=MUTED,
-                 font=FONT_CAPTION,
-                 wraplength=parent.s(390), justify="left").grid(
-            row=len(self.ROWS), column=0, columnspan=2, sticky="w",
-            padx=parent.s(18), pady=(parent.s(10), 0))
-        self.footer(len(self.ROWS) + 1, "知道了", "check", self.ok,
-                    cancel_text="", pad_top=10)
-        self.fit_content(width=parent.s(440))
-        self.center()
-
-    def ok(self) -> None:
-        self.result = True
-        self.destroy()
-
-
 def main() -> None:
+    logs.setup()
     # 同时开两个界面会互相覆盖配置，也没必要
     lock = InstanceLock(make_lock_name(APP_DIR, "GUI"))
     if not lock.acquire():
@@ -7470,7 +7178,9 @@ def main() -> None:
             print("MeowGo 已经在运行")
         return
     try:
-        App().mainloop()
+        app = App()
+        logs.install_tk_handler(app)
+        app.mainloop()
     finally:
         lock.release()
 

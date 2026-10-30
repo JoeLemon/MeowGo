@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,7 @@ SPEC_FILE = "MeowGo.spec"
 REQUIREMENTS = "requirements.txt"
 ICON_SRC_DEFAULT = "main.png"
 ICON_DIR = "build_assets"
+VERSION_FILE = os.path.join(ICON_DIR, "version_info.txt")
 ICON_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48),
               (64, 64), (128, 128), (256, 256)]
 
@@ -226,6 +228,111 @@ def prepare_icon(python_exe: str, args) -> "str | None":
     return out
 
 
+def project_version() -> str:
+    """版本号单一来源：rpa/__init__.py 的 __version__。"""
+    path = os.path.join(PROJECT_ROOT, "rpa", "__init__.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            match = re.search(r'__version__\s*=\s*["\']([^"\']+)',
+                              fh.read())
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+def write_version_file(version: str) -> "str | None":
+    """为 Windows 可执行文件生成版本资源（exe 属性里可见）。"""
+    if not sys.platform.startswith("win"):
+        return None
+    numbers = []
+    for part in re.split(r"[.\-+]", version)[:4]:
+        numbers.append(int(part) if part.isdigit() else 0)
+    while len(numbers) < 4:
+        numbers.append(0)
+    tuple_text = ", ".join(str(number) for number in numbers)
+    content = f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({tuple_text}),
+    prodvers=({tuple_text}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0', [
+        StringStruct('CompanyName', 'MeowGo'),
+        StringStruct('FileDescription', 'MeowGo RPA'),
+        StringStruct('FileVersion', '{version}'),
+        StringStruct('ProductName', 'MeowGo'),
+        StringStruct('ProductVersion', '{version}')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+    path = os.path.join(PROJECT_ROOT, VERSION_FILE)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    log(f"    [OK] 版本资源：{version} → {VERSION_FILE}")
+    return path
+
+
+def sign_artifact(args) -> None:
+    """可选代码签名钩子。
+
+    两种配置方式（都通过环境变量，未配置时直接跳过）：
+      MEOWGO_SIGN_CMD       自定义命令模板，{exe} 会替换成产物路径；
+      MEOWGO_SIGN_CERT      .pfx 文件路径或证书指纹（配合 MEOWGO_SIGNTOOL）。
+    """
+    if not sys.platform.startswith("win"):
+        return
+    target = artifact_path(args)
+    exe = target if args.onefile else os.path.join(target, args.name + ".exe")
+    if not os.path.exists(exe):
+        return
+    step("代码签名")
+    template = os.environ.get("MEOWGO_SIGN_CMD")
+    if template:
+        command = template.replace("{exe}", f'"{exe}"')
+        log(f"    $ {command}")
+        proc = subprocess.run(command, shell=True, cwd=PROJECT_ROOT)
+        if proc.returncode != 0:
+            fail(f"签名命令返回 {proc.returncode}")
+        log("    [OK] 签名完成")
+        return
+    tool = os.environ.get("MEOWGO_SIGNTOOL") or "signtool"
+    cert = os.environ.get("MEOWGO_SIGN_CERT")
+    if not cert:
+        log("    [提示] 未配置 MEOWGO_SIGN_CERT / MEOWGO_SIGN_CMD，跳过签名")
+        return
+    cmd = [tool, "sign", "/fd", "SHA256",
+           "/tr", os.environ.get("MEOWGO_SIGN_TIMESTAMP",
+                                 "http://timestamp.digicert.com"),
+           "/td", "SHA256"]
+    if cert.lower().endswith(".pfx"):
+        cmd += ["/f", cert]
+        password = os.environ.get("MEOWGO_SIGN_PASSWORD")
+        if password:
+            cmd += ["/p", password]
+    else:
+        cmd += ["/sha1", cert]
+    cmd.append(exe)
+    try:
+        run(cmd)
+    except OSError as exc:
+        fail(f"无法调用签名工具 {tool}：{exc}")
+    log("    [OK] 签名完成")
+
+
 def clean_artifacts() -> None:
     step("清理旧产物")
     for name in ("build", "dist"):
@@ -244,15 +351,21 @@ def artifact_path(args) -> str:
     return os.path.join(root, args.name)
 
 
-def run_pyinstaller(python_exe: str, args, icon: "str | None") -> None:
+def run_pyinstaller(python_exe: str, args, icon: "str | None",
+                    version_file: "str | None" = None,
+                    version: str = "") -> None:
     step("PyInstaller 打包")
     if not os.path.exists(os.path.join(PROJECT_ROOT, SPEC_FILE)):
         fail(f"找不到 {SPEC_FILE}，请在项目根目录运行本脚本")
     env = dict(os.environ)
     env["MEOWGO_APP_NAME"] = args.name
     env["MEOWGO_BUILD_MODE"] = "onefile" if args.onefile else "onedir"
+    if version:
+        env["MEOWGO_VERSION"] = version
     if icon:
         env["MEOWGO_ICON"] = icon
+    if version_file:
+        env["MEOWGO_VERSION_FILE"] = version_file
     run([python_exe, "-m", "PyInstaller", "--noconfirm",
          "--distpath", args.distpath, SPEC_FILE], env=env)
 
@@ -358,7 +471,9 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     started = time.time()
-    log(f"MeowGo 跨平台打包  [{platform_label()} / {platform.machine()}]")
+    version = project_version()
+    log(f"MeowGo {version} 跨平台打包  "
+        f"[{platform_label()} / {platform.machine()}]")
     check_python()
     python_exe = resolve_interpreter(args)
     # 先装依赖再检查：新建的虚拟环境里 PIL/cv2 等一开始肯定不存在，
@@ -366,9 +481,11 @@ def main(argv=None) -> int:
     install_deps(python_exe, args)
     check_runtime(python_exe, args)
     icon = prepare_icon(python_exe, args)
+    version_file = write_version_file(version)
     if args.clean:
         clean_artifacts()
-    run_pyinstaller(python_exe, args, icon)
+    run_pyinstaller(python_exe, args, icon, version_file, version)
+    sign_artifact(args)
     write_launcher(args)
     if args.verify:
         verify_artifact(args)

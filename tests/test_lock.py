@@ -8,6 +8,8 @@ import pytest
 
 from rpa.lock import InstanceLock, make_lock_name
 
+pytestmark = pytest.mark.engine
+
 
 @pytest.mark.skipif(os.name != "nt", reason="命名互斥是 Windows 能力")
 def test_instance_lock_blocks_and_releases():

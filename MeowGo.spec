@@ -23,6 +23,10 @@ IS_MAC = sys.platform == "darwin"
 APP_NAME = os.environ.get("MEOWGO_APP_NAME") or "MeowGo"
 ONEFILE = os.environ.get("MEOWGO_BUILD_MODE", "").lower() == "onefile"
 NO_APP = os.environ.get("MEOWGO_NO_APP") == "1"
+# 由 build.py 生成的 Windows 版本资源；其它平台不使用
+VERSION_FILE = os.environ.get("MEOWGO_VERSION_FILE")
+if not IS_WINDOWS or not VERSION_FILE or not os.path.exists(VERSION_FILE):
+    VERSION_FILE = None
 
 block_cipher = None
 
@@ -54,14 +58,17 @@ a = Analysis(
     datas=[('main.png', '.'), ('meowgo_logo_transparent.png', '.')],
     hiddenimports=[
         'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.i18n',
-        'rpa.lock',
+        'rpa.lock', 'rpa.dialogs', 'rpa.recorder', 'rpa.logs', 'rpa.theme',
+        'rpa.tray', 'rpa.autostart', 'rpa.ocr', 'rpa.uia', 'rpa.pixel_cat',
         'pyautogui', 'pyperclip', 'PIL', 'PIL.ImageGrab', 'PIL.ImageTk',
         'cv2', 'xlrd', 'openpyxl',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy.testing', 'scipy', 'pandas'],
+    excludes=['matplotlib', 'numpy.testing', 'scipy', 'pandas',
+              'IPython', 'jupyter', 'notebook', 'pytest', 'pydoc_data',
+              'tkinter.test', 'PIL.ImageQt', 'PIL.ImageShow'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -88,6 +95,7 @@ if ONEFILE:
         codesign_identity=None,
         entitlements_file=None,
         icon=ICON,
+        version=VERSION_FILE,
     )
 else:
     exe = EXE(
@@ -107,6 +115,7 @@ else:
         codesign_identity=None,
         entitlements_file=None,
         icon=ICON,
+        version=VERSION_FILE,
     )
 
     coll = COLLECT(

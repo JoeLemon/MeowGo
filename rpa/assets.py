@@ -52,7 +52,9 @@ def is_blank_image(path: str) -> bool:
             colors = image.convert("RGB").getcolors(maxcolors=2)
     except Exception:  # noqa: BLE001 - 读不了就不下结论
         return False
-    return bool(colors) and len(colors) == 1
+    if not colors:
+        return False
+    return len(colors) == 1
 
 
 def unique_name(directory: str, prefix: str = "shot") -> str:

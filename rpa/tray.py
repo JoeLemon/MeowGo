@@ -319,7 +319,7 @@ class TrayIcon:
         self._requests: queue.Queue = queue.Queue()
         self._started = threading.Event()
         self._stopped = threading.Event()
-        self._wndproc_ref = None
+        self._wndproc_ref: object = None
         self._balloon_click = None
 
     # ------------------------------------------------------------ 生命周期

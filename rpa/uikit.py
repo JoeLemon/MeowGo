@@ -6,11 +6,11 @@
 """
 from __future__ import annotations
 
-import math
 import random
 import sys
 import tkinter as tk
-from tkinter import font as tkfont, ttk
+from tkinter import font as tkfont
+from tkinter import ttk
 from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
@@ -277,11 +277,17 @@ def _draw(name: str, draw: "_ScaledDraw", color, lw: int) -> None:
             x2, y2 = 12 + 11 * math.cos(rad), 12 + 11 * math.sin(rad)
             _polyline(draw, [(x1, y1), (x2, y2)], c, lw + 1)
     elif name == "undo":
-        draw.arc([4, 4, 20, 20], start=110, end=350, fill=c, width=lw)
-        _arrow(draw, (4.6, 9.6), "left", 3.4, c)
+        # 标准回退图标：水平箭头指向左，右端向下弯出尾部
+        _polyline(draw, [(6.5, 8.5), (15.5, 8.5)], c, lw)
+        draw.arc([10.5, 8.5, 20.5, 18.5], start=270, end=360,
+                 fill=c, width=lw)
+        _arrow(draw, (3.5, 8.5), "left", 3.2, c)
     elif name == "redo":
-        draw.arc([4, 4, 20, 20], start=-170, end=70, fill=c, width=lw)
-        _arrow(draw, (19.4, 9.6), "right", 3.4, c)
+        # 撤销的镜像：箭头指向右，左端向下弯出尾部
+        _polyline(draw, [(8.5, 8.5), (17.5, 8.5)], c, lw)
+        draw.arc([3.5, 8.5, 13.5, 18.5], start=180, end=270,
+                 fill=c, width=lw)
+        _arrow(draw, (20.5, 8.5), "right", 3.2, c)
     elif name == "search":
         draw.ellipse([4, 4, 15, 15], outline=c, width=lw)
         _polyline(draw, [(13.5, 13.5), (19.5, 19.5)], c, lw + 1)
@@ -1520,7 +1526,6 @@ class RoundButton(tk.Canvas):
             self.delete(item)
         self._content = []
 
-        width = int(self["width"])
         x = self.pad[0]
         if self.icon_name:
             image = icon(self.icon_name, self.icon_size, icon_fg)

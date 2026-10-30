@@ -11,6 +11,8 @@ import importlib
 import os
 import sys
 
+from rpa import logs
+
 
 def _app_dir() -> str:
     if getattr(sys, "frozen", False):
@@ -169,6 +171,7 @@ def _run_headless(args) -> int:
 
     report_dir = (os.path.abspath(args.report) if args.report
                   else os.path.join(_app_dir(), "reports"))
+    run_log = logs.RunLog(report_dir, args.run or "全部执行组")
     # 状态文件里 delay / confidence 等设置是平铺保存的
     executor = Executor()
     executor.base_dir = image_dir
@@ -179,13 +182,25 @@ def _run_headless(args) -> int:
     executor.row_offset = row_offset if data else 0
     executor.shot_dir = (os.path.join(report_dir, "shots")
                          if state.get("shot_on_fail", True) else "")
-    executor.log = lambda level, msg: print(f"[{level}] {msg}", flush=True)
+
+    def _log(level: str, message: str) -> None:
+        print(f"[{level}] {message}", flush=True)
+        run_log.write(level, message)
+
+    executor.log = _log
 
     result = executor.run(entry, loop=args.loop)
     report = executor.report()
+    run_log.close(f"运行结束：{result} · {report['steps']} 步，"
+                  f"失败 {report['failed']}，耗时 {report['seconds']:g} 秒")
+    if run_log.path:
+        print(f"运行日志：{run_log.path}")
 
     try:
         path = _write_report(report, report_dir, result)
+        if run_log.path:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n运行日志：`{run_log.path}`\n")
         print(f"报告已写入：{path}")
     except (OSError, ValueError) as exc:
         print(f"警告：报告写入失败：{exc}")
@@ -207,6 +222,7 @@ def _run_headless(args) -> int:
 
 
 def main() -> int:
+    logs.setup()
     argv = sys.argv[1:]
     # 带任何无头参数（含 -h/--help）都走命令行分支，否则启动界面
     headless = any(flag in argv for flag in
@@ -248,7 +264,8 @@ def main() -> int:
         return 1
     _warn_optional()
 
-    from rpa.gui import enable_dpi_awareness, main as gui_main
+    from rpa.gui import enable_dpi_awareness
+    from rpa.gui import main as gui_main
 
     enable_dpi_awareness()
     gui_main()

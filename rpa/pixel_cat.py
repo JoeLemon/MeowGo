@@ -151,7 +151,7 @@ def _surround_mask() -> bytes:
     """
     width, height = GRID_W, GRID_H
     mask = bytearray(width * height)
-    queue = deque()
+    queue: deque[tuple[int, int]] = deque()
     for x in range(width):
         for y in (0, height - 1):
             index = y * width + x

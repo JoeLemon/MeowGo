@@ -11,12 +11,17 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa import gui as gui_module  # noqa: E402
 from rpa import i18n  # noqa: E402
+from rpa import recorder as recorder_module  # noqa: E402
 from rpa.engine import (STEP_TYPES, Group, Project, Step,  # noqa: E402
                         import_excel, validate_project)
+
+pytestmark = pytest.mark.gui
 
 # 把配置、报告、失败截图都写到临时目录，避免影响用户数据和仓库里的 reports/
 _TMP = tempfile.mkdtemp(prefix="rpa_gui_test_")
@@ -917,7 +922,7 @@ def test_macro_recorder():
     _holder = []                           # 持有结构体，防止地址失效
 
     def ll(x, y, wheel=0):
-        info = gui_module._MSLLHOOKSTRUCT()
+        info = recorder_module._MSLLHOOKSTRUCT()
         info.pt.x, info.pt.y = x, y
         info.mouseData = (int(wheel) & 0xFFFF) << 16
         _holder.append(info)
@@ -927,27 +932,27 @@ def test_macro_recorder():
         rec._on_hook(0, msg, ll(x, y, wheel))
 
     # 单击
-    press(gui_module._WM_LBUTTONDOWN, 500, 300)
-    press(gui_module._WM_LBUTTONUP, 500, 300)
+    press(recorder_module._WM_LBUTTONDOWN, 500, 300)
+    press(recorder_module._WM_LBUTTONUP, 500, 300)
     # 双击（间隔 50ms，位置相同）
-    press(gui_module._WM_LBUTTONDOWN, 600, 300)
-    press(gui_module._WM_LBUTTONUP, 600, 300)
+    press(recorder_module._WM_LBUTTONDOWN, 600, 300)
+    press(recorder_module._WM_LBUTTONUP, 600, 300)
     _time.sleep(0.05)
-    press(gui_module._WM_LBUTTONDOWN, 600, 300)
-    press(gui_module._WM_LBUTTONUP, 600, 300)
+    press(recorder_module._WM_LBUTTONDOWN, 600, 300)
+    press(recorder_module._WM_LBUTTONUP, 600, 300)
     # 右键
-    press(gui_module._WM_RBUTTONDOWN, 700, 400)
-    press(gui_module._WM_RBUTTONUP, 700, 400)
+    press(recorder_module._WM_RBUTTONDOWN, 700, 400)
+    press(recorder_module._WM_RBUTTONUP, 700, 400)
     # 滚轮向上 1 格
-    press(gui_module._WM_MOUSEWHEEL, 700, 400, wheel=120)
+    press(recorder_module._WM_MOUSEWHEEL, 700, 400, wheel=120)
     # 大位移移动（超过 60px 才记）
-    press(gui_module._WM_MOUSEMOVE, 900, 600)
+    press(recorder_module._WM_MOUSEMOVE, 900, 600)
     # 控制条区域内的点击要忽略
-    press(gui_module._WM_LBUTTONDOWN, 5, 5)
-    press(gui_module._WM_LBUTTONUP, 5, 5)
+    press(recorder_module._WM_LBUTTONDOWN, 5, 5)
+    press(recorder_module._WM_LBUTTONUP, 5, 5)
     # 拖拽：按下 → 移动 → 在别处抬起
-    press(gui_module._WM_LBUTTONDOWN, 100, 100)
-    press(gui_module._WM_LBUTTONUP, 200, 200)
+    press(recorder_module._WM_LBUTTONDOWN, 100, 100)
+    press(recorder_module._WM_LBUTTONUP, 200, 200)
 
     rec.stop()
     done = [e for e in events if e[0] == "done"]
@@ -1064,11 +1069,11 @@ def test_macro_wheel_accumulate():
     holder = []
 
     def wheel(delta):
-        info = gui_module._MSLLHOOKSTRUCT()
+        info = recorder_module._MSLLHOOKSTRUCT()
         info.pt.x, info.pt.y = 500, 300
         info.mouseData = (int(delta) & 0xFFFF) << 16
         holder.append(info)
-        rec._on_hook(0, gui_module._WM_MOUSEWHEEL, ctypes.addressof(info))
+        rec._on_hook(0, recorder_module._WM_MOUSEWHEEL, ctypes.addressof(info))
 
     wheel(60)
     wheel(60)                # 凑满 120 → 记 1 格
@@ -1164,6 +1169,30 @@ def test_save_indicator_and_ui_state():
     app.settings["columns"] = original
     app._restore_ui_state()                # 不应炸
     mark("保存指示与界面状态")
+
+
+def test_save_failure_keeps_dirty_and_shows_reason():
+    """落盘失败：不能假装已保存，要保留 dirty 并显示原因。"""
+    from unittest import mock
+
+    app.project.groups.append(Group("保存失败测试", []))
+    app._mark_dirty()
+    try:
+        with mock.patch.object(gui_module.os, "replace",
+                               side_effect=OSError(13, "拒绝访问")):
+            assert app._save_state() is False
+        assert app._dirty is True, "保存失败后必须继续标记为待保存"
+        assert "保存失败" in app.autosave_label.cget("text")
+        assert "拒绝访问" in app.autosave_label.cget("text")
+        # 目录里不应残留临时文件
+        leftovers = [name for name in os.listdir(_TMP)
+                     if name.startswith(".rpa_settings_")]
+        assert not leftovers, leftovers
+    finally:
+        app.project.groups.pop()
+        app._save_state()
+    assert app._dirty is False
+    mark("保存失败提示")
 
 
 def test_log_link_and_failed_locate():
@@ -1372,7 +1401,7 @@ def test_searchable_type_combo():
         dialog.combo._show_popup("执行组")
         values = {v for _, v in dialog.combo._rows if v}
         assert values == {"call", "if_image", "if_not_image", "if_else",
-                          "if_window"}, values
+                          "if_window", "if_var"}, values
         dialog.combo._choose("if_else")
         app.update()
         assert dialog.var_type.get() == "条件：二选一"
@@ -2563,6 +2592,9 @@ def test_schedule_task_command():
     original_save = app._save_state
     app._save_state = lambda: None
     dialog._schtasks = lambda args: (calls.append(args) or _Proc())
+    catch_up = []
+    dialog._enable_catch_up = lambda name: catch_up.append(name)
+    dialog._refresh_task_status = lambda show_error=False: None
     try:
         dialog._create_task()
     finally:
@@ -2575,9 +2607,51 @@ def test_schedule_task_command():
     assert name.startswith("MeowGo_") and group in name
     command = args[args.index("/TR") + 1]
     assert "--run" in command and group in command
+    # 当前用户交互运行（不需要保存密码），并开启错过补跑
+    if os.environ.get("USERNAME"):
+        assert args[args.index("/RU") + 1] == os.environ["USERNAME"]
+        assert "/IT" in args
+    assert catch_up == [name]
     assert "已创建" in dialog.lbl_task.cget("text")
     dialog.destroy()
     mark("Windows 计划任务命令")
+
+
+def test_scheduled_task_status_parsing():
+    """计划任务状态：解析 PowerShell 输出并格式化为可读文本。"""
+    from rpa.gui import ScheduleDialog
+
+    dialog = ScheduleDialog(app, {}, app.project.names())
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    original = dialog._powershell
+    try:
+        dialog._powershell = lambda script, timeout=20: _Proc(
+            "2026-10-30 09:00:05|0|2026-10-31 09:00:00\n")
+        info = dialog._query_task_info("MeowGo_测试")
+        assert info == {"last": "2026-10-30 09:00:05", "result": 0,
+                        "next": "2026-10-31 09:00:00"}, info
+
+        dialog._powershell = lambda script, timeout=20: _Proc(
+            "|267011|2026-10-31 09:00:00\n")
+        info = dialog._query_task_info("MeowGo_测试")
+        assert info["result"] == 267011 and info["last"] == ""
+        assert "尚未运行过" in dialog._format_task_info(info)
+
+        dialog._powershell = lambda script, timeout=20: _Proc("bad\n")
+        assert dialog._query_task_info("MeowGo_测试") is None
+    finally:
+        dialog._powershell = original
+    assert "成功" in dialog._task_result_text(0)
+    assert "正在运行" in dialog._task_result_text(267009)
+    dialog.destroy()
+    mark("计划任务状态")
 
 
 def test_result_writeback_from_gui():

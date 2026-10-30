@@ -7,12 +7,16 @@ import tempfile
 import time
 from contextlib import contextmanager
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa.engine import (STEP_TYPES, TYPE_TO_CODE, Executor, Group,  # noqa: E402
                         Project, Step, export_excel, import_excel,
                         load_steps, render_content, validate_project,
                         _eval_expression)
+
+pytestmark = pytest.mark.engine
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -142,11 +146,35 @@ def _fake_input_modules(calls, located=(100, 100), selection="选中的文字",
     io = _FakeIO(calls, located, selection)
     tmp = tempfile.mkdtemp(prefix="rpa_test_imgs_")
     try:
+        import numpy as np
+        from PIL import Image
+
+        # 模板必须是真实可解码的图片：引擎现在用 OpenCV 直接在截图上匹配，
+        # 不再走 pyautogui.locate（那样无法缓存截图 / 支持负坐标副屏）。
+        pattern = np.random.default_rng(42).integers(
+            0, 256, (10, 10, 3), dtype=np.uint8)
         for name in images:
             path = os.path.join(tmp, name)
             os.makedirs(os.path.dirname(path) or tmp, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write("x")       # 内容无所谓，假 locate 不读文件
+            Image.fromarray(pattern[:, :, ::-1]).save(path)   # BGR -> RGB
+
+        def fake_screen():
+            frame = np.zeros((400, 400, 3), dtype=np.uint8)
+            if io.located_all is not None:
+                spots = [(left, top) for left, top, _w, _h in io.located_all]
+            elif io.located:
+                spots = [(io.located[0] - 5, io.located[1] - 5)]
+            else:
+                spots = []
+            for x, y in spots:
+                if 0 <= x <= 390 and 0 <= y <= 390:
+                    frame[y:y + 10, x:x + 10] = pattern
+            return frame, (0, 0)
+
+        import rpa.engine as engine_module
+
+        saved_grab = engine_module.Executor._capture_screen
+        engine_module.Executor._capture_screen = lambda self: fake_screen()
         io.base_dir = tmp
         saved = {}
         for name, module in (("pyautogui", _FakePyAutoGUI(io)),
@@ -156,6 +184,7 @@ def _fake_input_modules(calls, located=(100, 100), selection="选中的文字",
         try:
             yield io
         finally:
+            engine_module.Executor._capture_screen = saved_grab
             for name, old in saved.items():
                 if old is None:
                     sys.modules.pop(name, None)
@@ -166,15 +195,17 @@ def _fake_input_modules(calls, located=(100, 100), selection="选中的文字",
 
 
 def test_types_defined():
-    assert len(STEP_TYPES) == 20
+    assert len(STEP_TYPES) == 26
     for key, info in STEP_TYPES.items():
         assert len(info) == 4, key
     assert "call" in STEP_TYPES
     for key in ("if_image", "window", "click_xy", "move_xy"):
         assert key in STEP_TYPES, key
     assert STEP_TYPES["if_image"][0].startswith("条件")
-    # 条件 / 变量 / 拖拽一族（类型表里有声明）
-    for key in ("if_not_image", "if_else", "if_window", "set", "copy", "drag"):
+    # 条件 / 变量 / 拖拽 / 文字 / 控件 / 网络一族（类型表里有声明）
+    for key in ("if_not_image", "if_else", "if_window", "set", "copy", "drag",
+                "click_text", "wait_text", "assert_text", "ui_click",
+                "if_var", "http"):
         assert key in STEP_TYPES, key
     for key, code in TYPE_TO_CODE.items():
         assert isinstance(code, float), key
@@ -883,10 +914,10 @@ def test_drag_step():
         ex2.log = lambda level, msg: None
         ex2.groups = {"主": [Step("drag", "起点.png|终点.png")]}
         assert ex2.run("主") == "finished"
-    assert any(c[0] == "locate" and c[1].endswith("起点.png")
-               for c in calls2)
-    assert any(c[0] == "locate" and c[1].endswith("终点.png")
-               for c in calls2)
+    assert any(os.path.basename(key) == "起点.png"
+               for key in ex2._template_cache)
+    assert any(os.path.basename(key) == "终点.png"
+               for key in ex2._template_cache)
     assert ("moveTo", 150, 250) in calls2
 
     # 终点图片等不到（文件在、屏幕上没有）：超时跳过这步，且没按下过鼠标
@@ -1050,21 +1081,25 @@ def test_parse_image_targets():
 def test_locate_region_nth_grayscale_offset():
     """识别增强：区域 / 灰度 / 第 N 个 / 偏移 / 候选图。"""
     calls = []
-    with _fake_input_modules(calls, images=("a.png", "good.png")) as io:
+    with _fake_input_modules(calls, located=(100, 100),
+                             images=("a.png", "good.png")) as io:
         ex = Executor()
         ex.base_dir = io.base_dir
 
+        # 区域包含目标：能找到；区域之外：找不到
         assert ex._locate("a.png", Step("click", "a.png",
-                                        region="10,20,30,40",
+                                        region="90,90,30,30",
                                         grayscale=True)) is not None
-        assert io.locate_kwargs.get("region") == (10, 20, 30, 40)
-        assert io.locate_kwargs.get("grayscale") is True
+        assert ex._locate("a.png", Step("click", "a.png",
+                                        region="200,200,20,20")) is None
 
         io.located_all = [(0, 0, 10, 10), (100, 50, 10, 10)]
+        ex._invalidate_screen()
         point = ex._locate("a.png", Step("click", "a.png", nth=1))
         assert (point.x, point.y) == (105, 55)
-        assert io.all_kwargs.get("grayscale") is False
 
+        io.located_all = None
+        ex._invalidate_screen()
         point = ex._locate("a.png+5,-5", Step("click", "a.png"))
         assert (point.x, point.y) == (105, 95)
 
@@ -1360,6 +1395,137 @@ def test_report_index_uses_brand_tokens():
         assert "MeowGo" in text and "运行报告" in text
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_new_primitives_validation_and_parsing():
+    """新增原语：负坐标、变量比较、HTTP、文字目标与新类型校验。"""
+    from rpa.engine import (_compare_values, _is_failsafe,
+                            _parse_http_spec, _parse_var_condition,
+                            _valid_xy, parse_text_target)
+
+    # 副屏坐标可以是负数
+    assert _valid_xy("-1920,100")
+    assert _valid_xy("500,300,right")
+    assert not _valid_xy("500,300,double")
+    assert not _valid_xy("a,b")
+
+    # 变量条件与比较（数字优先，其次字符串 / contains）
+    assert _parse_var_condition("计数>=3") == ("计数", ">=", "3")
+    assert _compare_values("10", ">", "3")
+    assert not _compare_values("2", ">", "3")
+    assert _compare_values("abc", "contains", "B")
+    assert not _compare_values("abc", "contains", "z")
+    assert _compare_values("abc", "notcontains", "z")
+    assert _compare_values("abc", "!=", "abd")
+    assert not _compare_values("abc", "==", "abd")
+
+    # HTTP：方法可省略（默认 GET），POST 可带请求体
+    assert _parse_http_spec("post https://a.com/x|响应|a=1") == (
+        "POST", "https://a.com/x", "响应", "a=1")
+    assert _parse_http_spec("https://a.com|响应")[0] == "GET"
+
+    # 文字目标的区域既可以写在内容里，也可以写在步骤区域里
+    name, region = parse_text_target("提交@10,-20,100,40")
+    assert name == "提交" and region == (10, -20, 100, 40)
+    name, region = parse_text_target("提交", "1,2,30,40")
+    assert name == "提交" and region == (1, 2, 30, 40)
+
+    # 新类型的基本校验
+    assert not Step("click_text", "提交").validate()
+    assert Step("click_text", " ").validate()
+    assert not Step("ui_click", "确定|Button").validate()
+    assert Step("ui_click", "|Button").validate()
+    assert not Step("if_var", "计数>3|重试").validate()
+    assert Step("if_var", "计数|重试").validate()
+    assert not Step("http", "GET https://example.com|响应").validate()
+    assert Step("http", "ftp://example.com|响应").validate()
+
+    # 急停异常按类名识别（不依赖 pyautogui 导入）
+    failsafe = type("FailSafeException", (Exception,), {})
+    assert _is_failsafe(failsafe())
+    assert not _is_failsafe(RuntimeError())
+
+
+def test_cmd_timeout_and_stop():
+    """系统命令：步骤超时会强制结束；停止请求能打断长时间命令。"""
+    command = "ping -n 6 127.0.0.1 >nul" if os.name == "nt" else "sleep 5"
+    with _fake_input_modules([]):
+        ex = Executor()
+        logs = []
+        ex.log = lambda level, msg: logs.append((level, msg))
+        started = time.time()
+        ex._run_cmd(command, Step("cmd", command, timeout=0.3))
+        elapsed = time.time() - started
+        assert elapsed < 3, f"超时后应立即返回，实际 {elapsed:.1f}s"
+        assert ex._step_ok is False
+        assert any("超时" in message for _, message in logs), logs
+
+    with _fake_input_modules([]):
+        import threading
+
+        ex2 = Executor()
+        logs2 = []
+        ex2.log = lambda level, msg: logs2.append((level, msg))
+        timer = threading.Timer(0.2, ex2.stop_event.set)
+        timer.start()
+        started = time.time()
+        try:
+            ex2._run_cmd(command, Step("cmd", command))
+        finally:
+            timer.cancel()
+        elapsed = time.time() - started
+        assert elapsed < 3, f"停止请求应尽快生效，实际 {elapsed:.1f}s"
+        assert ex2._step_ok is False
+        assert any("终止" in message for _, message in logs2), logs2
+
+
+def test_screen_cache_reuses_frame_and_env_checks():
+    """同一轮轮询只截一次屏；OCR / UIA 缺失时环境预检要明确提示。"""
+    import rpa.engine as engine_module
+    from rpa import ocr, uia
+    from rpa.engine import validate_environment
+
+    with _fake_input_modules([], located=(100, 100),
+                             images=("a.png", "b.png")) as io:
+        ex = Executor()
+        ex.base_dir = io.base_dir
+        original = engine_module.Executor._capture_screen
+        grabs = []
+        saved_ttl = engine_module.SCREEN_CACHE_TTL
+        engine_module.SCREEN_CACHE_TTL = 10
+        engine_module.Executor._capture_screen = \
+            lambda self: (grabs.append(1), original(self))[1]
+        try:
+            assert ex._locate("a.png") is not None
+            assert ex._locate("b.png") is not None
+        finally:
+            engine_module.Executor._capture_screen = original
+            engine_module.SCREEN_CACHE_TTL = saved_ttl
+        assert len(grabs) == 1, f"应复用同一帧截图，实际采集 {len(grabs)} 次"
+
+    saved = ocr.available, uia.available
+    try:
+        ocr.available = lambda: False
+        uia.available = lambda: False
+        problems = validate_environment(
+            [Group("主", [Step("click_text", "提交")])])
+        assert any("OCR" in p.upper() for p in problems), problems
+        problems = validate_environment(
+            [Group("主", [Step("ui_click", "确定")])])
+        assert any("uiautomation" in p for p in problems), problems
+        assert validate_environment(
+            [Group("主", [Step("wait", "1")])]) == []
+    finally:
+        ocr.available, uia.available = saved
+
+
+def test_screen_helpers_smoke():
+    """虚拟桌面尺寸 / 锁屏检测只做冒烟：返回类型正确、不抛异常。"""
+    from rpa.engine import session_locked, virtual_screen_rect
+
+    rect = virtual_screen_rect()
+    assert len(rect) == 4 and all(isinstance(value, int) for value in rect)
+    assert isinstance(session_locked(), bool)
 
 
 def main():

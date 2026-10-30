@@ -9,9 +9,13 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rpa import autostart  # noqa: E402
+
+pytestmark = pytest.mark.system
 
 TEST_KEY = r"Software\MeowGoAutostartSelfTest"
 TEST_NAME = "MeowGoTest"
