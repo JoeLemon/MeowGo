@@ -47,6 +47,7 @@ EN: dict[str, str] = {
     "开始运行": "Start",
     "运行这一步": "Run step",
     "跳过": "Skip",
+    "继续运行": "Continue run",
     "重试": "Retry",
     "管理": "Manage",
     "历史": "History",
@@ -479,6 +480,14 @@ EN: dict[str, str] = {
     "重复 ": "Repeat ",
     "运行：执行这一步\u3000·\u3000跳过：不执行\u3000·\u3000停止：结束整个运行（Esc）":
         "Run: execute this step  ·  Skip: do not execute  ·  Stop: end the run (Esc)",
+    "Enter 运行\u3000·\u3000Space 跳过\u3000·\u3000F5 继续运行\u3000·\u3000Esc 停止":
+        "Enter: run  ·  Space: skip  ·  F5: continue  ·  Esc: stop",
+    "单步调试：继续运行剩余步骤":
+        "Step debug: running the remaining steps",
+    "单步调试：已选择继续运行剩余步骤":
+        "Step debug: continuing with the remaining steps.",
+    "失败时停止": "Stop on failure",
+    "灰度匹配": "Grayscale",
     "全选当前组的步骤（可批量删除/复制/移动）":
         "Select all steps in the current group (for batch delete/copy/move)",
     "编辑选中的步骤": "Edit selected steps",
@@ -583,6 +592,8 @@ EN: dict[str, str] = {
     "还没有可执行的步骤": "There are no executable steps.",
     "即将开始，请切换到目标窗口（Esc 取消）":
         "Starting soon. Switch to the target window (Esc to cancel).",
+    "即将开始（单步调试），请切换到目标窗口（Esc 取消）":
+        "Starting step debug. Switch to the target window (Esc to cancel).",
     "启动倒计时被取消": "Startup countdown canceled.",
     "启动被新的运行取代": "Startup was replaced by a new run.",
     "已有其它运行在进行": "Another run is already in progress.",
@@ -1023,6 +1034,18 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], .
         (r"^单步调试关$", r"Step debug: Off"),
         (r"^正在执行：(.+) · 第 (\d+) 步$", r"Executing: \1 · step \2"),
         (r"^已定位：(.+) · 第 (\d+) 步$", r"Go to: \1 · step \2"),
+        (r"^执行组「(.+)」· 第 (\d+) / (\d+) 步$",
+         r"Group “\1” · step \2 / \3"),
+        (r"^单步调试：等待确认 · 第 (\d+) 步$",
+         r"Step debug: waiting · step \1"),
+        (r"^无操作 (\d{2}):(\d{2}) 后自动停止$",
+         r"Auto-stop in \1:\2 with no action"),
+        (r"^重复 (\d+(?:\.\d+)?) 次$", r"Repeat ×\1"),
+        (r"^最多等 (\d+(?:\.\d+)?) 秒$", r"Wait up to \1 s"),
+        (r"^失败重试 (\d+) 次$", r"Retry \1 times"),
+        (r"^限定区域 (.+)$", r"Region \1"),
+        (r"^命中第 (\d+) 个$", r"Occurrence \1"),
+        (r"^备注：(.+)$", r"Note: \1"),
         (r"^已重命名为 (.+)，同步 (\d+) 处引用$",
          r"Renamed to \1; \2 references updated"),
         (r"^(\d+) 步 · 失败 (\d+) · (.+) 秒$",

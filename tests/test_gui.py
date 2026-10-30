@@ -2177,9 +2177,16 @@ def test_drag_indicator_line():
 
 
 def test_debug_step_dialog():
-    """单步调试对话框：内容展示 + 三种选择 + 关窗即停止。"""
-    dialog = gui_module.DebugStepDialog(app, "甲组", 1,
-                                        Step("click", "按钮.png", 2))
+    """单步调试对话框：步骤上下文 + 高级选项 + 四种选择 + 关窗即停止。"""
+    app.project.groups = [
+        Group("调试组", [Step("wait", "0.1"), Step("click", "按钮.png", 2)]),
+        Group("甲组", [Step("wait", "0.1"), Step("wait", "0.2")]),
+    ]
+    app.group_index = 0
+    app._refresh_all()
+    step = Step("click", "按钮.png", 2, "先登录", timeout=5, on_fail="stop",
+                retry=2, region="1,2,3,4", nth=2, grayscale=True)
+    dialog = gui_module.DebugStepDialog(app, "调试组", 1, step)
     app.update()
     texts = []
 
@@ -2192,14 +2199,19 @@ def test_debug_step_dialog():
             walk(child)
 
     walk(dialog)
-    assert any("第 2 步" in t for t in texts), texts
+    assert any("第 2 / 2 步" in t for t in texts), texts
     assert any("重复 2 次" in t for t in texts), texts
+    assert any("最多等 5 秒" in t and "失败时停止" in t for t in texts), texts
+    assert any("失败重试 2 次" in t and "命中第 2 个" in t for t in texts), texts
+    assert any("备注：先登录" in t for t in texts), texts
+    assert any("F5 继续运行" in t for t in texts), texts
+    assert any("后自动停止" in t for t in texts), texts
     dialog._skip()
     assert dialog.result == "skip"
     dialog2 = gui_module.DebugStepDialog(app, "甲组", 0, Step("wait", "0.1"))
     app.update()
-    dialog2._run()
-    assert dialog2.result == "run"
+    dialog2._continue()
+    assert dialog2.result == "continue"
     dialog3 = gui_module.DebugStepDialog(app, "甲组", 0, Step("wait", "0.1"))
     app.update()
     dialog3.cancel()               # Esc / 关窗 = 停止运行
@@ -2222,12 +2234,15 @@ def test_debug_confirm_roundtrip():
             return self.result
 
     gui_module.DebugStepDialog = _Fake
+    saved_running = app.running
+    app.running = True
     try:
         event, box = _threading.Event(), {}
         app._ask_debug("甲组", 0, Step("wait", "0.1"), event, box)
         assert event.is_set() and box["answer"] == "run"
     finally:
         gui_module.DebugStepDialog = real_dialog
+        app.running = saved_running
 
     # 工作线程侧（_confirm_step）：入队后阻塞，被应答后拿到答案
     calls = []
@@ -2253,10 +2268,79 @@ def test_debug_confirm_roundtrip():
             time.sleep(0.02)
     finally:
         app._ask_debug = real_ask
+        app._pending_step = None
     assert calls, "确认请求应经界面队列处理"
     assert calls[0][0] == "甲组" and calls[0][1] == 1
     assert result.get("answer") == "skip"
     mark("单步确认线程接力")
+
+
+def test_debug_flow_feedback():
+    """单步调试流程：等待高亮、继续运行短路、急停关闭对话框。"""
+    import threading as _threading
+
+    app.project.groups = [Group("调试组", [Step("wait", "0.1"),
+                                             Step("wait", "0.2")])]
+    app.group_index = 0
+    app._refresh_all()
+
+    # 等确认的步骤先染成 pending，让人看到运行停在哪
+    app._set_pending_step("调试组", 1)
+    assert "pending" in app.step_tree.item("1", "tags")
+    app._clear_pending_step()
+    assert "pending" not in app.step_tree.item("1", "tags")
+
+    # 选择「继续运行」后，后续步骤不再弹窗，直接执行
+    real_dialog = gui_module.DebugStepDialog
+
+    class _Continue:
+        result = "continue"
+
+        def __init__(self, parent, name, index, step):
+            pass
+
+        def wait(self):
+            return "continue"
+
+        def destroy(self):
+            pass
+
+    gui_module.DebugStepDialog = _Continue
+    saved_running = app.running
+    app.running = True
+    try:
+        event, box = _threading.Event(), {}
+        app._ask_debug("调试组", 0, Step("wait", "0.1"), event, box)
+        assert box["answer"] == "run" and app._debug_continue
+        assert app._confirm_step("调试组", 1, Step("wait", "0.2")) == "run"
+    finally:
+        gui_module.DebugStepDialog = real_dialog
+        app.running = saved_running
+        app._debug_continue = False
+
+    # 急停时关掉正等待确认的对话框，工作线程不用等 3 分钟超时
+    class _Pending:
+        result = None
+
+        def __init__(self):
+            self.destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    fake = _Pending()
+    app.running = True
+    app._debug_dialog = fake
+    app._pending_step = ("调试组", 0)
+    try:
+        app.stop_run()
+        assert fake.destroyed and fake.result == "stop"
+        assert app._pending_step is None
+    finally:
+        app.running = False
+        app._debug_dialog = None
+        app.executor.stop_event.clear()
+    mark("单步调试流程反馈")
 
 
 def test_settings_dialog_mini_bar():
@@ -2915,6 +2999,7 @@ def finish():
         test_drag_indicator_line()
         test_debug_step_dialog()
         test_debug_confirm_roundtrip()
+        test_debug_flow_feedback()
         test_settings_dialog_mini_bar()
         test_step_dialog_advanced_roundtrip()
         test_settings_dialog_result_flags()

@@ -268,6 +268,7 @@ SCROLL_THUMB = LIGHT_PALETTE["SCROLL_THUMB"]
 SCROLL_TRACK = LIGHT_PALETTE["SCROLL_TRACK"]
 PROGRESS_TROUGH = LIGHT_PALETTE["PROGRESS_TROUGH"]
 PREVIEW_BG = LIGHT_PALETTE["PREVIEW_BG"]
+MARK_PENDING = LIGHT_PALETTE["MARK_PENDING"]
 MARK_RUNNING = LIGHT_PALETTE["MARK_RUNNING"]
 MARK_DONE = LIGHT_PALETTE["MARK_DONE"]
 MARK_FAILED = LIGHT_PALETTE["MARK_FAILED"]
@@ -284,7 +285,7 @@ def _apply_palette(palette: dict) -> None:
     global TABLE_HEAD_BG, TABLE_HEAD_FG, TABLE_BORDER, TABLE_ROW_SELECTED
     global FIELD_FOCUS, ENTRY_BG, SCROLL_THUMB, SCROLL_TRACK
     global PROGRESS_TROUGH, PREVIEW_BG
-    global MARK_RUNNING, MARK_DONE, MARK_FAILED
+    global MARK_PENDING, MARK_RUNNING, MARK_DONE, MARK_FAILED
     BG = palette["BG"]
     CARD = palette["CARD"]
     ACCENT = palette["ACCENT"]
@@ -322,6 +323,7 @@ def _apply_palette(palette: dict) -> None:
     SCROLL_TRACK = palette["SCROLL_TRACK"]
     PROGRESS_TROUGH = palette["PROGRESS_TROUGH"]
     PREVIEW_BG = palette["PREVIEW_BG"]
+    MARK_PENDING = palette["MARK_PENDING"]
     MARK_RUNNING = palette["MARK_RUNNING"]
     MARK_DONE = palette["MARK_DONE"]
     MARK_FAILED = palette["MARK_FAILED"]
@@ -720,6 +722,9 @@ class App(tk.Tk):
         # 单步调试：每步执行前弹窗确认（运行 / 跳过 / 停止）
         self.debug_mode = bool(self.settings.get("debug_mode", False))
         self._debug_once = False       # 一次性调试：只作用下一程运行
+        self._debug_continue = False   # 本程是否已选择「继续运行」
+        self._debug_dialog: Optional[DebugStepDialog] = None
+        self._pending_step: Optional[tuple[str, int]] = None
         self._dirty = False
         self._last_saved_payload: Optional[str] = None
         self._last_save_error = ""
@@ -1482,6 +1487,7 @@ class App(tk.Tk):
         # 标签创建顺序即优先级（先建的赢）：运行染色必须建在斑马纹之前，
         # 否则 executing/done/failed 会被斑马纹盖掉。
         self.step_tree.tag_configure("running", background=MARK_RUNNING)
+        self.step_tree.tag_configure("pending", background=MARK_PENDING)
         self.step_tree.tag_configure("done", background=MARK_DONE)
         self.step_tree.tag_configure("failed", background=MARK_FAILED)
         self.step_tree.tag_configure("even", background=CARD)
@@ -1780,6 +1786,7 @@ class App(tk.Tk):
         # 树标签（斑马纹 / 运行染色）跟着色板走
         self.group_tree.tag_configure("running", foreground=WARNING)
         self.step_tree.tag_configure("running", background=MARK_RUNNING)
+        self.step_tree.tag_configure("pending", background=MARK_PENDING)
         self.step_tree.tag_configure("done", background=MARK_DONE)
         self.step_tree.tag_configure("failed", background=MARK_FAILED)
         self.step_tree.tag_configure("even", background=CARD)
@@ -3231,6 +3238,8 @@ class App(tk.Tk):
                     self._highlight_step(*payload)  # type: ignore[misc]
                 elif kind == "step_done":
                     self._apply_step_done(*payload)  # type: ignore[misc]
+                elif kind == "pending":
+                    self._set_pending_step(*payload)  # type: ignore[misc]
                 elif kind == "progress":
                     self._apply_progress(*payload)  # type: ignore[misc]
                 elif kind == "confirm":
@@ -3240,7 +3249,10 @@ class App(tk.Tk):
                 elif kind == "stop":
                     self.stop_run()
                 elif kind == "run":
-                    self.run_group()
+                    # 确认框打开时 F5 = 继续运行（对话框内绑定），别再起一程；
+                    # 全局热键和窗口内按键会同时到达，这里挡掉后者。
+                    if self._debug_dialog is None:
+                        self.run_group()
         except queue.Empty:
             pass
         self.after(120, self._drain_queue)
@@ -3450,11 +3462,13 @@ class App(tk.Tk):
         # 一次性调试（右键「单步调试运行」）不落盘，随这次运行生效
         debug = self.debug_mode or self._debug_once
         delay = int(self.settings.get("delay", 3))
-        self.iconify()
-        self._countdown(delay, lambda: self._launch(entry, loop, debug=debug))
+        if not debug:
+            self.iconify()            # 单步调试时保留窗口，方便看步骤高亮
+        self._countdown(delay, lambda: self._launch(entry, loop, debug=debug),
+                        debug=debug)
         return True
 
-    def _countdown(self, seconds: int, callback) -> None:
+    def _countdown(self, seconds: int, callback, debug: bool = False) -> None:
         self._countdown_token += 1
         token = self._countdown_token
         if seconds <= 0:
@@ -3471,7 +3485,10 @@ class App(tk.Tk):
         label = tk.Label(overlay, text="", bg=LOG_BG, fg=LOG_FG,
                          font=FONT_HERO)
         label.pack(expand=True)
-        tk.Label(overlay, text="即将开始，请切换到目标窗口（Esc 取消）",
+        tk.Label(overlay,
+                 text=("即将开始（单步调试），请切换到目标窗口（Esc 取消）"
+                       if debug else
+                       "即将开始，请切换到目标窗口（Esc 取消）"),
                  bg=LOG_BG, fg=LOG_HEAD_MUTED,
                  font=FONT_NOTE).pack(pady=(0, self.s(12)))
         state = {"left": seconds, "cancelled": False}
@@ -3522,6 +3539,8 @@ class App(tk.Tk):
         self.running = True
         self.paused = False
         self._debug_once = False        # 一次性开关跑完即弃
+        self._debug_continue = False    # 每次运行都重新逐步骤确认
+        self._pending_step = None
         # 每次运行单独落一份过程日志，事后能按时间/步骤回查
         self._run_log = logs.RunLog(REPORTS_DIR,
                                     entry or "全部执行组")
@@ -3571,9 +3590,12 @@ class App(tk.Tk):
             self._finish_schedule_history(result)
             self._notify_finish(result)
         finally:
+            self._close_debug_dialog("stop")   # 运行结束时别把确认框留在屏幕上
             self.running = False
             self.paused = False
             self._schedule_pending = False
+            self._debug_continue = False
+            self._pending_step = None
             if self._run_lock is not None:
                 self._run_lock.release()
                 self._run_lock = None
@@ -3704,34 +3726,87 @@ class App(tk.Tk):
     def _confirm_step(self, name: str, index: int, step: Step) -> str:
         """工作线程调用：把确认请求抛给主线程，阻塞等用户选择。
 
-        3 分钟无应答按「停止」处理——对话框被关掉或界面卡住时，
-        运行必须能结束，不能永远挂住。
+        等待期间每 0.1 秒看一眼停止标志，急停不用等对话框超时；
+        超过 3 分钟无应答按「停止」处理，运行不会永远挂住。
         """
+        if self._debug_continue:      # 已点「继续运行」：剩余步骤不再询问
+            return "run"
         event = threading.Event()
         box = {"answer": "stop"}
+        self.ui_queue.put(("pending", (name, index)))
         self.ui_queue.put(("confirm", (name, index, step, event, box)))
-        event.wait(180)
+        deadline = time.time() + 180
+        while not event.wait(0.1):
+            if self.executor.stop_event.is_set() or time.time() >= deadline:
+                box["answer"] = "stop"
+                break
         return box["answer"]
+
+    def _set_pending_step(self, group_name: str, index: int) -> None:
+        """主线程：等待确认的那一步先染成蓝底，明确告诉用户停在哪。"""
+        self._pending_step = (group_name, index)
+        names = self.project.names()
+        if group_name in names:
+            position = names.index(group_name)
+            if position != self.group_index:
+                self.group_index = position
+                self._refresh_groups()
+                self._refresh_steps()
+        self._repaint_step_marks()
+        if self.step_tree.exists(str(index)):
+            self.step_tree.see(str(index))
+        self._set_status(f"单步调试：等待确认 · 第 {index + 1} 步")
+
+    def _clear_pending_step(self) -> None:
+        if self._pending_step is None:
+            return
+        self._pending_step = None
+        self._repaint_step_marks()
+
+    def _close_debug_dialog(self, answer: str) -> None:
+        """关掉正在等待的调试对话框（急停 / 运行结束时用）。"""
+        dialog = self._debug_dialog
+        self._debug_dialog = None
+        if dialog is None:
+            return
+        try:
+            dialog.result = answer
+            dialog.destroy()
+        except tk.TclError:
+            pass
 
     def _ask_debug(self, name: str, index: int, step: Step,
                    event: threading.Event, box: dict) -> None:
         """主线程：弹出单步调试对话框，把用户选择交回工作线程。"""
+        if not self.running:
+            box["answer"] = "stop"
+            event.set()
+            return
+        self.deiconify()              # 运行时会最小化，先把窗口唤回
         try:
-            self.deiconify()          # 运行时会最小化，先把窗口唤回
-            self.lift()
             dialog = DebugStepDialog(self, name, index, step)
+            self._debug_dialog = dialog
             answer = dialog.wait()
         except tk.TclError:
             answer = "stop"
+        finally:
+            self._debug_dialog = None
+            self._clear_pending_step()
+        if answer == "continue":
+            # 「继续运行」= 本步照常执行，之后不再询问
+            self._debug_continue = True
+            self._log("info", "单步调试：已选择继续运行剩余步骤")
+            self._set_status("单步调试：继续运行剩余步骤")
+            answer = "run"
         box["answer"] = answer or "stop"
         event.set()
-        if self.running:
-            self.iconify()            # 继续跑之前再最小化，别挡识别区
 
     def stop_run(self) -> None:
         if not self.running:
             return
         self.executor.stop()
+        self._clear_pending_step()
+        self._close_debug_dialog("stop")   # 对话框正等确认时立刻关掉
         self._set_status("正在停止…")
         self._set_log_state("正在停止…")
 
@@ -4021,6 +4096,7 @@ class App(tk.Tk):
         self.ui_queue.put(("step_done", (group_name, index, ok)))
 
     def _highlight_step(self, group_name: str, index: int) -> None:
+        self._pending_step = None     # 已开始执行，等待高亮让位给运行高亮
         names = self.project.names()
         if group_name in names:
             position = names.index(group_name)
@@ -4053,6 +4129,9 @@ class App(tk.Tk):
     def _repaint_step_marks(self) -> None:
         """按 _step_marks 重染当前组的行（刷新列表后调用，标记不丢）。"""
         marks = self._step_marks.get(self._current_group_name(), {})
+        pending = self._pending_step
+        pending_index = (pending[1] if pending is not None
+                         and pending[0] == self._current_group_name() else None)
         for item in self.step_tree.get_children():
             index = int(item)
             # 先回到斑马纹，再按需叠运行染色（标记标签优先级更高，盖得住）
@@ -4060,6 +4139,8 @@ class App(tk.Tk):
             mark = marks.get(index)
             if mark:
                 tags.append(mark)
+            elif index == pending_index:
+                tags.append("pending")
             self.step_tree.item(item, tags=tuple(tags))
 
     def _jump_to_step(self, group_name: str, index: int) -> None:
@@ -7102,49 +7183,136 @@ class DataPreviewDialog(BaseDialog):
 
 
 class DebugStepDialog(BaseDialog):
-    """单步调试：执行下一步之前问一句（运行 / 跳过 / 停止）。
+    """单步调试：执行下一步之前问一句（运行 / 跳过 / 继续 / 停止）。
 
-    由 _ask_debug 在主线程弹出；wait() 的返回值会经 Event 交回工作线程，
-    据此决定这一步是执行、跳过还是终止整个运行。
+    由 _ask_debug 在主线程弹出；wait() 的返回值交给工作线程：
+    run = 只执行这一步，skip = 不执行，continue = 执行并跑完剩余步骤，
+    stop = 终止整个运行。无人操作 3 分钟后自动按停止处理。
     """
 
+    AUTO_STOP_SECONDS = 180
+
     def __init__(self, parent: App, group_name: str, index: int, step: Step):
-        super().__init__(parent, "单步调试", width=470, height=270)
+        super().__init__(parent, "单步调试", width=520, height=330)
         self.attributes("-topmost", True)
         self.columnconfigure(0, weight=1)
+        self._timeout_id: Optional[str] = None
+        self._type_icon = None
 
-        self.label(f"执行组「{group_name}」· 第 {index + 1} 步", 0)
-        content = (step.content or "").strip() or "（无内容）"
-        detail = tk.Label(self, text=f"{step.label()}：{content}", bg=CARD,
-                          fg=TEXT, font=FONT_BODY_BOLD,
-                          wraplength=parent.s(410), justify="left")
-        detail.grid(row=1, column=0, sticky="w", padx=parent.s(16),
-                    pady=(parent.s(2), parent.s(6)))
+        group = next((g for g in parent.project.groups
+                      if g.name == group_name), None)
+        total = len(group.steps) if group is not None else 0
+        heading = (f"执行组「{group_name}」· 第 {index + 1} / {total} 步"
+                   if total else f"执行组「{group_name}」· 第 {index + 1} 步")
+        self.label(heading, 0)
+
+        # 类型徽标：图标 + 类型名，颜色沿用步骤列表的语义色
+        type_row = tk.Frame(self, bg=CARD)
+        type_row.grid(row=1, column=0, sticky="w", padx=parent.s(16),
+                      pady=(parent.s(2), parent.s(4)))
+        color = TYPE_COLORS.get(step.type, TYPE_ICON_COLOR)
+        self._type_icon = uikit.icon(
+            TYPE_ICONS.get(step.type, "note"), parent.s(16), color)
+        tk.Label(type_row, image=self._type_icon, bg=CARD).pack(side="left")
+        tk.Label(type_row, text=step.label(), bg=CARD, fg=color,
+                 font=FONT_CAPTION).pack(side="left", padx=(parent.s(6), 0))
         if step.repeat and step.repeat != 1:
-            tk.Label(self, text=f"重复 {step.repeat:g} 次", bg=CARD, fg=MUTED,
-                     font=FONT_CAPTION).grid(
-                row=2, column=0, sticky="w", padx=parent.s(16))
-        tk.Label(self, text="运行：执行这一步　·　跳过：不执行　·　"
-                            "停止：结束整个运行（Esc）", bg=CARD, fg=MUTED,
-                 font=FONT_CAPTION).grid(
-            row=3, column=0, sticky="w", padx=parent.s(16),
-            pady=(parent.s(8), 0))
+            tk.Label(type_row, text=f"重复 {step.repeat:g} 次", bg=CARD,
+                     fg=MUTED, font=FONT_CAPTION).pack(
+                side="left", padx=(parent.s(10), 0))
+
+        content = (step.content or "").strip() or "（无内容）"
+        tk.Label(self, text=content, bg=CARD, fg=TEXT, font=FONT_BODY_BOLD,
+                 wraplength=parent.s(460), justify="left").grid(
+            row=2, column=0, sticky="w", padx=parent.s(16),
+            pady=(0, parent.s(6)))
+
+        options = self._options_summary(step)
+        if options:
+            tk.Label(self, text=options, bg=CARD, fg=MUTED,
+                     font=FONT_CAPTION, wraplength=parent.s(460),
+                     justify="left").grid(
+                row=3, column=0, sticky="w", padx=parent.s(16))
+        if step.note.strip():
+            tk.Label(self, text=f"备注：{step.note.strip()}", bg=CARD, fg=MUTED,
+                     font=FONT_CAPTION, wraplength=parent.s(460),
+                     justify="left").grid(
+                row=4, column=0, sticky="w", padx=parent.s(16),
+                pady=(parent.s(4), 0))
+
+        # 快捷键提示 + 自动停止倒计时：让“没人管”的情况也可预期
+        hint_row = tk.Frame(self, bg=CARD)
+        hint_row.grid(row=5, column=0, sticky="ew", padx=parent.s(16),
+                      pady=(parent.s(8), 0))
+        tk.Label(hint_row, text="Enter 运行　·　Space 跳过　·　"
+                                "F5 继续运行　·　Esc 停止",
+                 bg=CARD, fg=MUTED, font=FONT_CAPTION).pack(side="left")
+        self._timeout_label = tk.Label(hint_row, text="", bg=CARD, fg=MUTED,
+                                       font=FONT_CAPTION)
+        self._timeout_label.pack(side="right")
 
         buttons = tk.Frame(self, bg=CARD)
-        buttons.grid(row=4, column=0, sticky="ew", padx=parent.s(16),
-                     pady=(parent.s(12), parent.s(14)))
+        buttons.grid(row=6, column=0, sticky="ew", padx=parent.s(16),
+                     pady=(parent.s(10), parent.s(14)))
         uikit.RoundButton(buttons, "停止", "stop", self._stop,
                           kind="danger", scale=parent.scale, bg=CARD,
                           height=CONTROL_MD).pack(side="left")
         uikit.RoundButton(buttons, "运行这一步", "run", self._run,
                           kind="accent", scale=parent.scale, bg=CARD,
                           height=CONTROL_MD).pack(side="right")
-        uikit.RoundButton(buttons, "跳过", "debug", self._skip,
+        uikit.RoundButton(buttons, "继续运行", "continue", self._continue,
                           kind="outline", scale=parent.scale, bg=CARD,
                           height=CONTROL_MD).pack(side="right",
                                                    padx=(0, parent.s(8)))
-        self.fit_content(width=parent.s(470))
+        uikit.RoundButton(buttons, "跳过", "next", self._skip,
+                          kind="outline", scale=parent.scale, bg=CARD,
+                          height=CONTROL_MD).pack(side="right",
+                                                   padx=(0, parent.s(8)))
+
+        self.bind("<Return>", lambda _event: self._run())
+        self.bind("<KP_Enter>", lambda _event: self._run())
+        self.bind("<space>", lambda _event: self._skip())
+        self.bind("<F5>", lambda _event: self._continue())
+        self._remaining = self.AUTO_STOP_SECONDS
+        self._tick_timeout()
+        self.fit_content(width=parent.s(520))
         self.center()
+
+    @staticmethod
+    def _options_summary(step: Step) -> str:
+        """把非默认的高级选项压成一行，确认时不用另开属性框核对。"""
+        parts: list[str] = []
+        if step.timeout and step.timeout > 0:
+            parts.append(f"最多等 {step.timeout:g} 秒")
+        if step.on_fail == "stop":
+            parts.append("失败时停止")
+        if step.retry and step.retry > 0:
+            parts.append(f"失败重试 {step.retry} 次")
+        if step.region:
+            parts.append(f"限定区域 {step.region}")
+        if step.nth and step.nth > 0:
+            parts.append(f"命中第 {step.nth} 个")
+        if step.grayscale:
+            parts.append("灰度匹配")
+        return " · ".join(i18n.tr(part) for part in parts)
+
+    def _tick_timeout(self) -> None:
+        if self._remaining <= 0:
+            self._stop()                 # 无人操作：按停止处理，运行不挂住
+            return
+        minutes, seconds = divmod(self._remaining, 60)
+        self._timeout_label.configure(
+            text=f"无操作 {minutes:02d}:{seconds:02d} 后自动停止")
+        self._remaining -= 1
+        self._timeout_id = self.after(1000, self._tick_timeout)
+
+    def _teardown(self) -> None:
+        if self._timeout_id is not None:
+            try:
+                self.after_cancel(self._timeout_id)
+            except tk.TclError:
+                pass
+            self._timeout_id = None
 
     def _run(self) -> None:
         self.result = "run"
@@ -7152,6 +7320,10 @@ class DebugStepDialog(BaseDialog):
 
     def _skip(self) -> None:
         self.result = "skip"
+        self.destroy()
+
+    def _continue(self) -> None:
+        self.result = "continue"
         self.destroy()
 
     def _stop(self) -> None:

@@ -319,6 +319,14 @@ def _draw(name: str, draw: "_ScaledDraw", color, lw: int) -> None:
         draw.ellipse([4, 4, 20, 20], outline=c, width=lw)
         draw.ellipse([9, 9, 15, 15], outline=c, width=max(1, lw - 1))
         draw.ellipse([10.8, 10.8, 13.2, 13.2], fill=c)
+    elif name == "next":
+        # 跳过：实心三角 + 右侧竖条
+        draw.polygon([(5.5, 5.5), (16.5, 12), (5.5, 18.5)], fill=c)
+        _polyline(draw, [(19, 5.5), (19, 18.5)], c, lw)
+    elif name == "continue":
+        # 继续运行：双三角
+        draw.polygon([(3.5, 5.5), (12, 12), (3.5, 18.5)], fill=c)
+        draw.polygon([(11.5, 5.5), (20, 12), (11.5, 18.5)], fill=c)
     elif name == "debug":
         draw.rounded_rectangle([7, 6, 17, 19], radius=2.5, outline=c, width=lw)
         _polyline(draw, [(12, 9), (12, 12.5)], c, max(1, lw - 1))
