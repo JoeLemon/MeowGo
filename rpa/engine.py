@@ -1993,6 +1993,83 @@ def report_markdown(report: dict, result: str,
     return "\n".join(lines) + "\n"
 
 
+def parse_report_meta(text: str) -> dict:
+    """从 markdown 运行报告里读出摘要字段（结果 / 步数 / 失败 / 耗时 / 行数）。"""
+    meta = {"result": "", "steps": 0, "failed": 0, "seconds": 0.0, "rows": 0}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("- 结果："):
+            meta["result"] = line[len("- 结果："):].strip()
+        elif line.startswith("- 步骤数："):
+            match = re.search(r"步骤数：(\d+)，失败：(\d+)", line)
+            if match:
+                meta["steps"] = int(match.group(1))
+                meta["failed"] = int(match.group(2))
+        elif line.startswith("- 总耗时："):
+            value = line[len("- 总耗时："):].replace("秒", "").strip()
+            try:
+                meta["seconds"] = float(value)
+            except ValueError:
+                pass
+        elif line.startswith("- 数据行数："):
+            try:
+                meta["rows"] = int(line[len("- 数据行数："):].strip())
+            except ValueError:
+                pass
+    return meta
+
+
+def _split_table_row(line: str) -> list[str]:
+    """拆一行 markdown 表格；内容里的 ``\\|`` 还原成普通竖线。"""
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|"):
+        line = line[:-1]
+    return [cell.strip().replace("\\|", "|")
+            for cell in re.split(r"(?<!\\)\|", line)]
+
+
+def parse_report_table(text: str) -> tuple[list[str], list[list[str]]]:
+    """拆出报告里的 markdown 表格：返回（表头，数据行），跳过对齐行。"""
+    headers: list[str] = []
+    rows: list[list[str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = _split_table_row(line)
+        if not headers:
+            headers = cells
+            continue
+        if all(re.fullmatch(r":?-{2,}:?", cell) for cell in cells):
+            continue
+        rows.append(cells)
+    return headers, rows
+
+
+def list_run_reports(directory: str) -> list[dict]:
+    """列出目录里的 run_*.md，按修改时间倒序，附带解析出的头信息。"""
+    try:
+        names = [name for name in os.listdir(directory)
+                 if name.startswith("run_") and name.endswith(".md")]
+    except OSError:
+        return []
+    reports = []
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        reports.append({"path": path, "name": name, "mtime": mtime,
+                        "text": text, **parse_report_meta(text)})
+    reports.sort(key=lambda item: item["mtime"], reverse=True)
+    return reports
+
+
 def write_report_index(directory: str, keep: int = 100) -> str:
     """生成 reports/index.html，并只保留最近 keep 份报告。
 
@@ -2016,24 +2093,17 @@ def write_report_index(directory: str, keep: int = 100) -> str:
     rows = []
     referenced_shots = set()
     for path in paths:
-        result = ""
-        steps = failed = seconds = ""
         try:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
         except OSError:
             continue
         referenced_shots.update(re.findall(r"\((shots/[^)]+)\)", text))
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("- 结果："):
-                result = line[len("- 结果："):].strip()
-            elif line.startswith("- 步骤数："):
-                match = re.search(r"步骤数：(\d+)，失败：(\d+)", line)
-                if match:
-                    steps, failed = match.group(1), match.group(2)
-            elif line.startswith("- 总耗时："):
-                seconds = line[len("- 总耗时："):].replace(" 秒", "").strip()
+        meta = parse_report_meta(text)
+        result = meta["result"]
+        steps = str(meta["steps"])
+        failed = str(meta["failed"])
+        seconds = f"{meta['seconds']:g}"
         label = {"finished": "成功", "error": "失败",
                  "stopped": "已停止"}.get(result, result or "未知")
         css = {"finished": "ok", "error": "bad",

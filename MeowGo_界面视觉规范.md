@@ -11,6 +11,8 @@
 > v1.3.1：文本输入全部改用 `uikit.TextField`，内部 Entry 使用无边框 `Field.TEntry`，每个字段只保留外层一圈圆角描边，修复下拉 / 输入框的双边框；运行设置表单改为标签左对齐、控件右对齐；步骤表「#」编号列由 44px 提升到 66px（1.5 倍）。
 >
 > v1.3.2：步骤表首列图标槽由 30px 加宽到 40px，`#` 编号列由 66px 收窄到 56px；所有列宽均可在表头拖动调整，并写入 `rpa_settings.json` 的 `columns`，重启后恢复上次列宽。同时修复浅色主题下日志头「运行日志 / 复制 / 清空」ghost 按钮 hover / pressed 变成浅灰的问题。
+>
+> v1.3.3：执行组树的展开 / 收起指示器由系统三角改为品牌猫爪（`paw` 图标），收起态 `MUTED`、展开态 `ACCENT_STRONG`；运行摘要移到窗口最底行状态栏，运行报告入口改为「历史」弹窗（查看 / 清空历次报告）。
 
 ---
 
@@ -294,6 +296,7 @@ Logo 素材：`./meowgo_logo_transparent.png`（透明底，可直接用于界�
 - 内容：主文本 13–14px `TEXT`，次要说明 `MUTED`；超长内容在列宽内截断，必要时在文本末尾显示省略号（HTML 报告页用 `text-overflow: ellipsis`，桌面表格由列宽裁切）。
 - 状态：若表格含状态列，使用胶囊 pill；成功 / 失败 / 运行中分别取 `MARK_DONE` / `MARK_FAILED` / `MARK_RUNNING` 底与 `SUCCESS_TEXT` / `DANGER_TEXT` / `WARNING_TEXT` 字，圆角 pill，不改变行底色。
 - 分组树与步骤表共用 `Treeview` 中性样式；表格容器不嵌套橙边，避免和卡片选中态混淆。
+- 分组树的展开 / 收起指示器使用品牌猫爪（`paw` 图标，13px）：收起态 `MUTED`，展开态 `ACCENT_STRONG`，与文件夹图标合成在 `#0` 图标槽里；不再使用系统三角，点击猫爪区域切换展开状态。
 
 ### 8.9 下拉选择 Select（v1.3）
 

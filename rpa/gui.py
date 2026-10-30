@@ -23,7 +23,8 @@ from . import assets, autostart, i18n, theme, tray, uikit
 from .engine import (CONDITION_TYPES, IMAGE_STEP_TYPES, IMAGE_TYPES,
                      STEP_TYPES, Executor, Group, Project, Step,
                      estimate_steps, export_excel, find_images, import_excel,
-                     opencv_available, parse_region, validate_environment,
+                     list_run_reports, opencv_available, parse_region,
+                     parse_report_table, validate_environment,
                      validate_project)
 from .lock import InstanceLock, make_lock_name
 from .theme import (CONTROL_LG, CONTROL_MD, CONTROL_SM, CONTROL_XS,
@@ -919,6 +920,15 @@ class App(tk.Tk):
                         bordercolor=LOG_HEAD_BG, lightcolor=LOG_HEAD_BG,
                         darkcolor=LOG_HEAD_BG,
                         borderwidth=0, thickness=self.s(4))
+        # 分组树的展开 / 收起指示器换成猫爪：派生布局去掉系统三角，
+        # 组行图标由「猫爪 + 文件夹」合成（见 App._group_row_pic），
+        # 步骤表与其它 Treeview 仍沿用系统布局，不受影响。
+        style.layout("Paw.Treeview.Item", [
+            ("Treeitem.padding", {"sticky": "nswe", "children": [
+                ("Treeitem.image", {"side": "left", "sticky": ""}),
+                ("Treeitem.text", {"sticky": "nswe"}),
+            ]}),
+        ])
 
     # --------------------------------------------------------------- 菜单
     def _menu_defs(self):
@@ -1186,6 +1196,12 @@ class App(tk.Tk):
             scale=self.scale, bg=CARD)
         scroll.pack(side="right", fill="y", padx=(self.s(2), 0))
         self.group_tree.configure(yscrollcommand=scroll.set)
+        # 展开 / 收起改用猫爪：派生样式去掉系统三角，点组行最左侧的
+        # 猫爪切换展开状态（见 _on_group_click / _group_row_pic）。
+        self.group_tree.configure(style="Paw.Treeview")
+        self.group_tree.bind("<Button-1>", self._on_group_click, add="+")
+        self.group_tree.bind("<<TreeviewOpen>>", self._sync_group_paw, add="+")
+        self.group_tree.bind("<<TreeviewClose>>", self._sync_group_paw, add="+")
         self.group_tree.tag_configure("running", foreground=WARNING)
         self.group_tree.bind("<<TreeviewSelect>>", self._on_group_select)
         self.group_tree.bind("<Double-1>", self._on_group_double)
@@ -1387,6 +1403,12 @@ class App(tk.Tk):
             scale=self.scale, bg=LOG_HEAD_BG, height=CONTROL_SM, pad=self.s(8),
             font_size=FONT_SIZE_NOTE, tooltip="复制全部日志到剪贴板")
         self.btn_log_copy.pack(side="right", padx=(0, self.s(2)))
+        # 「打开报告」改成运行历史入口：弹窗里可以查看 / 清空历次报告
+        self.btn_run_history = uikit.RoundButton(
+            head, "历史", "clock", self.open_run_history, kind="ghost",
+            scale=self.scale, bg=LOG_HEAD_BG, height=CONTROL_SM, pad=self.s(8),
+            font_size=FONT_SIZE_NOTE, tooltip="运行历史：查看 / 清空历次报告")
+        self.btn_run_history.pack(side="right", padx=(0, self.s(2)))
         # 点标题栏空白处也能收放
         for widget in (head, self.log_state):
             widget.bind("<Button-1>", lambda e: self.toggle_log())
@@ -1405,27 +1427,6 @@ class App(tk.Tk):
                                        font=FONT_CAPTION)
         self.progress_label.pack(side="left", padx=(self.s(8), self.s(10)),
                                  pady=(0, self.s(6)))
-
-        # 运行摘要条：默认隐藏，一次运行结束后显示结论 + 打开报告
-        self.summary_frame = uikit.RoundedCard(
-            card, radius=self.s(INNER_RADIUS), bg=SUMMARY_BG,
-            border=SUMMARY_BORDER, outer_bg=CARD, padding=self.s(3),
-            shadow=False)
-        summary = self.summary_frame.body
-        self.summary_label = tk.Label(summary, text="",
-                                      bg=SUMMARY_BG, fg=TEXT,
-                                      font=FONT_NOTE)
-        self.summary_label.pack(side="left", padx=self.s(10))
-        uikit.RoundButton(summary, "", "close", self._hide_summary,
-                          kind="ghost", scale=self.scale, bg=SUMMARY_BG,
-                          height=CONTROL_XS, pad=self.s(4), icon_size=ICON_XS,
-                          tooltip="收起摘要").pack(side="right", padx=self.s(4))
-        self.btn_open_report = uikit.RoundButton(
-            summary, "打开报告", "folder_open",
-            self._open_last_report,
-            kind="outline", scale=self.scale, bg=SUMMARY_BG, height=CONTROL_XS,
-            pad=self.s(7), font_size=FONT_SIZE_NOTE)
-        self.btn_open_report.pack(side="right")
 
         # 正文 + 滚动条：能回看历史日志；超过 MAX_LOG_LINES 自动丢弃最早行
         self.log_body = tk.Frame(card, bg=LOG_BG)
@@ -1474,8 +1475,9 @@ class App(tk.Tk):
                  pady=(self.s(2), self.s(8)))
         self.status_var = tk.StringVar(value=i18n.tr("就绪"))
         self._status_source = "就绪"
-        tk.Label(bar, textvariable=self.status_var, bg=BG, fg=MUTED,
-                 font=FONT_NOTE).pack(side="left")
+        self.status_label = tk.Label(bar, textvariable=self.status_var, bg=BG,
+                                     fg=MUTED, font=FONT_NOTE, anchor="w")
+        self.status_label.pack(side="left")
         self.btn_shortcuts = uikit.RoundButton(
             bar, "", "question", self.show_shortcuts, kind="ghost",
             scale=self.scale, bg=BG, height=CONTROL_XS, pad=self.s(4),
@@ -1800,10 +1802,13 @@ class App(tk.Tk):
         except (OSError, AttributeError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
-    def _set_status(self, text: str) -> None:
+    def _set_status(self, text: str, color: Optional[str] = None) -> None:
         """状态栏文案。日志标题只显示运行阶段，避免同一句话出现两遍。"""
         self._status_source = text
         self.status_var.set(i18n.tr(text))
+        label = getattr(self, "status_label", None)
+        if label is not None:
+            label.configure(fg=color or MUTED)
 
     def _set_log_state(self, text: str) -> None:
         """日志标题的运行阶段：就绪 / 运行中 / 暂停 / 完成 / 失败。"""
@@ -1844,7 +1849,7 @@ class App(tk.Tk):
             self.group_tree.insert(
                 "", "end", iid=iid,
                 text=f"  {group.name}   ({len(group.steps)})",
-                image=self.pic("folder", 16, ACCENT_STRONG),
+                image=self._group_row_pic(index == self.group_index),
                 open=(index == self.group_index))
             for step_index, step in enumerate(group.steps):
                 self.group_tree.insert(
@@ -1859,6 +1864,54 @@ class App(tk.Tk):
             self.group_empty_box.place_forget()
         else:
             self.group_empty_box.place(relx=0.5, rely=0.45, anchor="center")
+
+    def _group_row_pic(self, is_open: bool):
+        """组行图标：猫爪（展开 / 收起）+ 文件夹，合成为一张图。
+
+        系统三角被 Paw.Treeview 布局去掉后，猫爪必须和文件夹一起画进
+        #0 列图标槽；展开时猫爪用品牌橙，收起时用次级文字色。
+        """
+        key = ("group_row", bool(is_open))
+        if key not in self._icons:
+            from PIL import Image, ImageTk
+
+            paw = uikit.icon_image(
+                "paw", self.s(13), ACCENT_STRONG if is_open else MUTED)
+            folder = uikit.icon_image("folder", self.s(16), ACCENT_STRONG)
+            gap = self.s(5)
+            height = max(paw.height, folder.height)
+            canvas = Image.new(
+                "RGBA", (paw.width + gap + folder.width, height),
+                (0, 0, 0, 0))
+            canvas.alpha_composite(paw, (0, (height - paw.height) // 2))
+            canvas.alpha_composite(
+                folder, (paw.width + gap, (height - folder.height) // 2))
+            self._icons[key] = ImageTk.PhotoImage(canvas)
+        return self._icons[key]
+
+    def _on_group_click(self, event):
+        """点组行最左侧的猫爪：展开 / 收起该组（替代系统三角）。"""
+        iid = self.group_tree.identify_row(event.y)
+        if not iid or "_" in iid:          # 只处理顶层组节点
+            return None
+        bbox = self.group_tree.bbox(iid, "#0")
+        if not bbox or event.x > bbox[0] + self.s(17):
+            return None                     # 点在文字 / 文件夹上：保持默认行为
+        is_open = not bool(self.group_tree.item(iid, "open"))
+        self.group_tree.item(
+            iid, open=is_open, image=self._group_row_pic(is_open))
+        self.group_tree.selection_set(iid)
+        self.group_tree.focus(iid)
+        return "break"
+
+    def _sync_group_paw(self, _event=None) -> None:
+        """展开 / 收起（双击、键盘）后同步猫爪状态。"""
+        for index in range(len(self.project.groups)):
+            iid = f"g{index}"
+            if not self.group_tree.exists(iid):
+                continue
+            is_open = bool(self.group_tree.item(iid, "open"))
+            self.group_tree.item(iid, image=self._group_row_pic(is_open))
 
     def _step_summary(self, step: Step, index: int) -> str:
         text = step.content.strip().replace("\n", " ")
@@ -3266,7 +3319,6 @@ class App(tk.Tk):
         self._failed_step = None
         self._current_run_step = None
         self._step_log_lines = {}
-        self._hide_summary()
         self.btn_locate.pack_forget()
         self._set_status("运行中…" + ("（循环）" if loop else "")
                          + ("（单步调试）" if debug else ""))
@@ -3322,31 +3374,28 @@ class App(tk.Tk):
             self._refresh_all()
             result_text = {"finished": "执行完成", "stopped": "已停止",
                            "error": "执行出错"}.get(result, result)
-            self._set_status(result_text)
             self._set_log_state(result_text)
             if self._failed_step is not None:
                 self.btn_locate.pack(side="right", padx=(0, self.s(6)))
 
     def _show_summary(self, result: str) -> None:
-        """日志顶部摘要条：一次运行的结论 + 打开报告入口。"""
+        """运行结束摘要：写到软件最底行状态栏（不再占用日志上方空间）。"""
+        title = {"finished": "执行完成", "stopped": "已停止",
+                 "error": "执行出错"}.get(result, result)
+        color = {"finished": SUCCESS, "stopped": WARNING,
+                 "error": DANGER}.get(result, MUTED)
         try:
             report = self.executor.report()
         except Exception:  # noqa: BLE001 — 报告失败不影响收尾
+            self._set_status(i18n.tr(title), color)
             return
-        title = {"finished": "执行完成", "stopped": "已停止",
-                 "error": "执行出错"}.get(result, result)
-        parts = [title]
+        parts = [i18n.tr(title)]
         if report["rows"] > 1:
-            parts.append(f"{report['rows']} 行数据")
-        parts.append(f"{report['steps']} 步")
-        parts.append(f"失败 {report['failed']}")
-        parts.append(f"耗时 {report['seconds']:g} 秒")
-        self.summary_label.configure(text=" · ".join(parts))
-        self.summary_frame.pack(fill="x", padx=self.s(8), pady=(0, self.s(6)),
-                                before=self.log_body)
-
-    def _hide_summary(self) -> None:
-        self.summary_frame.pack_forget()
+            parts.append(f"{report['rows']} {i18n.tr('行数据')}")
+        parts.append(f"{report['steps']} {i18n.tr('步')}")
+        parts.append(f"{i18n.tr('失败')} {report['failed']}")
+        parts.append(f"{i18n.tr('耗时')} {report['seconds']:g} {i18n.tr('秒')}")
+        self._set_status(" · ".join(parts), color)
 
     # ------------------------------------------------------- 运行进度
     def _reset_progress(self, total: int, pulse: bool) -> None:
@@ -3605,16 +3654,16 @@ class App(tk.Tk):
         except (OSError, ValueError) as exc:
             self._log("warn", f"结果写入失败：{exc}")
 
-    def _open_last_report(self) -> None:
-        """打开本次运行的报告文件；没有则退而打开报告目录。"""
-        path = self._last_report_path
-        if path and os.path.exists(path):
-            try:
-                os.startfile(path)                  # noqa: S606 (Windows)
-                return
-            except (OSError, AttributeError):
-                pass
-        self.open_reports_dir()
+    def open_run_history(self) -> None:
+        """运行历史：查看 / 清空历次运行报告（替代原来的「打开报告」）。"""
+        dialog = getattr(self, "_run_history_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            dialog.focus_force()
+            return
+        dialog = RunHistoryDialog(self)
+        self._run_history_dialog = dialog
+        dialog.wait()
 
     def _notify_finish(self, result: str) -> None:
         """运行结束通知：声音 + webhook（企业微信/钉钉等机器人地址）+ 托盘气泡。"""
@@ -6362,6 +6411,322 @@ class ScheduleHistoryDialog(BaseDialog):
         self.footer(2, "关闭", "close", self.cancel,
                     cancel_text="", pad_top=8, pad_bottom=12)
         self.center()
+
+
+REPORT_RESULT_TEXT = {
+    "finished": "成功",
+    "error": "失败",
+    "stopped": "已停止",
+}
+
+REPORT_RESULT_TAG = {
+    "finished": "ok",
+    "error": "danger",
+    "stopped": "muted",
+}
+
+
+class RunReportDialog(BaseDialog):
+    """运行报告详情：弹窗直接浏览 markdown 报告。"""
+
+    def __init__(self, parent: App, report: dict):
+        super().__init__(parent, "运行报告详情", width=900, height=560)
+        self.report = report
+        self._links: dict[tuple[int, int], str] = {}
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+
+        head = tk.Frame(self, bg=CARD)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew",
+                  padx=parent.s(16), pady=(parent.s(14), parent.s(2)))
+        tk.Label(head, text="运行报告", bg=CARD, fg=TEXT,
+                 font=FONT_SECTION).pack(side="left")
+        self._result_pill(head, report.get("result", ""))
+
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(report.get("mtime") or time.time()))
+        parts = [stamp]
+        if report.get("rows"):
+            parts.append(f"{report['rows']} {i18n.tr('行数据')}")
+        parts.append(f"{report.get('steps', 0)} {i18n.tr('步')}")
+        parts.append(f"{i18n.tr('失败')} {report.get('failed', 0)}")
+        parts.append(
+            f"{i18n.tr('耗时')} {float(report.get('seconds') or 0):g} "
+            f"{i18n.tr('秒')}")
+        tk.Label(self, text=" · ".join(parts), bg=CARD, fg=MUTED,
+                 font=FONT_CAPTION, anchor="w").grid(
+            row=1, column=0, columnspan=2, sticky="ew",
+            padx=parent.s(16), pady=(0, parent.s(8)))
+
+        text = report.get("text", "")
+        headers, rows = parse_report_table(text)
+        if headers:
+            self._build_table(headers, rows)
+        else:
+            self._build_raw(text)
+
+        footer = tk.Frame(self, bg=CARD)
+        footer.grid(row=3, column=0, columnspan=2, sticky="ew",
+                    padx=parent.s(16), pady=(parent.s(8), parent.s(14)))
+        if self._links:
+            tk.Label(footer, text="双击「查看」打开截图", bg=CARD, fg=MUTED,
+                     font=FONT_CAPTION).pack(side="left")
+        uikit.RoundButton(footer, "关闭", "close", self.cancel,
+                          kind="accent", scale=parent.scale, bg=CARD,
+                          height=CONTROL_MD).pack(side="right")
+        uikit.RoundButton(footer, "打开所在文件夹", "folder_open",
+                          self._open_folder, kind="ghost",
+                          scale=parent.scale, bg=CARD,
+                          height=CONTROL_MD).pack(
+            side="right", padx=(0, parent.s(8)))
+        self.center()
+
+    def _result_pill(self, parent, result: str) -> None:
+        label = REPORT_RESULT_TEXT.get(result, result or "未知")
+        tag = REPORT_RESULT_TAG.get(result, "muted")
+        colors = {
+            "ok": (MARK_DONE, SUCCESS_TEXT),
+            "danger": (MARK_FAILED, DANGER_TEXT),
+            "muted": (HEADING_BG, MUTED),
+        }
+        bg, fg = colors.get(tag, colors["muted"])
+        tk.Label(parent, text=i18n.tr(label), bg=bg, fg=fg,
+                 font=FONT_CAPTION_BOLD, padx=self.app.s(10),
+                 pady=self.app.s(2)).pack(
+            side="left", padx=(self.app.s(10), 0))
+
+    def _build_table(self, headers: list[str],
+                     rows: list[list[str]]) -> None:
+        columns = [f"c{index}" for index in range(len(headers))]
+        self.tree = ttk.Treeview(self, columns=columns, show="headings",
+                                 selectmode="browse")
+        for index, title in enumerate(headers):
+            self.tree.heading(columns[index], text=title)
+            self.tree.column(
+                columns[index], width=self.app.s(self._col_width(title)),
+                anchor="w", stretch=(title == "内容"))
+        self.tree.grid(row=2, column=0, sticky="nsew",
+                       padx=(self.app.s(16), 0))
+        scroll = uikit.SlimScrollbar(
+            self, orient="vertical", command=self.tree.yview,
+            scale=self.app.scale, bg=CARD)
+        scroll.grid(row=2, column=1, sticky="ns",
+                    padx=(self.app.s(2), self.app.s(16)))
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.tag_configure("zebra", background=ZEBRA)
+        self.tree.tag_configure("failed", background=MARK_FAILED)
+
+        for row_index, cells in enumerate(rows):
+            values = []
+            for col_index in range(len(columns)):
+                cell = cells[col_index] if col_index < len(cells) else ""
+                label, target = self._split_link(cell)
+                values.append(label)
+                if target:
+                    self._links[(row_index, col_index)] = target
+            if "失败" in cells:
+                tags = ("failed",)
+            elif row_index % 2:
+                tags = ("zebra",)
+            else:
+                tags = ()
+            self.tree.insert("", "end", iid=str(row_index),
+                             values=values, tags=tags)
+        self.tree.bind("<Double-1>", self._open_link)
+
+    def _build_raw(self, text: str) -> None:
+        """没有表格的异常报告：直接按原文显示。"""
+        self.raw = tk.Text(self, bg=LOG_BG, fg=LOG_FG, bd=0,
+                           highlightthickness=0, wrap="word",
+                           font=FONT_MONO)
+        self.raw.insert("1.0", text)
+        self.raw.configure(state="disabled")
+        self.raw.grid(row=2, column=0, sticky="nsew",
+                      padx=(self.app.s(16), 0))
+        scroll = uikit.SlimScrollbar(
+            self, orient="vertical", command=self.raw.yview,
+            scale=self.app.scale, bg=CARD)
+        scroll.grid(row=2, column=1, sticky="ns",
+                    padx=(self.app.s(2), self.app.s(16)))
+        self.raw.configure(yscrollcommand=scroll.set)
+
+    def _col_width(self, title: str) -> int:
+        return {"执行组": 110, "行号": 56, "步骤": 56, "类型": 90,
+                "内容": 300, "耗时(秒)": 80, "结果": 64,
+                "重试": 56, "截图": 64}.get(title, 100)
+
+    @staticmethod
+    def _split_link(cell: str) -> tuple[str, str]:
+        match = re.fullmatch(r"\[([^\]]*)\]\(([^)]+)\)", cell.strip())
+        if match:
+            return i18n.tr(match.group(1) or "查看"), match.group(2)
+        return cell, ""
+
+    def _open_link(self, event) -> None:
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+        row = tree.identify_row(event.y)
+        column = tree.identify_column(event.x)
+        if not row or not column or not column.startswith("#"):
+            return
+        index = int(column[1:]) - 1
+        target = self._links.get((int(row), index))
+        if not target:
+            return
+        path = target
+        if not os.path.isabs(path):
+            path = os.path.join(
+                os.path.dirname(self.report.get("path", "")), path)
+        if not os.path.exists(path):
+            messagebox.showwarning("文件不存在", path, parent=self)
+            return
+        try:
+            os.startfile(path)                  # noqa: S606 (Windows)
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror("打开失败", str(exc), parent=self)
+
+    def _open_folder(self) -> None:
+        path = self.report.get("path") or ""
+        folder = os.path.dirname(path) or REPORTS_DIR
+        try:
+            os.startfile(folder)                # noqa: S606 (Windows)
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror("打开失败", str(exc), parent=self)
+
+
+class RunHistoryDialog(BaseDialog):
+    """运行历史：列出 reports/run_*.md，可查看详情、清空历史。"""
+
+    def __init__(self, parent: App):
+        super().__init__(parent, "运行历史", width=780, height=480)
+        self._reports: list[dict] = []
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        head = tk.Frame(self, bg=CARD)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew",
+                  padx=parent.s(16), pady=(parent.s(14), parent.s(6)))
+        tk.Label(head, text="运行历史", bg=CARD, fg=TEXT,
+                 font=FONT_SECTION).pack(side="left")
+        self.count_label = tk.Label(head, text="", bg=CARD, fg=MUTED,
+                                    font=FONT_CAPTION)
+        self.count_label.pack(side="right")
+
+        columns = ("at", "result", "steps", "failed", "seconds", "file")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings",
+                                 selectmode="browse")
+        for key, text, width in (
+                ("at", "时间", 150), ("result", "结果", 80),
+                ("steps", "步骤", 70), ("failed", "失败", 70),
+                ("seconds", "耗时(秒)", 90), ("file", "报告", 250)):
+            self.tree.heading(key, text=text)
+            self.tree.column(key, width=parent.s(width), anchor="w")
+        self.tree.grid(row=1, column=0, sticky="nsew",
+                       padx=(parent.s(16), 0))
+        scroll = uikit.SlimScrollbar(
+            self, orient="vertical", command=self.tree.yview,
+            scale=parent.scale, bg=CARD)
+        scroll.grid(row=1, column=1, sticky="ns",
+                    padx=(parent.s(2), parent.s(16)))
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.tag_configure("ok", foreground=SUCCESS)
+        self.tree.tag_configure("danger", foreground=DANGER)
+        self.tree.tag_configure("muted", foreground=MUTED)
+        self.tree.bind("<Double-1>", lambda e: self._open_selected())
+        self.tree.bind("<Return>", lambda e: self._open_selected())
+
+        self.summary = tk.Label(self, text="", bg=CARD, fg=MUTED,
+                                font=FONT_CAPTION, anchor="w")
+        self.summary.grid(row=2, column=0, columnspan=2, sticky="ew",
+                          padx=parent.s(16), pady=(parent.s(4), 0))
+
+        footer = tk.Frame(self, bg=CARD)
+        footer.grid(row=3, column=0, columnspan=2, sticky="ew",
+                    padx=parent.s(16), pady=(parent.s(10), parent.s(12)))
+        self.btn_detail = uikit.RoundButton(
+            footer, "查看详情", "note", self._open_selected, kind="accent",
+            scale=parent.scale, bg=CARD, height=CONTROL_MD)
+        self.btn_detail.pack(side="right")
+        uikit.RoundButton(footer, "关闭", "close", self.cancel, kind="ghost",
+                          scale=parent.scale, bg=CARD,
+                          height=CONTROL_MD).pack(
+            side="right", padx=(0, parent.s(8)))
+        self.btn_clear = uikit.RoundButton(
+            footer, "清空历史", "trash", self._clear, kind="outline",
+            scale=parent.scale, bg=CARD, height=CONTROL_MD)
+        self.btn_clear.pack(side="left")
+
+        self._reload()
+        self.center()
+
+    def _reload(self) -> None:
+        self._reports = list_run_reports(REPORTS_DIR)
+        self.tree.delete(*self.tree.get_children())
+        for index, report in enumerate(self._reports):
+            result = report.get("result", "")
+            label = REPORT_RESULT_TEXT.get(result, result or "未知")
+            tag = REPORT_RESULT_TAG.get(result, "muted")
+            stamp = time.strftime("%Y-%m-%d %H:%M",
+                                  time.localtime(report["mtime"]))
+            self.tree.insert(
+                "", "end", iid=str(index), tags=(tag,),
+                values=(stamp, i18n.tr(label), report["steps"],
+                        report["failed"], f"{report['seconds']:g}",
+                        report["name"]))
+        self.count_label.configure(
+            text=f"{len(self._reports)}{i18n.tr('份报告')}")
+        self.summary.configure(
+            text=("双击一行查看报告详情" if self._reports
+                  else "还没有运行报告，跑一次后会自动生成"))
+        enabled = bool(self._reports)
+        self.btn_detail.set_enabled(enabled)
+        self.btn_clear.set_enabled(enabled)
+
+    def _open_selected(self) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            self.app._set_status("请先选择一份运行报告")
+            return
+        try:
+            index = int(selection[0])
+        except ValueError:
+            return
+        if not 0 <= index < len(self._reports):
+            return
+        self.grab_release()
+        try:
+            RunReportDialog(self.app, self._reports[index]).wait()
+        finally:
+            try:
+                self.grab_set()
+            except tk.TclError:
+                pass
+
+    def _clear(self) -> None:
+        if not self._reports:
+            return
+        if not messagebox.askyesno(
+                i18n.tr("清空运行历史"),
+                i18n.tr("确定删除全部 ") + str(len(self._reports))
+                + i18n.tr(" 份运行报告？\n此操作不可撤销。"),
+                parent=self):
+            return
+        removed = 0
+        for report in self._reports:
+            try:
+                os.remove(report["path"])
+                removed += 1
+            except OSError:
+                pass
+        try:
+            from .engine import write_report_index
+            write_report_index(REPORTS_DIR)
+        except Exception:  # noqa: BLE001 — 索引刷新失败不影响清理
+            pass
+        self._reload()
+        self.app._set_status(
+            i18n.tr("已清空 ") + str(removed) + i18n.tr(" 份运行报告"))
 
 
 class MacroBar(BaseDialog):

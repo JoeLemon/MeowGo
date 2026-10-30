@@ -1250,6 +1250,54 @@ def test_report_markdown_with_shot_and_retry():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_parse_report_meta_and_table():
+    """报告解析：摘要字段、表格拆分、竖线转义。"""
+    from rpa.engine import parse_report_meta, parse_report_table
+
+    text = (
+        "# 运行报告\n\n"
+        "- 结果：finished\n"
+        "- 步骤数：33，失败：0\n"
+        "- 总耗时：26.41 秒\n"
+        "- 数据行数：1\n\n"
+        "| 执行组 | 行号 | 内容 | 截图 |\n"
+        "|---|---|---|---|\n"
+        "| 甲组 | 1 | a\\|b | [查看](shots/x.png) |\n"
+    )
+    meta = parse_report_meta(text)
+    assert meta == {"result": "finished", "steps": 33, "failed": 0,
+                    "seconds": 26.41, "rows": 1}
+    headers, rows = parse_report_table(text)
+    assert headers == ["执行组", "行号", "内容", "截图"]
+    assert rows == [["甲组", "1", "a|b", "[查看](shots/x.png)"]]
+
+
+def test_list_run_reports_sorted_and_parsed():
+    """运行历史列表：只收 run_*.md，按修改时间倒序，带摘要字段。"""
+    from rpa.engine import list_run_reports
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_history_")
+    try:
+        for index, result in enumerate(("finished", "error")):
+            path = os.path.join(tmp, f"run_2024010{index}_120000.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(f"# 运行报告\n\n- 结果：{result}\n"
+                         f"- 步骤数：{index + 1}，失败：{index}\n"
+                         "- 总耗时：1.5 秒\n- 数据行数：2\n")
+            os.utime(path, (1000 + index, 1000 + index))
+        with open(os.path.join(tmp, "notes.md"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("# 不是运行报告")
+        reports = list_run_reports(tmp)
+        assert len(reports) == 2
+        assert reports[0]["result"] == "error"      # 修改时间更晚
+        assert reports[0]["steps"] == 2
+        assert reports[1]["result"] == "finished"
+        assert list_run_reports(os.path.join(tmp, "missing")) == []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_write_report_index_retention():
     """报告索引：生成 index.html、保留最近 N 份、清理没人引用的旧截图。"""
     import time as _time

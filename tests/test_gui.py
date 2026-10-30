@@ -4,6 +4,7 @@
 对话框会被替换成假实现，避免阻塞；所有弹窗（确认框）自动应答。
 """
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -1195,13 +1196,14 @@ def test_log_link_and_failed_locate():
     assert "done" in app.step_tree.item("0", "tags")
     assert "failed" in app.step_tree.item("1", "tags")
     assert app._failed_step == ("甲组", 1)
-    # 摘要条
+    # 运行摘要写到最底行状态栏
     app._show_summary("finished")
     app.update()
-    assert app.summary_frame.winfo_ismapped()
-    assert "执行完成" in app.summary_label.cget("text")
-    app._hide_summary()
-    assert not app.summary_frame.winfo_ismapped()
+    status = app.status_var.get()
+    assert "执行完成" in status, status
+    assert "步" in status, status
+    assert app.status_label.cget("fg") == gui_module.SUCCESS, \
+        app.status_label.cget("fg")
     # 切组后标记仍在（刷新不丢）
     app.group_index = 1
     app._refresh_steps()
@@ -1209,6 +1211,50 @@ def test_log_link_and_failed_locate():
     app._refresh_steps()
     assert "failed" in app.step_tree.item("1", "tags")
     mark("日志跳转与失败定位")
+
+
+def test_run_history_and_report_dialog():
+    """运行历史弹窗：列出报告、打开详情、清空。"""
+    from rpa.engine import report_markdown
+
+    saved_dir = gui_module.REPORTS_DIR
+    tmp = tempfile.mkdtemp(prefix="rpa_hist_")
+    gui_module.REPORTS_DIR = tmp
+    try:
+        report = {"steps": 2, "failed": 1, "seconds": 1.5, "rows": 1,
+                  "detail": [{"group": "甲", "row": 1, "index": 1,
+                              "type": "wait", "content": "0.1",
+                              "seconds": 0.1, "ok": True}]}
+        for index in range(2):
+            path = os.path.join(tmp, f"run_2026010{index}_120000.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(report_markdown(report, "finished",
+                                         report_dir=tmp))
+            os.utime(path, (1000 + index, 1000 + index))
+
+        history = gui_module.RunHistoryDialog(app)
+        app.update()
+        assert len(history.tree.get_children()) == 2
+        assert history._reports[0]["name"] == "run_20260101_120000.md"
+        assert history.btn_detail._enabled
+
+        # 详情弹窗直接渲染报告表格
+        detail = gui_module.RunReportDialog(app, history._reports[0])
+        app.update()
+        assert detail.tree.get_children(), "详情应渲染表格"
+        assert detail.tree.heading("c0", "text") in ("执行组", "Groups")
+        detail.destroy()
+
+        # 清空历史（确认框在模块顶部已自动应答）
+        history._clear()
+        app.update()
+        assert history._reports == []
+        assert not history.btn_detail._enabled
+        history.destroy()
+    finally:
+        gui_module.REPORTS_DIR = saved_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+    mark("运行历史与报告详情")
 
 
 def test_global_run_hotkey_dispatch():
