@@ -62,9 +62,14 @@ INFO_MAX = 255                  # szInfo 256 个字符
 INFO_TITLE_MAX = 63             # szInfoTitle 64 个字符
 
 # ---------------------------------------------------------------- 结构
-user32 = ctypes.windll.user32
-shell32 = ctypes.windll.shell32
-kernel32 = ctypes.windll.kernel32
+IS_WINDOWS = os.name == "nt"
+
+if IS_WINDOWS:
+    user32 = ctypes.windll.user32
+    shell32 = ctypes.windll.shell32
+    kernel32 = ctypes.windll.kernel32
+else:                       # 非 Windows 没有 windll，保持导入无副作用
+    user32 = shell32 = kernel32 = None
 
 
 class _GUID(ctypes.Structure):
@@ -118,58 +123,61 @@ class WNDCLASSEXW(ctypes.Structure):
                 ("hIconSm", wintypes.HICON)]
 
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT,
-                             wintypes.WPARAM, wintypes.LPARAM)
+if IS_WINDOWS:
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT,
+                                 wintypes.WPARAM, wintypes.LPARAM)
 
-user32.CreateWindowExW.restype = wintypes.HWND
-user32.CreateWindowExW.argtypes = [
-    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
-    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
-user32.RegisterClassExW.restype = wintypes.ATOM
-user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
-user32.DefWindowProcW.restype = ctypes.c_long
-user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
-                                  wintypes.WPARAM, wintypes.LPARAM]
-user32.GetMessageW.restype = wintypes.BOOL
-user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND,
-                               wintypes.UINT, wintypes.UINT]
-user32.PostMessageW.restype = wintypes.BOOL
-user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
-                                wintypes.WPARAM, wintypes.LPARAM]
-user32.PostQuitMessage.restype = None
-user32.PostQuitMessage.argtypes = [ctypes.c_int]
-user32.CreatePopupMenu.restype = wintypes.HMENU
-user32.AppendMenuW.restype = wintypes.BOOL
-user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT,
-                               ctypes.c_size_t, wintypes.LPCWSTR]
-user32.TrackPopupMenu.restype = ctypes.c_int
-user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT,
-                                  ctypes.c_int, ctypes.c_int,
-                                  ctypes.c_int, wintypes.HWND,
-                                  ctypes.POINTER(POINT)]
-user32.DestroyMenu.restype = wintypes.BOOL
-user32.DestroyMenu.argtypes = [wintypes.HMENU]
-user32.GetCursorPos.restype = wintypes.BOOL
-user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
-user32.SetForegroundWindow.restype = wintypes.BOOL
-user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-user32.LoadImageW.restype = wintypes.HANDLE
-user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR,
-                              wintypes.UINT, ctypes.c_int, ctypes.c_int,
-                              wintypes.UINT]
-user32.DestroyIcon.restype = wintypes.BOOL
-user32.DestroyIcon.argtypes = [wintypes.HICON]
-user32.SetWindowLongPtrW.restype = ctypes.c_void_p
-user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int,
-                                     ctypes.c_void_p]
-user32.CallWindowProcW.restype = ctypes.c_long
-user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND,
-                                   wintypes.UINT, wintypes.WPARAM,
-                                   wintypes.LPARAM]
-shell32.Shell_NotifyIconW.restype = wintypes.BOOL
-shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD,
-                                      ctypes.POINTER(NOTIFYICONDATAW)]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+    user32.RegisterClassExW.restype = wintypes.ATOM
+    user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+    user32.DefWindowProcW.restype = ctypes.c_long
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                      wintypes.WPARAM, wintypes.LPARAM]
+    user32.GetMessageW.restype = wintypes.BOOL
+    user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND,
+                                   wintypes.UINT, wintypes.UINT]
+    user32.PostMessageW.restype = wintypes.BOOL
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                    wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostQuitMessage.restype = None
+    user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    user32.CreatePopupMenu.restype = wintypes.HMENU
+    user32.AppendMenuW.restype = wintypes.BOOL
+    user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT,
+                                   ctypes.c_size_t, wintypes.LPCWSTR]
+    user32.TrackPopupMenu.restype = ctypes.c_int
+    user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT,
+                                      ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, wintypes.HWND,
+                                      ctypes.POINTER(POINT)]
+    user32.DestroyMenu.restype = wintypes.BOOL
+    user32.DestroyMenu.argtypes = [wintypes.HMENU]
+    user32.GetCursorPos.restype = wintypes.BOOL
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.LoadImageW.restype = wintypes.HANDLE
+    user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR,
+                                  wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                  wintypes.UINT]
+    user32.DestroyIcon.restype = wintypes.BOOL
+    user32.DestroyIcon.argtypes = [wintypes.HICON]
+    user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+    user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int,
+                                         ctypes.c_void_p]
+    user32.CallWindowProcW.restype = ctypes.c_long
+    user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND,
+                                       wintypes.UINT, wintypes.WPARAM,
+                                       wintypes.LPARAM]
+    shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+    shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD,
+                                          ctypes.POINTER(NOTIFYICONDATAW)]
+else:
+    WNDPROC = None
 
 
 # ---------------------------------------------------------------- 图标

@@ -746,6 +746,18 @@ EN: dict[str, str] = {
         "Maintain groups on the left and edit steps on the right. "
         "The Call group step reuses other groups.",
     "欢迎使用 MeowGo": "Welcome to MeowGo",
+    "三步开始使用 MeowGo": "Get started in three steps",
+    "1. 左侧新建执行组，右侧添加步骤；所有修改都会自动保存。":
+        "1. Create a group on the left and add steps on the right. "
+        "All changes are saved automatically.",
+    "2. 图片步骤先点「截图」框选按钮，再用「检测图片」确认能命中。":
+        "2. For image steps, click Capture to select the button, then use "
+        "Check image to confirm it can be found.",
+    "3. 按 F5 或顶部「运行」开始；失败后可在状态栏从失败步骤继续。":
+        "3. Press F5 or click Run to start. If a step fails, resume from the "
+        "failed step in the status bar.",
+    "不再显示此提示": "Do not show this again",
+    "开始使用": "Get started",
     "未安装 OpenCV（opencv-python），图片识别步骤无法运行。"
     "请在命令行执行：pip install opencv-python":
         "OpenCV (opencv-python) is not installed, so image steps cannot run. "
@@ -785,6 +797,17 @@ EN: dict[str, str] = {
     "点击控件": "Click control",
     "条件：变量比较则执行": "Condition: variable matches",
     "HTTP 请求": "HTTP request",
+    "循环：按范围": "Loop: range",
+    "循环：变量条件": "Loop: variable condition",
+    "跳出循环": "Break loop",
+    "跳到下一轮": "Skip to next round",
+    "文件操作": "File operation",
+    "读取 JSON": "Read JSON",
+    "正则提取": "Regex extract",
+    "日期格式化": "Format date",
+    "读取剪贴板到变量": "Read clipboard to variable",
+    "随机等待": "Random wait",
+    "小节标题": "Section title",
     "基础": "Basics",
 
     # 指令提示
@@ -825,6 +848,22 @@ EN: dict[str, str] = {
         "Variable operator value|group, e.g. count<5|retry",
     "GET https://…|变量名；POST 可再加 |请求体":
         "GET https://…|variable; for POST append |body",
+    "起始,结束[,步长]|组名，如 1,5|处理":
+        "start,end[,step]|group, e.g. 1,5|process",
+    "轮次上限": "round limit",
+    "最大轮次": "max rounds",
+    "留空": "leave blank",
+    "copy:源|目标 / move:源|目标 / delete:路径 / mkdir:目录 / wait:路径|秒":
+        "copy:src|dst / move:src|dst / delete:path / mkdir:dir / wait:path|seconds",
+    "变量名|字段路径，如 data|user.name":
+        "variable|field path, e.g. data|user.name",
+    "变量名|表达式[|分组号]，如 结果|\\d+":
+        "variable|pattern[|group], e.g. result|\\d+",
+    "变量名|格式，如 今天|%Y-%m-%d":
+        "variable|format, e.g. today|%Y-%m-%d",
+    "变量名，如 文本": "variable name, e.g. text",
+    "最小秒,最大秒，如 1,3": "min seconds,max seconds, e.g. 1,3",
+    "标题文字，如 登录步骤": "Section text, e.g. Login steps",
     "重复次数：": "Repeat count: ",
     "点击次数": "click count",
     "双击次数": "double-click count",
@@ -964,6 +1003,52 @@ EN: dict[str, str] = {
         "Groups are saved automatically to rpa_settings.json in the program folder. "
         "Excel import and export support a single group or all worksheets (legacy "
         "cmd.xls files are also supported).",
+
+    # 平台差异 / macOS 权限
+    "仅 Windows": "Windows only",
+    "检查 macOS 权限…": "Check macOS permissions…",
+    "权限检查": "Permission check",
+    "当前系统无需额外权限": "This platform needs no extra permissions.",
+    "屏幕录制与辅助功能权限均已开启。":
+        "Screen recording and accessibility permissions are enabled.",
+    "macOS 权限不完整：截图或鼠标操作可能失效":
+        "macOS permissions are incomplete; screenshots or mouse actions may fail.",
+    "macOS 权限不完整（帮助 → 检查 macOS 权限…）":
+        "macOS permissions incomplete (Help → Check macOS permissions…)",
+    "需要 macOS 权限": "macOS Permission Required",
+    "现在打开系统设置？": "Open System Settings now?",
+    "可稍后在「帮助 → 检查 macOS 权限…」重新检查。":
+        "You can check again later via Help → Check macOS permissions….",
+    "macOS 上不支持全局 F5 / F9，请使用窗口内按钮或快捷键。":
+        "Global F5 / F9 are unavailable on macOS. Use the in-window buttons or "
+        "shortcuts instead.",
+    "该步骤类型只支持 Windows，macOS 上执行会报错":
+        "This step type is Windows-only and will fail on macOS.",
+
+    # 运行设置
+    "通用": "General",
+    "系统集成": "System integration",
+    "系统集成（仅 Windows）": "System integration (Windows only)",
+    "界面缩放（重启后生效）": "UI scale (applies after restart)",
+    "当前系统不支持开机自启与系统托盘，相关开关已停用。"
+    "macOS 可在「系统设置 → 通用 → 登录项」里添加 MeowGo.app。":
+        "Startup and system tray are unavailable on this platform, so these "
+        "switches are disabled. On macOS, add MeowGo.app under System Settings → "
+        "General → Login Items.",
+    "已恢复默认值，点「保存」生效":
+        "Defaults restored. Click Save to apply.",
+    "恢复默认设置": "Restore defaults",
+    "界面缩放将在下次启动后生效":
+        "The UI scale will apply the next time MeowGo starts.",
+    "当前系统不支持 Windows 计划任务。软件内定时运行在"
+    "界面打开时仍会生效，关掉界面则不会触发。":
+        "Windows scheduled tasks are unavailable on this platform. In-app "
+        "schedules still run while the window is open, but not after closing it.",
+    "跳转到组…": "Go to group…",
+    "失败后执行": "Run on failure",
+    "失败后执行组：": "Group to run after failure: ",
+    "匹配": "matches",
+    "无匹配": "no match",
 }
 
 

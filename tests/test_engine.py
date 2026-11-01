@@ -11,10 +11,20 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rpa.engine import (STEP_TYPES, TYPE_TO_CODE, Executor, Group,  # noqa: E402
-                        Project, Step, export_excel, import_excel,
-                        load_steps, render_content, validate_project,
-                        _eval_expression)
+from rpa.engine import (  # noqa: E402
+    STEP_TYPES,
+    TYPE_TO_CODE,
+    Executor,
+    Group,
+    Project,
+    Step,
+    _eval_expression,
+    export_excel,
+    import_excel,
+    load_steps,
+    render_content,
+    validate_project,
+)
 
 pytestmark = pytest.mark.engine
 
@@ -101,7 +111,7 @@ class _FakePyAutoGUI:
 
     def hotkey(self, *keys):
         self._io.calls.append(("hotkey", ",".join(keys)))
-        if tuple(keys) == ("ctrl", "c"):
+        if tuple(keys) in (("ctrl", "c"), ("command", "c")):
             # 模拟目标应用响应复制：把选中文字写进剪贴板
             self._io.clipboard = self._io.selection
 
@@ -195,7 +205,7 @@ def _fake_input_modules(calls, located=(100, 100), selection="选中的文字",
 
 
 def test_types_defined():
-    assert len(STEP_TYPES) == 26
+    assert len(STEP_TYPES) == 37
     for key, info in STEP_TYPES.items():
         assert len(info) == 4, key
     assert "call" in STEP_TYPES
@@ -205,7 +215,8 @@ def test_types_defined():
     # 条件 / 变量 / 拖拽 / 文字 / 控件 / 网络一族（类型表里有声明）
     for key in ("if_not_image", "if_else", "if_window", "set", "copy", "drag",
                 "click_text", "wait_text", "assert_text", "ui_click",
-                "if_var", "http"):
+                "if_var", "http", "for_each", "while_var", "break", "continue",
+                "file", "json", "regex", "date", "clipboard", "random_wait"):
         assert key in STEP_TYPES, key
     for key, code in TYPE_TO_CODE.items():
         assert isinstance(code, float), key
@@ -781,7 +792,8 @@ def test_copy_to_var():
         ex.groups = {"主": [Step("copy", "片段")]}
         assert ex.run("主") == "finished"
         assert ex.vars["片段"] == "选中的文字"
-        assert ("hotkey", "ctrl,c") in io.calls
+        from rpa import platform_support
+        assert ("hotkey", f"{platform_support.MOD_KEY},c") in io.calls
         # 先清空剪贴板（避免把旧内容当成果），成功后还原
         assert [c[1] for c in io.calls if c[0] == "copy"] == \
             ["", "旧的剪贴板内容"]
@@ -1173,6 +1185,7 @@ def test_retry_step_and_screenshot():
 def test_cmd_exit_code_marks_failure():
     """系统命令按返回码判断成败（不再一律算成功）。"""
     from types import SimpleNamespace
+
     import rpa.engine as engine
 
     saved = engine.subprocess.run
@@ -1399,9 +1412,14 @@ def test_report_index_uses_brand_tokens():
 
 def test_new_primitives_validation_and_parsing():
     """新增原语：负坐标、变量比较、HTTP、文字目标与新类型校验。"""
-    from rpa.engine import (_compare_values, _is_failsafe,
-                            _parse_http_spec, _parse_var_condition,
-                            _valid_xy, parse_text_target)
+    from rpa.engine import (
+        _compare_values,
+        _is_failsafe,
+        _parse_http_spec,
+        _parse_var_condition,
+        _valid_xy,
+        parse_text_target,
+    )
 
     # 副屏坐标可以是负数
     assert _valid_xy("-1920,100")

@@ -20,6 +20,14 @@ _ok: list[str] = []
 _bad: list[str] = []
 
 
+@pytest.fixture(autouse=True)
+def _checks_must_pass():
+    """check() 只记录不抛异常；用 fixture 保证失败项真的让 pytest 变红。"""
+    _bad.clear()
+    yield
+    assert not _bad, f"失败项：{_bad}"
+
+
 def check(name, condition, detail=""):
     if condition:
         _ok.append(name)
@@ -29,6 +37,7 @@ def check(name, condition, detail=""):
         print(f"  FAIL  {name} {detail}")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="托盘图标只在 Windows 上生成")
 def test_icon_file():
     """浅/深两版图标都能生成，且深色版确实反白（文件不同）。"""
     light = tray.icon_file("", False)
@@ -48,6 +57,7 @@ def test_icon_missing_source():
     check("缺失源图返回空串", tray.icon_file("不存在的图.png", False) == "")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="托盘 / user32 原型只存在于 Windows")
 def test_win32_prototypes_compatible():
     """托盘给 user32 设的原型不能和 pyautogui 打架（回归：热键步骤报
     "expected LP_POINT instance instead of pointer to POINT"）。
@@ -84,6 +94,7 @@ def test_win32_prototypes_compatible():
     check("导入托盘后 pyautogui.position() 正常", ok, detail)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="系统托盘只支持 Windows")
 def test_start_stop_cycle():
     """真实启停一轮：start → running → stop → not running。"""
     icon = tray.TrayIcon(tip="MeowGo 测试", on_activate=lambda: None,
@@ -100,6 +111,7 @@ def test_start_stop_cycle():
     check("重复 stop 安全", True)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="系统托盘只支持 Windows")
 def test_start_twice():
     """已启动时再 start 直接返回 True，不会起第二个线程。"""
     icon = tray.TrayIcon(tip="MeowGo 测试", on_activate=lambda: None,
@@ -110,6 +122,7 @@ def test_start_twice():
     icon.stop()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="系统托盘只支持 Windows")
 def test_tip_and_theme_switch():
     """提示文字与主题切换都走消息循环线程执行，不报错。"""
     icon = tray.TrayIcon(tip="旧提示", on_activate=lambda: None,
@@ -134,6 +147,7 @@ def test_tip_and_theme_switch():
         icon.stop()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="托盘消息循环只支持 Windows")
 def test_tray_events_dispatch():
     """直接派发托盘回调消息：激活 / 菜单项分别触发对应回调。"""
     fired: list[str] = []
@@ -185,6 +199,7 @@ def test_invoke_marshalling():
     check("无 invoke 就地执行", received[-1] == "direct")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="气泡通知只支持 Windows")
 def test_balloon_click():
     """气泡点击回调（NIN_BALLOONUSERCLICK）能派发到 on_click。"""
     clicked: list[str] = []

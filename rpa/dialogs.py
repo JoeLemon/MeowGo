@@ -8,7 +8,7 @@ from __future__ import annotations
 import tkinter as tk
 from typing import TYPE_CHECKING, Any
 
-from . import uikit
+from . import platform_support, uikit
 from .theme import CONTROL_MD, FONT_CAPTION, FONT_MONO, FONT_NOTE, FONT_SIZE_BODY, LIGHT_PALETTE
 
 if TYPE_CHECKING:  # 仅供类型标注，避免与 gui 产生循环导入
@@ -177,21 +177,32 @@ class ShortcutsDialog(BaseDialog):
     def __init__(self, parent: App):
         super().__init__(parent, "快捷键速查", width=440, height=470)
         self.columnconfigure(1, weight=1)
-        for row, (key, text) in enumerate(self.ROWS):
-            tk.Label(self, text=key, bg=CARD, fg=ACCENT,
-                     font=FONT_MONO).grid(
+        rows = [row for row in self.ROWS
+                if not (platform_support.IS_MACOS and row[0] == "F9")]
+        for row, (key, text) in enumerate(rows):
+            tk.Label(self, text=platform_support.hotkey_label(key),
+                     bg=CARD, fg=ACCENT, font=FONT_MONO).grid(
                 row=row, column=0, sticky="w", padx=(parent.s(18), parent.s(10)),
                 pady=parent.s(4))
             tk.Label(self, text=text, bg=CARD, fg=TEXT,
                      font=FONT_NOTE).grid(
                 row=row, column=1, sticky="w")
+        note_row = len(rows)
+        if platform_support.IS_MACOS:
+            tk.Label(self, text="macOS 上不支持全局 F5 / F9，"
+                                "请使用窗口内按钮或快捷键。",
+                     bg=CARD, fg=MUTED, font=FONT_CAPTION,
+                     wraplength=parent.s(390), justify="left").grid(
+                row=note_row, column=0, columnspan=2, sticky="w",
+                padx=parent.s(18), pady=(parent.s(10), 0))
+            note_row += 1
         tk.Label(self, text="运行安全：将鼠标快速移至屏幕左上角，"
                             "可立即中断执行。", bg=CARD, fg=MUTED,
                  font=FONT_CAPTION,
                  wraplength=parent.s(390), justify="left").grid(
-            row=len(self.ROWS), column=0, columnspan=2, sticky="w",
+            row=note_row, column=0, columnspan=2, sticky="w",
             padx=parent.s(18), pady=(parent.s(10), 0))
-        self.footer(len(self.ROWS) + 1, "知道了", "check", self.ok,
+        self.footer(note_row + 1, "知道了", "check", self.ok,
                     cancel_text="", pad_top=10)
         self.fit_content(width=parent.s(440))
         self.center()

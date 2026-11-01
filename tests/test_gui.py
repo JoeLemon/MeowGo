@@ -18,13 +18,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rpa import gui as gui_module  # noqa: E402
 from rpa import i18n  # noqa: E402
 from rpa import recorder as recorder_module  # noqa: E402
-from rpa.engine import (STEP_TYPES, Group, Project, Step,  # noqa: E402
-                        import_excel, validate_project)
+from rpa.engine import STEP_TYPES, Group, Project, Step, import_excel, validate_project  # noqa: E402
 
-pytestmark = pytest.mark.gui
+pytestmark = [
+    pytest.mark.gui,
+    pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="完整 GUI 套件依赖 Windows 同步窗口映射；"
+               "macOS 用 tests/test_gui_mac_smoke.py 做启动冒烟"),
+]
+
+if sys.platform != "win32":
+    # 本模块在导入期就会创建 App；非 Windows 上必须整体跳过，
+    # 否则会留下一个 Tk 根窗口干扰 macOS 冒烟测试的图片归属。
+    pytest.skip("完整 GUI 套件只在 Windows 运行", allow_module_level=True)
+
+
+def _log_text(app) -> str:
+    """日志视图已从 Text 换成 Listbox：统一取全部可见行。"""
+    return "\n".join(str(line) for line in app.log_list.get(0, "end"))
+
 
 # 把配置、报告、失败截图都写到临时目录，避免影响用户数据和仓库里的 reports/
 _TMP = tempfile.mkdtemp(prefix="rpa_gui_test_")
+# 测试里不要弹首次引导 / macOS 权限提示，否则会 grab 焦点卡住用例
+os.environ["MEOWGO_NO_ONBOARD"] = "1"
+os.environ["MEOWGO_NO_PERMISSION_PROMPT"] = "1"
 gui_module.SETTINGS_PATH = os.path.join(_TMP, "settings.json")
 gui_module.REPORTS_DIR = os.path.join(_TMP, "reports")
 gui_module.SHOTS_DIR = os.path.join(gui_module.REPORTS_DIR, "shots")
@@ -268,9 +287,9 @@ def checks():
     app.clear_log()
     app._enqueue_log("info", "日志内容")
     app._drain_queue()
-    assert "日志内容" in app.log_text.get("1.0", "end")
+    assert "日志内容" in _log_text(app)
     app.toggle_log()
-    assert app.log_visible is False and not app.log_text.winfo_ismapped()
+    assert app.log_visible is False and not app.log_list.winfo_ismapped()
     app.toggle_log()
     assert app.log_visible is True
     mark("日志与折叠")
@@ -501,11 +520,11 @@ def checks():
     deadline = time.time() + 15
     while time.time() < deadline:
         app.update()
-        text = app.log_text.get("1.0", "end")
+        text = _log_text(app)
         if not app.running and "执行完成" in text:
             break
         time.sleep(0.05)
-    text = app.log_text.get("1.0", "end")
+    text = _log_text(app)
     assert "执行完成" in text, text
     assert "进入执行组「主流程」" in text and "进入执行组「子组」" in text, text
     assert app.btn_run.enabled, "结束后运行按钮应恢复"
@@ -742,8 +761,7 @@ def test_schedule_multiple_tasks_and_history():
     """多定时任务：列表编辑、保存结果、执行记录与倒计时浮窗。"""
     import time as _time
 
-    from rpa.gui import (ScheduleDialog, ScheduleHistoryDialog,
-                         SchedulePopover, schedule_tasks)
+    from rpa.gui import ScheduleDialog, ScheduleHistoryDialog, SchedulePopover, schedule_tasks
 
     saved_settings = dict(app.settings)
     saved_groups = app.project.groups
@@ -1020,11 +1038,11 @@ def test_run_with_data():
         deadline = time.time() + 20
         while time.time() < deadline:
             app.update()
-            text = app.log_text.get("1.0", "end")
+            text = _log_text(app)
             if not app.running and "执行完成" in text:
                 break
             time.sleep(0.05)
-        text = app.log_text.get("1.0", "end")
+        text = _log_text(app)
         assert "数据驱动：共 2 行" in text, text
         assert "第 2/2 行" in text, text
         report = app.executor.report()
@@ -1046,7 +1064,7 @@ def test_run_with_data():
                 break
             time.sleep(0.05)
         assert app.executor.data is None, "普通运行不应残留数据"
-        text = app.log_text.get("1.0", "end")
+        text = _log_text(app)
         assert "数据驱动" not in text, text
     finally:
         gui_module.filedialog.askopenfilename = real_ask
@@ -1206,11 +1224,11 @@ def test_log_link_and_failed_locate():
     app._current_run_step = ("甲组", 1)
     app._log("error", "第 2 步出错：图片未找到")
     app._drain_queue()
-    assert app._step_log_lines, "出错日志行应记录步骤映射"
-    line = next(iter(app._step_log_lines))
-    assert app._step_log_lines[line] == ("甲组", 1)
-    app.log_text.see(f"{line}.0")
-    bbox = app.log_text.bbox(f"{line}.0")
+    assert app._visible_targets, "出错日志行应记录步骤映射"
+    line = app.log_list.size() - 1
+    assert app._visible_targets[line] == ("甲组", 1)
+    app.log_list.see(line)
+    bbox = app.log_list.bbox(line)
     assert bbox, "日志行应可见"
 
     class _Event:
@@ -1309,9 +1327,11 @@ def test_log_level_coloring():
         app._log(level, message)
     app._drain_queue()
     app.update()
-    assert app.log_text.tag_ranges("error"), "error 日志应打 error 标签"
-    assert app.log_text.tag_ranges("warn"), "warn 日志应打 warn 标签"
-    assert app.log_text.tag_ranges("info"), "info 日志应打 info 标签"
+    colors = {str(app.log_list.itemcget(index, "foreground"))
+              for index in range(app.log_list.size())}
+    assert gui_module.LOG_ERROR in colors, "error 日志应按 error 颜色着色"
+    assert gui_module.LOG_WARN in colors, "warn 日志应按 warn 颜色着色"
+    assert gui_module.LOG_INFO in colors, "info 日志应按 info 颜色着色"
     app.clear_log()
     mark("日志分级着色")
 
@@ -2058,7 +2078,7 @@ def test_theme_switch():
     assert gui_module.TYPE_COLORS["click"] == "#FDAD63", "类型图标应提亮"
     assert str(app.btn_run["bg"]) == "#1D1B18", "顶栏按钮底色应跟卡片色"
     assert str(app.step_title.cget("fg")) == "#F5F2ED", "正文应换成暖白"
-    assert str(app.log_text.cget("fg")) == "#F7F4EF", "日志正文保持暖白"
+    assert str(app.log_list.cget("fg")) == "#F7F4EF", "日志正文保持暖白"
     # Canvas 小猫跟随主题重绘（图片版：按暗色重新量化像素图）
     assert app.step_empty_icon.paper == gui_module.CARD
     assert app.step_empty_icon.ink == gui_module.TEXT
@@ -2081,7 +2101,7 @@ def test_theme_switch():
     assert str(app.btn_run["bg"]) == light_card
     assert gui_module.TYPE_COLORS["click"] == "#E8861F"
     assert str(app.step_title.cget("fg")) == "#080806", "正文应还原成墨黑"
-    assert str(app.log_text.cget("fg")) == "#F5F2ED", "日志正文仍保持暖白"
+    assert str(app.log_list.cget("fg")) == "#F5F2ED", "日志正文仍保持暖白"
     # toggle_theme：翻 settings 并落盘，两次切换回到原样
     original = app.dark                  # 此时是浅色（前面已还原）
     app.toggle_theme()

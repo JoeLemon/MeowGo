@@ -11,13 +11,28 @@ v1.3 增加中性控件面、表格、下拉面板与滚动条令牌，三者共
 """
 from __future__ import annotations
 
+import os
+import sys
 from typing import Mapping
 
 # ---------------------------------------------------------------------------
 # 字体
 # ---------------------------------------------------------------------------
-FONT_FAMILY = "Microsoft YaHei UI"
-MONO_FAMILY = "Cascadia Code"
+# Windows 用微软雅黑 UI；macOS 用苹方（比强制雅黑更贴近系统观感）；
+# Linux 用常见的 Noto / DejaVu 兜底。
+if sys.platform.startswith("win"):
+    FONT_FAMILY = "Microsoft YaHei UI"
+    MONO_FAMILY = "Cascadia Code"
+elif sys.platform == "darwin":
+    FONT_FAMILY = "PingFang SC"
+    MONO_FAMILY = "Menlo"
+else:
+    FONT_FAMILY = "Noto Sans CJK SC"
+    MONO_FAMILY = "DejaVu Sans Mono"
+
+# 允许用环境变量覆盖字体（排查系统字体缺失 / 用户自定义）
+FONT_FAMILY = os.environ.get("MEOWGO_FONT_FAMILY", FONT_FAMILY)
+MONO_FAMILY = os.environ.get("MEOWGO_MONO_FAMILY", MONO_FAMILY)
 
 # Tk 的 font size 单位是 pt；96 DPI 下 1pt≈1.333px。
 # 这里保留 8/9/10/11/13/14/16/22 的阶梯，分别对应

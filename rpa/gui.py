@@ -16,12 +16,13 @@ import threading
 import time
 import tkinter as tk
 import types
+from collections import deque
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
 
 from . import __version__ as APP_VERSION
-from . import assets, autostart, dialogs, i18n, logs, theme, tray, uikit
+from . import assets, autostart, dialogs, i18n, logs, platform_support, theme, tray, uikit
 from .dialogs import BaseDialog, GroupDialog, ShortcutsDialog
 from .engine import (
     CONDITION_TYPES,
@@ -701,12 +702,12 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
+        # 先读设置：界面缩放（ui_scale）要在计算 scale / 字体前生效
+        self.settings = self._load_settings()
         self.scale = self._init_scaling()
         self.geometry(f"{self.s(1180)}x{self.s(760)}")
         self.minsize(self.s(1000), self.s(640))
         self.configure(bg=BG)
-
-        self.settings = self._load_settings()
         # 界面语言：在创建任何控件之前安装翻译层，后面新建的对话框也会自动生效
         i18n.install()
         i18n.set_language(str(self.settings.get("language", "zh")))
@@ -732,7 +733,7 @@ class App(tk.Tk):
         # 运行辅助：失败步骤定位、日志行→步骤映射、上次报告路径
         self._failed_step: Optional[tuple[str, int]] = None
         self._current_run_step: Optional[tuple[str, int]] = None
-        self._step_log_lines: dict[int, tuple[str, int]] = {}
+
         self._step_marks: dict[str, dict[int, str]] = {}
         self._last_report_path = ""
         self._last_result_path = ""
@@ -756,6 +757,12 @@ class App(tk.Tk):
         self._preview_photo = None
         self._preview_path = ""
 
+        # 日志筛选：原始条目留一份，切换级别 / 关键词时整体重绘
+        self._log_entries: deque = deque(maxlen=MAX_LOG_LINES)
+        # 可见列表项与跳转目标一一对应（过滤 / 裁剪时同步）
+        self._visible_targets: deque = deque(maxlen=MAX_LOG_LINES)
+        self._log_level = ""
+        self._log_search = ""
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.ui_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.executor = Executor(base_dir=APP_DIR, log=self._enqueue_log)
@@ -805,6 +812,9 @@ class App(tk.Tk):
         self.after(400, self._maybe_start_hidden)
 
         seed_default_groups(self.project, self.settings)
+        if (not self.settings.get("onboarded")
+                and not os.environ.get("MEOWGO_NO_ONBOARD")):
+            self.after(1500, self._show_onboarding)
         if not self.project.groups:
             self.project.groups.append(Group(self.project.unique_name("默认组")))
         self._refresh_all(select_group=0)
@@ -814,6 +824,8 @@ class App(tk.Tk):
         self.after(2000, self._autosave_tick)
         self.after(1000, self._schedule_tick)
         self._check_dpi_setup()
+        if not os.environ.get("MEOWGO_NO_PERMISSION_PROMPT"):
+            self.after(800, lambda: self._check_platform_permissions())
         self._log("info", i18n.tr("欢迎使用 MeowGo"))
         self._log("muted", i18n.tr(
             "左侧维护执行组，右侧编辑步骤；「调用执行组」指令可复用其它组。"))
@@ -845,9 +857,15 @@ class App(tk.Tk):
             dpi = float(self.winfo_fpixels("1i"))
         except tk.TclError:
             dpi = 96.0
-        scale = max(1.0, min(3.0, dpi / 96.0))
+        # 用户可选的界面缩放（设置里 90%–150%），叠加在系统 DPI 之上
         try:
-            self.tk.call("tk", "scaling", dpi / 72.0)
+            pref = float(self.settings.get("ui_scale", 1.0))
+        except (TypeError, ValueError):
+            pref = 1.0
+        pref = max(0.8, min(1.6, pref))
+        scale = max(0.8, min(3.0, dpi / 96.0 * pref))
+        try:
+            self.tk.call("tk", "scaling", dpi / 72.0 * pref)
         except tk.TclError:
             pass
         return scale
@@ -1167,13 +1185,16 @@ class App(tk.Tk):
                enabled=has and group.steps[index].type in IMAGE_STEP_TYPES),
             "-",
             MI("宏录制鼠标操作…", "mouse", self.open_macro_recorder,
-               "录成坐标步骤"),
+               i18n.tr("仅 Windows") if not platform_support.available(
+                   "keyboard_hook") else "录成坐标步骤",
+               enabled=platform_support.available("keyboard_hook")),
         ]
 
     def _run_items(self) -> list:
         MI = uikit.MenuItem
         return [
             MI("运行当前组", "run", self.run_group, "F5", accent=True),
+            MI("从选中步骤开始运行", "run", self.run_from_step, "从当前行继续"),
             MI("循环运行当前组", "loop", self.run_loop),
             MI("运行全部组", "table", self.run_all),
             MI("带数据运行…", "table", self.run_with_data, "CSV/Excel"),
@@ -1187,7 +1208,8 @@ class App(tk.Tk):
                self._schedule_summary()),
             "-",
             MI("暂停 / 继续", "pause", self.toggle_pause, enabled=self.running),
-            MI("停止", "stop", self.stop_run, "F9 全局"),
+            MI("停止", "stop", self.stop_run,
+               "F9 全局" if platform_support.available("global_hotkey") else ""),
         ]
 
     def _view_items(self) -> list:
@@ -1206,9 +1228,13 @@ class App(tk.Tk):
 
     def _help_items(self) -> list:
         MI = uikit.MenuItem
-        return [MI("使用说明", "info", self.show_help),
-                MI("快捷键速查", "question", self.show_shortcuts, "?"),
-                MI("关于 " + APP_TITLE, "cat", self.show_about)]
+        items = [MI("使用说明", "info", self.show_help),
+                 MI("快捷键速查", "question", self.show_shortcuts, "?")]
+        if platform_support.IS_MACOS:
+            items.append(MI("检查 macOS 权限…", "check",
+                            lambda: self._check_platform_permissions(True)))
+        items.append(MI("关于 " + APP_TITLE, "cat", self.show_about))
+        return items
 
     def _build_menubar(self, parent) -> None:
         """自绘菜单栏：一排扁平按钮，点开后是与右键同款的下拉菜单。"""
@@ -1496,7 +1522,8 @@ class App(tk.Tk):
         self.step_tree.bind("<Button-3>", self._step_menu)
         self.step_tree.bind("<Delete>", self._on_step_key_delete)
         self.step_tree.bind("<F2>", self._on_step_key_edit)
-        self.step_tree.bind("<Control-a>", self._select_all_steps)
+        mod = "Command" if platform_support.IS_MACOS else "Control"
+        self.step_tree.bind(f"<{mod}-a>", self._select_all_steps)
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_select)
         enable_tree_drag(self.step_tree, self._on_step_drop)
         # 用户拖动表头分隔线后立即保存列宽；普通点击因宽度未变而直接返回。
@@ -1573,6 +1600,28 @@ class App(tk.Tk):
             scale=self.scale, bg=LOG_HEAD_BG, height=CONTROL_SM, pad=self.s(8),
             font_size=FONT_SIZE_NOTE, tooltip="复制全部日志到剪贴板")
         self.btn_log_copy.pack(side="right", padx=(0, self.s(2)))
+        # 日志筛选：级别 + 关键词（原始条目保留，切换时整块重绘）
+        self.log_search_var = tk.StringVar()
+        self.log_search_entry = tk.Entry(
+            head, textvariable=self.log_search_var, width=10,
+            bg=LOG_HEAD_BG, fg=theme.token("LOG_HEAD_FG"),
+            insertbackground=theme.token("LOG_HEAD_FG"),
+            relief="flat", font=FONT_CAPTION)
+        self.log_search_entry.pack(side="right", padx=(0, self.s(6)))
+        self.log_search_entry.bind("<KeyRelease>", self._on_log_search)
+        self.log_level_var = tk.StringVar(value="全部")
+        self.combo_log_level = uikit.LocalizedCombobox(
+            head, values=["全部", "信息", "警告", "错误"],
+            variable=self.log_level_var, width=6, font_size=FONT_SIZE_CAPTION,
+            bg=LOG_HEAD_BG, command=lambda _value=None: self._on_log_filter())
+        self.combo_log_level.pack(side="right", padx=(0, self.s(4)))
+        self.log_search_entry.bind(
+            "<FocusIn>",
+            lambda e: self.log_search_entry.configure(
+                bg=theme.token("LOG_HEAD_HOVER")))
+        self.log_search_entry.bind(
+            "<FocusOut>",
+            lambda e: self.log_search_entry.configure(bg=LOG_HEAD_BG))
         # 「打开报告」改成运行历史入口：弹窗里可以查看 / 清空历次报告
         self.btn_run_history = uikit.RoundButton(
             head, "历史", "clock", self.open_run_history, kind="ghost",
@@ -1601,34 +1650,25 @@ class App(tk.Tk):
         # 正文 + 滚动条：能回看历史日志；超过 MAX_LOG_LINES 自动丢弃最早行
         self.log_body = tk.Frame(card, bg=LOG_BG)
         self.log_body.pack(fill="x", padx=1, pady=(0, 1))
-        self.log_text = tk.Text(self.log_body, height=7, bg=LOG_BG, fg=LOG_FG,
-                                insertbackground=LOG_FG, relief="flat",
-                                font=FONT_MONO, wrap="word",
-                                padx=self.s(12), pady=self.s(8),
-                                state="disabled")
+        # macOS 的 Tk 8.5 上可见 tk.Text 会持续触发整窗重绘（100% CPU），
+        # 日志改用 Listbox：同样支持逐行着色、滚动和点击跳转。
+        self.log_list = tk.Listbox(
+            self.log_body, height=7, bg=LOG_BG, fg=LOG_FG,
+            selectbackground=theme.token("SELECT_BG"),
+            selectforeground=theme.token("TEXT"),
+            relief="flat", borderwidth=0, highlightthickness=0,
+            activestyle="none", exportselection=False, takefocus=0,
+            font=FONT_MONO)
         self.log_scroll = uikit.SlimScrollbar(
-            self.log_body, orient="vertical", command=self.log_text.yview,
+            self.log_body, orient="vertical", command=self.log_list.yview,
             scale=self.scale, bg=LOG_BG, variant="console")
         self.log_scroll.pack(side="right", fill="y", padx=(self.s(2), 0))
-        self.log_text.pack(side="left", fill="both", expand=True)
-        self.log_text.configure(yscrollcommand=self.log_scroll.set)
-        # 可点击的「第 N 步」日志行：点一下跳到步骤表对应行
-        # （先建 link，info/warn/error 后建——Tk 里后建的标签优先级高，
-        #  这样错误行仍是红色，只额外获得下划线）
-        self.log_text.tag_configure("link", foreground=ACCENT,
-                                    underline=True)
-        self.log_text.tag_bind("link", "<Button-1>",
-                               lambda e: self._on_log_link_click(e))
-        self.log_text.tag_bind("link", "<Enter>",
-                               lambda e: self.log_text.configure(cursor="hand2"))
-        self.log_text.tag_bind("link", "<Leave>",
-                               lambda e: self.log_text.configure(cursor=""))
-        # 日志着色统一取自 theme 的 LOG_* 令牌（与浅/暗色板同步切换）
-        self.log_text.tag_configure("info", foreground=LOG_INFO)
-        self.log_text.tag_configure("warn", foreground=LOG_WARN)
-        self.log_text.tag_configure("error", foreground=LOG_ERROR)
-        self.log_text.tag_configure("muted", foreground=LOG_HEAD_MUTED)
-        self.log_text.tag_configure("time", foreground=LOG_TIME)
+        self.log_list.pack(side="left", fill="both", expand=True,
+                           padx=self.s(12), pady=self.s(8))
+        self.log_list.configure(yscrollcommand=self.log_scroll.set)
+        # 点击带跳转目标的日志行：跳到步骤表对应行
+        self.log_list.bind("<Button-1>", self._on_log_link_click)
+        self.log_list.bind("<Motion>", self._on_log_hover)
 
     def toggle_log(self) -> None:
         if self.log_visible:
@@ -1668,17 +1708,23 @@ class App(tk.Tk):
             bar, "定位到失败步骤", "target", self._locate_failed_step,
             kind="outline", scale=self.scale, bg=BG, height=CONTROL_XS,
             pad=self.s(7), font_size=FONT_SIZE_NOTE, tooltip="在步骤表里标出失败的那一步")
+        self.btn_resume = uikit.RoundButton(
+            bar, "从失败步骤继续", "continue", self._resume_from_failed,
+            kind="ghost", scale=self.scale, bg=BG, height=CONTROL_XS,
+            pad=self.s(7), font_size=FONT_SIZE_NOTE,
+            tooltip="跳过前面的步骤，从失败处接着跑")
         # 默认隐藏：运行出现失败步时才出现
 
     def _bind_shortcuts(self) -> None:
-        self.bind("<Control-g>", lambda e: self.add_group())
-        self.bind("<Control-Return>", lambda e: self.add_step())
+        mod = "Command" if platform_support.IS_MACOS else "Control"
+        self.bind(f"<{mod}-g>", lambda e: self.add_group())
+        self.bind(f"<{mod}-Return>", lambda e: self.add_step())
         self.bind("<F5>", lambda e: self.run_group())
         self.bind("<F2>", lambda e: self.edit_step())
         self.bind("<Delete>", self._on_delete_key)
-        self.bind("<Control-z>", lambda e: self.undo())
-        self.bind("<Control-y>", lambda e: self.redo())
-        self.bind("<Control-d>", lambda e: self.toggle_theme())
+        self.bind(f"<{mod}-z>", lambda e: self.undo())
+        self.bind(f"<{mod}-y>", lambda e: self.redo())
+        self.bind(f"<{mod}-d>", lambda e: self.toggle_theme())
         self.bind("<F8>", lambda e: self.toggle_debug())
         self.bind("<question>", lambda e: self.show_shortcuts())
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1791,13 +1837,13 @@ class App(tk.Tk):
         self.step_tree.tag_configure("failed", background=MARK_FAILED)
         self.step_tree.tag_configure("even", background=CARD)
         self.step_tree.tag_configure("odd", background=ZEBRA)
-        self.log_text.tag_configure("link", foreground=ACCENT)
-        # 日志文字色跟随色板（LOG_* 令牌），切主题时一起刷新
-        self.log_text.tag_configure("info", foreground=LOG_INFO)
-        self.log_text.tag_configure("warn", foreground=LOG_WARN)
-        self.log_text.tag_configure("error", foreground=LOG_ERROR)
-        self.log_text.tag_configure("muted", foreground=LOG_HEAD_MUTED)
-        self.log_text.tag_configure("time", foreground=LOG_TIME)
+        # 日志文字色跟随色板（LOG_* 令牌），切主题时重建列表项颜色
+        if hasattr(self, "log_list"):
+            self.log_list.configure(
+                bg=LOG_BG, fg=LOG_FG,
+                selectbackground=theme.token("SELECT_BG"),
+                selectforeground=theme.token("TEXT"))
+            self._render_log()
         self._icons.clear()            # 图标按新色调重画
         self._refresh_brand_logo()
         self._refresh_tray()           # 托盘图标跟着主题反白
@@ -2062,9 +2108,16 @@ class App(tk.Tk):
         self.group_tree.delete(*self.group_tree.get_children())
         for index, group in enumerate(self.project.groups):
             iid = f"g{index}"
+            label = f"  {group.name}   ({len(group.steps)})"
+            if self._step_filter:
+                # 跨组搜索：每个组后面显示命中数，方便直接切过去
+                hits = sum(1 for step in group.steps
+                           if self._step_matches(step))
+                label += (f"  · {i18n.tr('匹配')} {hits}" if hits
+                          else f"  · {i18n.tr('无匹配')}")
             self.group_tree.insert(
                 "", "end", iid=iid,
-                text=f"  {group.name}   ({len(group.steps)})",
+                text=label,
                 image=self._group_row_pic(index == self.group_index),
                 open=(index == self.group_index))
             for step_index, step in enumerate(group.steps):
@@ -2292,6 +2345,7 @@ class App(tk.Tk):
                              else text.strip())
         self._sync_search_clear()
         self._refresh_steps()
+        self._refresh_groups()
 
     def _clear_step_filter(self) -> None:
         self._step_filter = ""
@@ -2300,6 +2354,7 @@ class App(tk.Tk):
         self.step_search.configure(foreground=MUTED)
         self._sync_search_clear()
         self._refresh_steps()
+        self._refresh_groups()
 
     # ------------------------------------------------------- 图片预览
     def _step_image_path(self, step: Step) -> str:
@@ -3215,20 +3270,20 @@ class App(tk.Tk):
                 level, message = self.log_queue.get_nowait()
                 display = i18n.tr(message)
                 stamp = time.strftime("%H:%M:%S")
-                self.log_text.configure(state="normal")
-                self.log_text.insert("end", f"[{stamp}] ", "time")
+                target = None
                 # 出错 / 超时的日志行关联到当前执行的步骤，可点击跳转
                 if (self._current_run_step is not None
                         and (level == "error" or "出错" in message
                              or "超时" in message)):
-                    line = int(self.log_text.index("end-1c").split(".")[0])
-                    self._step_log_lines[line] = self._current_run_step
-                    self.log_text.insert("end", display + "\n", ("link", level))
-                else:
-                    self.log_text.insert("end", display + "\n", level)
-                self._trim_log()
-                self.log_text.see("end")
-                self.log_text.configure(state="disabled")
+                    target = self._current_run_step
+                entry = (level, display, stamp, target)
+                # deque(maxlen=MAX_LOG_LINES) 自动丢弃最早条目：
+                # 文本区与原始条目都保持上限，长跑 / 循环运行不会无限占内存
+                self._log_entries.append(entry)
+                if self._log_entry_matches(entry):
+                    self._insert_log_entry(entry)
+                    self._trim_log()
+                    self.log_list.see("end")
         except queue.Empty:
             pass
         try:
@@ -3257,41 +3312,84 @@ class App(tk.Tk):
             pass
         self.after(120, self._drain_queue)
 
+    def _insert_log_entry(self, entry) -> None:
+        level, display, stamp, target = entry
+        colors = {"info": LOG_INFO, "warn": LOG_WARN, "error": LOG_ERROR,
+                  "muted": LOG_HEAD_MUTED, "time": LOG_TIME}
+        index = self.log_list.size()
+        self.log_list.insert("end", f"[{stamp}] {display}")
+        self.log_list.itemconfigure(
+            index, foreground=colors.get(level, LOG_HEAD_MUTED))
+        self._visible_targets.append(target)
+
+    def _log_entry_matches(self, entry) -> bool:
+        level, display, _stamp, _target = entry
+        if self._log_level == "info" and level not in ("info", "muted", "time"):
+            return False
+        if self._log_level == "warn" and level != "warn":
+            return False
+        if self._log_level == "error" and level != "error":
+            return False
+        return not (self._log_search
+                    and self._log_search not in display.lower())
+
+    def _render_log(self) -> None:
+        self.log_list.delete(0, "end")
+        self._visible_targets.clear()
+        for entry in self._log_entries:
+            if self._log_entry_matches(entry):
+                self._insert_log_entry(entry)
+        self._trim_log()
+        self.log_list.see("end")
+
+    def _on_log_filter(self) -> None:
+        mapping = {"全部": "", "信息": "info", "警告": "warn", "错误": "error"}
+        self._log_level = mapping.get(self.log_level_var.get(), "")
+        self._render_log()
+
+    def _on_log_search(self, _event=None) -> None:
+        self._log_search = self.log_search_var.get().strip().lower()
+        self._render_log()
+
     def _trim_log(self) -> None:
-        """日志行数上限：超出的最早行连同点击映射一起丢掉。"""
-        lines = int(self.log_text.index("end-1c").split(".")[0])
-        extra = lines - MAX_LOG_LINES
-        if extra <= 0:
-            return
-        self.log_text.delete("1.0", f"{extra + 1}.0")
-        self._step_log_lines = {
-            line - extra: target
-            for line, target in self._step_log_lines.items()
-            if line - extra >= 1}
+        """日志行数上限：超出的最早行连同跳转目标一起丢掉。"""
+        while self.log_list.size() > MAX_LOG_LINES:
+            self.log_list.delete(0)
+            self._visible_targets.popleft()
+
+    def _log_target_at(self, y: int):
+        index = self.log_list.nearest(y)
+        if 0 <= index < len(self._visible_targets):
+            return self._visible_targets[index]
+        return None
 
     def _on_log_link_click(self, event) -> None:
-        """点日志里带下划线的行：跳到对应步骤。"""
-        index = self.log_text.index(f"@{event.x},{event.y}")
-        line = int(index.split(".")[0])
-        target = self._step_log_lines.get(line)
+        """点日志行：如果该行关联了失败步骤，就跳过去。"""
+        target = self._log_target_at(event.y)
         if target:
             self._jump_to_step(*target)
 
+    def _on_log_hover(self, event) -> None:
+        cursor = "hand2" if self._log_target_at(event.y) else ""
+        try:
+            self.log_list.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
     def clear_log(self) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
-        self._step_log_lines = {}
+        self._log_entries.clear()
+        self.log_list.delete(0, "end")
+        self._visible_targets.clear()
 
     def copy_log(self) -> None:
         """把当前可见日志（最近 MAX_LOG_LINES 行）复制到剪贴板。"""
-        text = self.log_text.get("1.0", "end-1c")
+        text = "\n".join(str(line) for line in self.log_list.get(0, "end"))
         if not text.strip():
             self._set_status("日志为空，没有可复制的内容")
             return
         self.clipboard_clear()
         self.clipboard_append(text)
-        lines = text.count("\n") + 1
+        lines = self.log_list.size()
         self._set_status(f"已复制 {lines} 行日志到剪贴板")
 
     # --------------------------------------------------------------- 执行
@@ -3349,6 +3447,25 @@ class App(tk.Tk):
 
     def run_loop(self) -> bool:
         return self._start(self._current_group_name(), loop=True)
+
+    def run_from_step(self) -> None:
+        """从当前组选中的那一行开始运行（前面的步骤视为已完成）。"""
+        group = self._current_group()
+        rows = self._selected_steps()
+        if group is None or not rows:
+            messagebox.showinfo("提示", "请先在步骤表里选中一行", parent=self)
+            return
+        index = rows[0]
+        self._log("info", f"从「{group.name}」第 {index + 1} 步开始运行")
+        self._start(group.name, start_step=index)
+
+    def _resume_from_failed(self) -> None:
+        """运行结束后：从失败的那一步继续。"""
+        if self._failed_step is None:
+            return
+        group, index = self._failed_step
+        self._log("info", f"从失败步骤继续：{group} 第 {index + 1} 步")
+        self._start(group, start_step=index)
 
     def run_group_debug(self) -> None:
         """单步调试运行当前组：只这一程每步确认，不动全局开关。"""
@@ -3432,7 +3549,7 @@ class App(tk.Tk):
     def _start(self, entry: Optional[str], loop: bool = False,
                data: Optional[list] = None,
                data_path: Optional[str] = None,
-               row_offset: int = 0) -> bool:
+               row_offset: int = 0, start_step: int = 0) -> bool:
         if self.running:
             messagebox.showinfo("提示", "正在运行中，请先停止", parent=self)
             return False
@@ -3464,7 +3581,9 @@ class App(tk.Tk):
         delay = int(self.settings.get("delay", 3))
         if not debug:
             self.iconify()            # 单步调试时保留窗口，方便看步骤高亮
-        self._countdown(delay, lambda: self._launch(entry, loop, debug=debug),
+        self._countdown(delay,
+                        lambda: self._launch(entry, loop, debug=debug,
+                                             start_step=start_step),
                         debug=debug)
         return True
 
@@ -3522,8 +3641,8 @@ class App(tk.Tk):
 
         tick()
 
-    def _launch(self, entry: Optional[str], loop: bool,
-                debug: bool = False) -> None:
+    def _launch(self, entry: Optional[str], loop: bool, debug: bool = False,
+                start_step: int = 0) -> None:
         self._schedule_pending = False
         # 防止界面和计划任务 / 另一个副本同时抢鼠标
         lock = InstanceLock(make_lock_name(APP_DIR, "RUN"))
@@ -3555,8 +3674,8 @@ class App(tk.Tk):
         self._step_marks = {}
         self._failed_step = None
         self._current_run_step = None
-        self._step_log_lines = {}
         self.btn_locate.pack_forget()
+        self.btn_resume.pack_forget()
         self._set_status("运行中…" + ("（循环）" if loop else "")
                          + ("（单步调试）" if debug else ""))
         self._set_log_state("运行中")
@@ -3574,7 +3693,8 @@ class App(tk.Tk):
             self._log("info", "单步调试：每一步执行前都会确认")
 
         def worker():
-            result = self.executor.run(entry, loop=loop)
+            result = self.executor.run(entry, loop=loop,
+                                       start_step=start_step)
             self.ui_queue.put(("end", result))
 
         self.worker = threading.Thread(target=worker, daemon=True)
@@ -3617,6 +3737,17 @@ class App(tk.Tk):
             self._set_log_state(result_text)
             if self._failed_step is not None:
                 self.btn_locate.pack(side="right", padx=(0, self.s(6)))
+                self.btn_resume.pack(side="right", padx=(0, self.s(4)))
+            try:
+                report = self.executor.report()
+                if report.get("vars"):
+                    preview = "，".join(
+                        f"{key}={report['vars'][key]}"
+                        for key in list(sorted(report["vars"]))[:6])
+                    self._log("info", "运行变量：" + preview +
+                              ("…" if len(report["vars"]) > 6 else ""))
+            except Exception:  # noqa: BLE001 — 变量快照失败不影响收尾
+                pass
             run_log = self._run_log
             if run_log is not None:
                 try:
@@ -4027,7 +4158,8 @@ class App(tk.Tk):
             return
         try:
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(self.log_text.get("1.0", "end"))
+                fh.write("\n".join(str(line)
+                                   for line in self.log_list.get(0, "end")))
             self._set_status(f"日志已导出：{os.path.basename(path)}")
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc), parent=self)
@@ -4072,6 +4204,44 @@ class App(tk.Tk):
         else:
             self._log("warn", "检测到多显示器但未启用 per-monitor DPI，"
                               "副屏缩放与主屏不同时坐标可能偏移")
+
+    def _show_onboarding(self) -> None:
+        """首次启动的三步引导；勾选「不再显示」后写入设置。"""
+        if self.settings.get("onboarded"):
+            return
+        dialog = OnboardingDialog(self)
+        result = dialog.wait()
+        if result and result.get("hide"):
+            self.settings["onboarded"] = True
+            self._save_state()
+
+    def _check_platform_permissions(self, interactive: bool = False) -> bool:
+        """macOS 权限自检：缺屏幕录制 / 辅助功能时引导打开系统设置。"""
+        if not platform_support.IS_MACOS:
+            if interactive:
+                self._set_status("当前系统无需额外权限")
+            return True
+        missing = platform_support.missing_permissions()
+        if not missing:
+            if interactive:
+                messagebox.showinfo(
+                    "权限检查", "屏幕录制与辅助功能权限均已开启。", parent=self)
+            return True
+        if not interactive:
+            # 启动时不要弹原生模态框：macOS 上它会让主窗口看起来「未响应」，
+            # 只在日志和状态栏提示，用户可从「帮助 → 检查 macOS 权限…」主动打开。
+            self._log("warn", "macOS 权限不完整：请在系统设置中开启"
+                              "屏幕录制 / 辅助功能")
+            self._set_status("macOS 权限不完整（帮助 → 检查 macOS 权限…）",
+                             WARNING)
+            return False
+        text = platform_support.explain_permissions(missing)
+        self._log("warn", "macOS 权限不完整：截图或鼠标操作可能失效")
+        if messagebox.askyesno("需要 macOS 权限",
+                               text + "\n\n现在打开系统设置？", parent=self):
+            for kind in missing:
+                platform_support.open_privacy_settings(kind)
+        return False
 
     def toggle_pause(self) -> None:
         if not self.running:
@@ -4215,15 +4385,18 @@ class App(tk.Tk):
         dialog = SettingsDialog(self, self.settings, self.image_dir)
         if dialog.wait() is None:
             return
+        old_scale = self.settings.get("ui_scale", 1.0)
         self.settings = dialog.result
         self.image_dir = dialog.result["image_dir"]
+        if self.settings.get("ui_scale", 1.0) != old_scale:
+            self._log("info", "界面缩放将在下次启动后生效")
         self.project.image_dir = self.image_dir
         language = str(self.settings.get("language", i18n.get_language()))
         if language != i18n.get_language():
             self.set_language(language, save=False)
         self._save_state()
         self._apply_tray_settings()
-        self.image_label.configure(text=f"图片目录：{self.image_dir}")
+        self.image_label.configure(text=i18n.tr("图片目录：") + self.image_dir)
 
     def set_language(self, language: str, save: bool = True) -> None:
         """切换界面语言并即时刷新已存在的控件（不重启客户端）。"""
@@ -4640,12 +4813,17 @@ class StepDialog(BaseDialog):
         self.lbl_fail = tk.Label(row_timeout, text="超时后", bg=CARD, fg=TEXT,
                                  font=FONT_NOTE)
         self.lbl_fail.grid(row=0, column=2, sticky="w")
-        self.var_on_fail = tk.StringVar(
-            value="跳过这步" if editing.on_fail != "stop" else "停止执行")
+        if editing.on_fail == "stop":
+            fail_text = "停止执行"
+        elif editing.on_fail.startswith("goto:"):
+            fail_text = "跳转到组…"
+        else:
+            fail_text = "跳过这步"
+        self.var_on_fail = tk.StringVar(value=fail_text)
         self.combo_fail = uikit.LocalizedCombobox(
             row_timeout, variable=self.var_on_fail, state="readonly",
-            values=["跳过这步", "停止执行"], width=9,
-            font=FONT_NOTE)
+            values=["跳过这步", "停止执行", "跳转到组…"], width=11,
+            font=FONT_NOTE, command=lambda _value=None: self._sync())
         self.combo_fail.grid(row=0, column=3, sticky="w",
                              padx=(parent.s(4), 0))
 
@@ -4743,8 +4921,29 @@ class StepDialog(BaseDialog):
         self.lbl_check_result.grid(row=0, column=1, sticky="w",
                                    padx=(parent.s(8), 0))
 
+        # 失败跳转：失败后执行哪个组（on_fail = goto:组名）
+        self.lbl_fail_group = self._adv_label("失败后执行", 4)
+        self.row_fail_group = tk.Frame(self.advanced, bg=CARD)
+        self.row_fail_group.grid(row=4, column=1, sticky="ew",
+                                 pady=parent.s(3))
+        self.row_fail_group.columnconfigure(0, weight=1)
+        fail_target = (editing.on_fail[5:].strip()
+                       if editing.on_fail.startswith("goto:") else "")
+        self.var_fail_group = tk.StringVar(value=fail_target)
+        self.entry_fail_group = uikit.TextField(
+            self.row_fail_group, textvariable=self.var_fail_group,
+            scale=parent.scale, bg=CARD, font_size=FONT_SIZE_NOTE)
+        self.entry_fail_group.grid(row=0, column=0, sticky="ew")
+        self.btn_fail_group = uikit.RoundButton(
+            self.row_fail_group, "选组", "list", self._pick_fail_group,
+            kind="outline", scale=parent.scale, bg=CARD,
+            height=CONTROL_SM, pad=parent.s(8), font_size=FONT_SIZE_NOTE,
+            tooltip="选择失败后要执行的执行组")
+        self.btn_fail_group.grid(row=0, column=1, padx=(parent.s(4), 0))
+
         self._adv_timeout = [self.lbl_timeout, row_timeout]
         self._adv_fail = [self.lbl_fail, self.combo_fail]
+        self._adv_fail_group = [self.lbl_fail_group, self.row_fail_group]
         self._adv_image = [self.lbl_region, row_region]
         self._adv_nth = [self.lbl_nth, self.spin_nth,
                          self.lbl_nth_suffix, self.gray_box]
@@ -5012,6 +5211,9 @@ class StepDialog(BaseDialog):
             and timeout > 0
         for widget in self._adv_fail:
             widget.grid() if show_fail else widget.grid_remove()
+        show_goto = self.var_on_fail.get() == "跳转到组…" and show_fail
+        for widget in self._adv_fail_group:
+            widget.grid() if show_goto else widget.grid_remove()
         # 识别范围对图片 / 文字 / 控件都有效；「第几个」和灰度只对图片
         for widget in self._adv_image:
             widget.grid() if key in REGION_STEP_TYPES else widget.grid_remove()
@@ -5043,6 +5245,10 @@ class StepDialog(BaseDialog):
                 self.var_content.set(defaults[key])
         if need_repeat and not self.var_repeat.get().strip():
             self.var_repeat.set("1")
+        if (platform_support.IS_MACOS
+                and key in ("window", "if_window", "ui_click")):
+            self._show_hint("该步骤类型只支持 Windows，macOS 上执行会报错",
+                            warn=True)
         # 类型切换会增减行：窗口已显示时再按新内容收缩高度。
         # 构造阶段（尚未映射）不排队，避免用错误的初始宽度算高度。
         if self.winfo_ismapped():
@@ -5180,10 +5386,13 @@ class StepDialog(BaseDialog):
                 messagebox.showwarning("格式错误", "等待超时必须是数字",
                                        parent=self)
                 return
-        if key in IMAGE_TYPES or key in ("drag", "cmd") \
-                or key in TEXT_STEP_TYPES or key in UIA_STEP_TYPES:
-            step.on_fail = "stop" if self.var_on_fail.get() == "停止执行" \
-                else "skip"
+        fail_value = self.var_on_fail.get()
+        if fail_value == "停止执行":
+            step.on_fail = "stop"
+        elif fail_value == "跳转到组…":
+            step.on_fail = "goto:" + self.var_fail_group.get().strip()
+        else:
+            step.on_fail = "skip"
         if key in IMAGE_STEP_TYPES:
             try:
                 nth = int(self.var_nth.get() or 1)
@@ -5233,6 +5442,22 @@ class StepDialog(BaseDialog):
                                         self._show_hint(f"将执行组：{n}")))
         x = self.btn_pick_group.winfo_rootx()
         y = self.btn_pick_group.winfo_rooty() + self.btn_pick_group.winfo_height()
+        menu.post(x, y)
+
+    def _pick_fail_group(self) -> None:
+        """失败跳转：选择失败后要执行的组。"""
+        names = self.project.names()
+        if not names:
+            self._show_hint("还没有其它执行组，请先新建", warn=True)
+            return
+        menu = tk.Menu(self, tearoff=0, font=FONT_NOTE)
+        for name in names:
+            menu.add_command(
+                label=name,
+                command=lambda n=name: (self.var_fail_group.set(n),
+                                        self._show_hint(f"失败后执行组：{n}")))
+        x = self.btn_fail_group.winfo_rootx()
+        y = self.btn_fail_group.winfo_rooty() + self.btn_fail_group.winfo_height()
         menu.post(x, y)
 
     def _pick_group2(self) -> None:
@@ -5645,8 +5870,12 @@ class ScheduleDialog(BaseDialog):
         tk.Frame(right, bg=BORDER, height=1).grid(
             row=8, column=0, columnspan=2, sticky="ew", pady=app.s(9))
         row_label("无人值守运行", 9)
-        tk.Label(right, text="由 Windows 任务计划程序执行，客户端关闭后仍会按时运行。"
-                             "\n无需管理员权限；创建后可在「任务计划程序」中查看。",
+        task_hint = ("由 Windows 任务计划程序执行，客户端关闭后仍会按时运行。"
+                     "\n无需管理员权限；创建后可在「任务计划程序」中查看。"
+                     if platform_support.available("scheduled_task") else
+                     "当前系统不支持 Windows 计划任务。软件内定时运行在"
+                     "界面打开时仍会生效，关掉界面则不会触发。")
+        tk.Label(right, text=i18n.tr(task_hint),
                  bg=CARD, fg=MUTED, font=FONT_CAPTION,
                  wraplength=app.s(300), justify="left", anchor="w").grid(
             row=9, column=1, sticky="w", pady=(0, app.s(2)))
@@ -5669,6 +5898,10 @@ class ScheduleDialog(BaseDialog):
             pad=app.s(8), font_size=FONT_SIZE_NOTE,
             tooltip="查看计划任务的上次运行结果与下次运行时间")
         self.btn_task_status.pack(side="left", padx=app.s(4))
+        if not platform_support.available("scheduled_task"):
+            for button in (self.btn_task_create, self.btn_task_delete,
+                           self.btn_task_status):
+                button.set_enabled(False)
         self.lbl_task = tk.Label(right, text="", bg=CARD, fg=MUTED,
                                  font=FONT_CAPTION,
                                  wraplength=app.s(445), justify="left",
@@ -6934,20 +7167,75 @@ class BackupDialog(BaseDialog):
         self.destroy()
 
 
+class OnboardingDialog(BaseDialog):
+    """首次启动的三步引导（可勾选不再显示）。"""
+
+    TIPS = (
+        "1. 左侧新建执行组，右侧添加步骤；所有修改都会自动保存。",
+        "2. 图片步骤先点「截图」框选按钮，再用「检测图片」确认能命中。",
+        "3. 按 F5 或顶部「运行」开始；失败后可在状态栏从失败步骤继续。",
+    )
+
+    def __init__(self, parent: App):
+        super().__init__(parent, "欢迎使用 MeowGo", width=520, height=360)
+        self.columnconfigure(0, weight=1)
+        tk.Label(self, text="三步开始使用 MeowGo", bg=CARD, fg=TEXT,
+                 font=FONT_TITLE, anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=parent.s(22),
+            pady=(parent.s(18), parent.s(10)))
+        for row, tip in enumerate(self.TIPS, start=1):
+            tk.Label(self, text=i18n.tr(tip), bg=CARD, fg=TEXT,
+                     font=FONT_NOTE, wraplength=parent.s(460),
+                     justify="left", anchor="w").grid(
+                row=row, column=0, sticky="ew", padx=parent.s(22),
+                pady=parent.s(6))
+        self.var_hide = tk.BooleanVar(value=False)
+        row_hide = tk.Frame(self, bg=CARD)
+        row_hide.grid(row=4, column=0, sticky="w", padx=parent.s(22),
+                      pady=(parent.s(10), 0))
+        uikit.Switch(row_hide, self.var_hide, scale=parent.scale,
+                     bg=CARD).pack(side="left")
+        tk.Label(row_hide, text="不再显示此提示", bg=CARD, fg=MUTED,
+                 font=FONT_NOTE).pack(side="left", padx=(parent.s(6), 0))
+        self.footer(5, "开始使用", "check", self.ok, cancel_text="",
+                    pad_top=12)
+        self.fit_content(width=parent.s(520))
+        self.center()
+
+    def ok(self) -> None:
+        self.result = {"hide": bool(self.var_hide.get())}
+        self.destroy()
+
+
 class SettingsDialog(BaseDialog):
     """运行设置：倒计时、相似度、图片目录、开关项、开机自启与托盘。"""
 
     def __init__(self, parent: App, settings: dict, image_dir: str):
-        super().__init__(parent, "运行设置", width=470, height=470)
+        super().__init__(parent, "运行设置", width=500, height=560)
         self.columnconfigure(1, weight=1)
         # 用传进来的设置做底稿，保存时只改本对话框的键，别冲掉定时等配置
         self._base_settings = dict(settings)
+        self._is_windows = platform_support.IS_WINDOWS
 
-        self.label("界面语言", 0)
+        def section(text: str, row: int) -> None:
+            tk.Label(self, text=i18n.tr(text), bg=CARD, fg=TEXT,
+                     font=FONT_SECTION, anchor="w").grid(
+                row=row, column=0, columnspan=2, sticky="ew",
+                padx=parent.s(16), pady=(parent.s(10), parent.s(2)))
+
+        def note(text: str, row: int) -> None:
+            tk.Label(self, text=i18n.tr(text), bg=CARD, fg=MUTED,
+                     font=FONT_CAPTION, wraplength=parent.s(450),
+                     justify="left", anchor="w").grid(
+                row=row, column=0, columnspan=2, sticky="ew",
+                padx=parent.s(16), pady=(parent.s(2), 0))
+
+        section("通用", 0)
+        self.label("界面语言", 1)
         self.var_language = tk.StringVar(
             value=i18n.language_display(str(settings.get("language", "zh"))))
         row_lang = tk.Frame(self, bg=CARD)
-        row_lang.grid(row=0, column=1, sticky="e",
+        row_lang.grid(row=1, column=1, sticky="e",
                       padx=(0, parent.s(16)), pady=parent.s(5))
         self.combo_language = uikit.ReadonlySelect(
             row_lang,
@@ -6956,21 +7244,37 @@ class SettingsDialog(BaseDialog):
             font_size=FONT_SIZE_NOTE, width=20)
         self.combo_language.pack(side="left")
 
-        self.label("启动前倒计时（秒）", 1)
+        self.label("界面缩放（重启后生效）", 2)
+        self._scale_values = ["90%", "100%", "110%", "125%", "150%"]
+        try:
+            percent = round(float(settings.get("ui_scale", 1.0)) * 100)
+        except (TypeError, ValueError):
+            percent = 100
+        nearest = min(self._scale_values,
+                      key=lambda value: abs(int(value[:-1]) - percent))
+        self.var_ui_scale = tk.StringVar(value=nearest)
+        self.combo_scale = uikit.ReadonlySelect(
+            self, values=self._scale_values, variable=self.var_ui_scale,
+            scale=parent.scale, bg=CARD, font_size=FONT_SIZE_NOTE, width=8)
+        self.combo_scale.grid(row=2, column=1, sticky="e",
+                              padx=(0, parent.s(16)), pady=parent.s(5))
+
+        self.label("启动前倒计时（秒）", 3)
         self.var_delay = tk.StringVar(value=str(settings.get("delay", 3)))
         ttk.Spinbox(self, from_=0, to=30, width=8,
                     textvariable=self.var_delay).grid(
-            row=1, column=1, sticky="e", padx=(0, parent.s(16)), pady=parent.s(5))
+            row=3, column=1, sticky="e", padx=(0, parent.s(16)), pady=parent.s(5))
 
-        self.label("图像匹配相似度", 2)
+        self.label("图像匹配相似度", 4)
         self.var_conf = tk.StringVar(value=str(settings.get("confidence", 0.9)))
         ttk.Spinbox(self, from_=0.5, to=1.0, increment=0.01, width=8,
                     textvariable=self.var_conf).grid(
-            row=2, column=1, sticky="e", padx=(0, parent.s(16)), pady=parent.s(5))
+            row=4, column=1, sticky="e", padx=(0, parent.s(16)), pady=parent.s(5))
 
-        self.label("图像目录", 3)
+        section("运行", 5)
+        self.label("图像目录", 6)
         row = tk.Frame(self, bg=CARD)
-        row.grid(row=3, column=1, sticky="ew", padx=(0, parent.s(16)),
+        row.grid(row=6, column=1, sticky="ew", padx=(0, parent.s(16)),
                  pady=parent.s(5))
         row.columnconfigure(0, weight=1)
         self.var_dir = tk.StringVar(value=image_dir)
@@ -6983,83 +7287,108 @@ class SettingsDialog(BaseDialog):
                           font_size=FONT_SIZE_NOTE).grid(
             row=0, column=1, padx=(parent.s(4), 0))
 
-        self.label("运行时显示悬浮进度条", 4)
+        self.label("运行时显示悬浮进度条", 7)
         self.var_mini = tk.BooleanVar(
             value=bool(settings.get("show_mini_bar", True)))
         uikit.Switch(self, self.var_mini, scale=parent.scale, bg=CARD).grid(
-            row=4, column=1, sticky="e", padx=(0, parent.s(16)),
-            pady=parent.s(3))
-
-        self.label("失败时保存屏幕截图", 5)
-        self.var_shot = tk.BooleanVar(
-            value=bool(settings.get("shot_on_fail", True)))
-        uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
-            row=5, column=1, sticky="e", padx=(0, parent.s(16)),
-            pady=parent.s(3))
-
-        self.label("数据处理完成后写入结果文件", 6)
-        self.var_results = tk.BooleanVar(
-            value=bool(settings.get("save_results", True)))
-        uikit.Switch(self, self.var_results, scale=parent.scale, bg=CARD).grid(
-            row=6, column=1, sticky="e", padx=(0, parent.s(16)),
-            pady=parent.s(3))
-
-        # 开机自启：开关状态直接反映注册表实况（Run 项在不在），
-        # 不在 settings 里另存一份“真相”，避免两边不一致
-        self.label("开机时自动启动客户端", 7)
-        self.var_autostart = tk.BooleanVar(value=autostart.is_enabled())
-        uikit.Switch(self, self.var_autostart, scale=parent.scale,
-                     bg=CARD).grid(
             row=7, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
-        # 托盘：两个开关任一打开就会出现托盘图标；互不依赖
-        self.label("启动后最小化至系统托盘", 8)
-        self.var_tray_min = tk.BooleanVar(
-            value=bool(settings.get("tray_start_minimized")))
-        uikit.Switch(self, self.var_tray_min, scale=parent.scale,
-                     bg=CARD).grid(
+        self.label("失败时保存屏幕截图", 8)
+        self.var_shot = tk.BooleanVar(
+            value=bool(settings.get("shot_on_fail", True)))
+        uikit.Switch(self, self.var_shot, scale=parent.scale, bg=CARD).grid(
             row=8, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
-        self.label("关闭窗口时最小化至系统托盘", 9)
-        self.var_tray_close = tk.BooleanVar(
-            value=bool(settings.get("tray_on_close")))
-        uikit.Switch(self, self.var_tray_close, scale=parent.scale,
-                     bg=CARD).grid(
+        self.label("数据处理完成后写入结果文件", 9)
+        self.var_results = tk.BooleanVar(
+            value=bool(settings.get("save_results", True)))
+        uikit.Switch(self, self.var_results, scale=parent.scale, bg=CARD).grid(
             row=9, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
-        # 说明文字横跨两列并自动换行，避免把左侧标签列撑得过宽
-        tk.Label(self, text="相似度阈值越低，识别范围越宽，误匹配风险也越高。"
-                            "失败截图保存于 reports/shots；数据结果写入数据文件"
-                            "所在目录。再次运行同一数据文件时，可选择从上次中断"
-                            "处继续。",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(430), justify="left", anchor="w").grid(
-            row=10, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(parent.s(3), 0))
-        tk.Label(self, text="开机自启通过当前用户注册表 Run 项实现，无需管理员"
-                            "权限。登录 Windows 后仅启动客户端，不自动执行流程；"
-                            "如需定时无人值守运行，请使用「定时运行 → 创建计划"
-                            "任务」。启动命令：" + autostart.launch_command(),
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(430), justify="left", anchor="w").grid(
-            row=11, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(parent.s(3), 0))
-        tk.Label(self, text="托盘选项：启用后，启动或关闭客户端只会隐藏窗口，"
-                            "系统托盘将显示 MeowGo 图标。双击图标可重新打开窗口，"
-                            "右键菜单可退出客户端。开机自启与启动后最小化至托盘"
-                            "同时启用时，客户端将在登录后静默驻留后台；关闭这两个"
-                            "选项并保存后，托盘图标将消失。",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION,
-                 wraplength=parent.s(430), justify="left", anchor="w").grid(
-            row=12, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(parent.s(3), 0))
+        section("系统集成（仅 Windows）" if not self._is_windows else "系统集成",
+                10)
+        # 开机自启：开关状态直接反映注册表实况（Run 项在不在），
+        # 不在 settings 里另存一份“真相”，避免两边不一致
+        self.label("开机时自动启动客户端", 11)
+        self.var_autostart = tk.BooleanVar(value=autostart.is_enabled())
+        self.sw_autostart = uikit.Switch(
+            self, self.var_autostart, scale=parent.scale, bg=CARD)
+        self.sw_autostart.grid(row=11, column=1, sticky="e",
+                               padx=(0, parent.s(16)), pady=parent.s(3))
 
-        self.footer(13, "保存", "check", self.ok, pad_top=10)
-        self.fit_content(width=parent.s(470))
+        # 托盘：两个开关任一打开就会出现托盘图标；互不依赖
+        self.label("启动后最小化至系统托盘", 12)
+        self.var_tray_min = tk.BooleanVar(
+            value=bool(settings.get("tray_start_minimized")))
+        self.sw_tray_min = uikit.Switch(
+            self, self.var_tray_min, scale=parent.scale, bg=CARD)
+        self.sw_tray_min.grid(row=12, column=1, sticky="e",
+                              padx=(0, parent.s(16)), pady=parent.s(3))
+
+        self.label("关闭窗口时最小化至系统托盘", 13)
+        self.var_tray_close = tk.BooleanVar(
+            value=bool(settings.get("tray_on_close")))
+        self.sw_tray_close = uikit.Switch(
+            self, self.var_tray_close, scale=parent.scale, bg=CARD)
+        self.sw_tray_close.grid(row=13, column=1, sticky="e",
+                                padx=(0, parent.s(16)), pady=parent.s(3))
+
+        if not self._is_windows:
+            for switch in (self.sw_autostart, self.sw_tray_min,
+                           self.sw_tray_close):
+                switch.set_enabled(False)
+            note("当前系统不支持开机自启与系统托盘，相关开关已停用。"
+                 "macOS 可在「系统设置 → 通用 → 登录项」里添加 MeowGo.app。",
+                 14)
+            note("相似度阈值越低，识别范围越宽，误匹配风险也越高。"
+                 "失败截图保存于 reports/shots；数据结果写入数据文件所在目录。",
+                 15)
+        else:
+            note("开机自启通过当前用户注册表 Run 项实现，无需管理员权限。"
+                 "登录 Windows 后仅启动客户端，不自动执行流程；如需定时无人"
+                 "值守运行，请使用「定时运行 → 创建计划任务」。启动命令："
+                 + autostart.launch_command(), 14)
+            note("托盘选项：启用后，启动或关闭客户端只会隐藏窗口，系统托盘将"
+                 "显示 MeowGo 图标。双击图标可重新打开窗口，右键菜单可退出"
+                 "客户端。", 15)
+            note("相似度阈值越低，识别范围越宽，误匹配风险也越高。"
+                 "失败截图保存于 reports/shots；数据结果写入数据文件所在目录。",
+                 16)
+
+        actions = tk.Frame(self, bg=CARD)
+        actions.grid(row=17, column=0, columnspan=2, sticky="ew",
+                     padx=parent.s(16), pady=(parent.s(6), 0))
+        self.lbl_defaults = tk.Label(actions, text="", bg=CARD, fg=MUTED,
+                                     font=FONT_CAPTION)
+        self.lbl_defaults.pack(side="left")
+        uikit.RoundButton(actions, "恢复默认设置", "undo",
+                          self._restore_defaults, kind="ghost",
+                          scale=parent.scale, bg=CARD, height=CONTROL_SM,
+                          pad=parent.s(10), font_size=FONT_SIZE_NOTE).pack(
+            side="right")
+
+        self.footer(18, "保存", "check", self.ok, pad_top=10)
+        self.fit_content(width=parent.s(500))
         self.center()
+
+    def _restore_defaults(self) -> None:
+        """把本页设置恢复成出厂默认值（点「保存」后生效）。"""
+        self.var_language.set(i18n.language_display("zh"))
+        self.var_ui_scale.set("100%")
+        self.var_delay.set("3")
+        self.var_conf.set("0.9")
+        self.var_dir.set(DEFAULT_IMAGE_DIR)
+        self.var_mini.set(True)
+        self.var_shot.set(True)
+        self.var_results.set(True)
+        if self._is_windows:
+            self.var_autostart.set(False)
+            self.var_tray_min.set(False)
+            self.var_tray_close.set(False)
+        self.lbl_defaults.configure(text="已恢复默认值，点「保存」生效")
 
     def _browse(self) -> None:
         path = filedialog.askdirectory(parent=self, title="选择图片目录",
@@ -7083,18 +7412,26 @@ class SettingsDialog(BaseDialog):
         if not self._apply_autostart():
             return
         # 在现有设置上改键，别把定时运行等其它配置冲掉
+        try:
+            ui_scale = int(str(self.var_ui_scale.get()).rstrip("%")) / 100
+        except ValueError:
+            ui_scale = 1.0
         self.result = dict(self._base_settings)
         self.result.update({
             "language": i18n.language_code(self.var_language.get()),
+            "ui_scale": ui_scale,
             "delay": int(number(self.var_delay.get(), 3)),
             "confidence": number(self.var_conf.get(), 0.9),
             "image_dir": directory,
             "show_mini_bar": bool(self.var_mini.get()),
             "shot_on_fail": bool(self.var_shot.get()),
             "save_results": bool(self.var_results.get()),
-            "autostart": bool(self.var_autostart.get()),
-            "tray_start_minimized": bool(self.var_tray_min.get()),
-            "tray_on_close": bool(self.var_tray_close.get()),
+            "autostart": (bool(self.var_autostart.get())
+                          if self._is_windows else False),
+            "tray_start_minimized": (bool(self.var_tray_min.get())
+                                     if self._is_windows else False),
+            "tray_on_close": (bool(self.var_tray_close.get())
+                              if self._is_windows else False),
         })
         self.destroy()
 
@@ -7103,7 +7440,10 @@ class SettingsDialog(BaseDialog):
 
         返回 False 表示失败（已弹错误框），调用方应保持对话框不关闭。
         程序被整体搬家后，已注册的命令会过期——重新注册一次即可自愈。
+        非 Windows 平台没有注册表 Run 项，直接跳过。
         """
+        if not self._is_windows:
+            return True
         want = bool(self.var_autostart.get())
         have = autostart.is_enabled()
         stale = (have

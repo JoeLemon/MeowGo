@@ -30,7 +30,10 @@ step "MeowGo 跨平台打包 [$(uname -s) / $(uname -m)]"
 请确认 build.sh 与 build.py 位于同一目录。"
 
 PY=""
-for cand in python3 python; do
+# macOS 优先用 Homebrew Python（通常带 Tk 8.6+）；Xcode 自带 3.9 是 Tk 8.5，
+# 在 macOS 26 上会出现整窗重绘。找不到时再回退到 PATH 里的 python3。
+for cand in /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 \
+            /usr/local/bin/python3 python3 python; do
     command -v "$cand" >/dev/null 2>&1 || continue
     ver="$("$cand" --version 2>&1 || true)"
     if [[ "$ver" =~ ^Python\ ([0-9]+)\.([0-9]+) ]]; then
@@ -40,7 +43,7 @@ for cand in python3 python; do
             PY="$cand"
             break
         fi
-        note "发现 $cand（Python $major.$minor），低于 ${MIN_MAJOR}.${MIN_MINOR}，已跳过"
+        note "发现 ${cand}（Python ${major}.${minor}），低于 ${MIN_MAJOR}.${MIN_MINOR}，已跳过"
     fi
 done
 
@@ -49,7 +52,7 @@ macOS：brew install python（或安装 python.org 官方包）
 Debian/Ubuntu：sudo apt install python3 python3-venv python3-tk"
 
 ver="$("$PY" --version 2>&1)"
-ok "使用解释器: $PY（$ver）"
+ok "使用解释器: ${PY}（${ver}）"
 
 # 转发全部参数，退出码原样带回
 exec "$PY" "$BUILD_PY" "$@"

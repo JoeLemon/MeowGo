@@ -15,7 +15,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from . import i18n, pixel_cat, theme
+from . import i18n, pixel_cat, platform_support, theme
 
 GRID = 24          # 图标设计网格
 SUPER = 4          # 超采样倍数
@@ -1186,6 +1186,8 @@ class ContextMenu(tk.Toplevel):
         self.items: list[MenuItem] = []
         for item in items:
             if isinstance(item, MenuItem):
+                # 快捷键提示按平台换算（macOS 显示 Cmd+Z 而不是 Ctrl+Z）
+                item.shortcut = platform_support.hotkey_label(item.shortcut)
                 self.items.append(item)
             elif isinstance(item, str):
                 self.items.append(MenuItem(item))
@@ -1493,13 +1495,15 @@ class RoundButton(tk.Canvas):
         self._enabled = True
         self._hover = False
         self._pressed = False
+        self._focused = False
 
         text_w = self.font.measure(self.text) if self.text else 0
         width = self.pad[0] * 2 + text_w
         if icon_name:
             width += self.icon_size + (self.gap if text else 0)
         super().__init__(master, width=width, height=self.height, bg=bg,
-                         highlightthickness=0, bd=0, cursor="hand2")
+                         highlightthickness=0, bd=0, cursor="hand2",
+                         takefocus=1)
         self._shape = round_rect(self, 0.5, 0.5, width - 0.5, self.height - 0.5,
                                  self.radius, fill=self._palette()[0], outline="")
         self._content: list[int] = []
@@ -1509,6 +1513,11 @@ class RoundButton(tk.Canvas):
         self.bind("<Leave>", self._on_leave)
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
+        # 键盘可达：Tab 聚焦、Enter / Space 触发，焦点态画一圈强调描边
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<Return>", self._on_key)
+        self.bind("<space>", self._on_key)
         self._tip = Tooltip(self, tooltip or self._mg_i18n_source)
         self._tip_auto = not tooltip
 
@@ -1521,7 +1530,12 @@ class RoundButton(tk.Canvas):
 
     def _rebuild(self) -> None:
         fill, fg, border = self._palette()
-        self.itemconfigure(self._shape, fill=fill, outline=border)
+        outline = border
+        width = 1
+        if self._focused and self._enabled:
+            outline, width = theme.token("ACCENT"), 2
+        self.itemconfigure(self._shape, fill=fill, outline=outline,
+                           width=width)
         # 纯图标 ghost 按钮静默时用次级文字色，悬停再回到主文字色：
         # 顶栏一排黑色图标会抢标题的注意力，弱化后层级更清楚。
         icon_fg = self.icon_color or fg
@@ -1557,9 +1571,26 @@ class RoundButton(tk.Canvas):
         self._pressed = False
         self._rebuild()
 
+    def _on_focus_in(self, _event=None) -> None:
+        self._focused = True
+        self._rebuild()
+
+    def _on_focus_out(self, _event=None) -> None:
+        self._focused = False
+        self._rebuild()
+
+    def _on_key(self, _event=None) -> str:
+        if self._enabled and self.command:
+            self.command()
+        return "break"
+
     def _on_press(self, _event=None) -> None:
         if not self._enabled:
             return
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
         self._pressed = True
         self._rebuild()
 
@@ -2667,8 +2698,10 @@ class LocalizedCombobox(SearchableCombo):
         self._display_var = tk.StringVar()
         self._syncing = False
         font = kwargs.pop("font", theme.FONT_NOTE)
-        font_size = font[1] if isinstance(font, (tuple, list)) and \
-            len(font) > 1 else theme.FONT_SIZE_NOTE
+        font_size = kwargs.pop("font_size", None)
+        if font_size is None:
+            font_size = (font[1] if isinstance(font, (tuple, list))
+                         and len(font) > 1 else theme.FONT_SIZE_NOTE)
         width = kwargs.pop("width", 18)
         kwargs.pop("state", None)
         kwargs.pop("textvariable", None)

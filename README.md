@@ -27,6 +27,36 @@ python start-app.py
 
 如果你已经在用旧版并且装好了 `pyautogui / xlrd / pillow / opencv-python`，可以跳过第 1 步。
 
+### macOS / Linux 说明
+
+macOS 首次运行请先在「系统设置 → 隐私与安全性」里给终端 / Python 开启：
+
+- **屏幕录制**：截图找图；
+- **辅助功能**：模拟点击和键盘输入。
+
+未授权时应用不会崩溃，只会在日志和状态栏提示，可从「帮助 → 检查 macOS 权限…」重新检查并打开设置。
+
+macOS 建议使用 Homebrew Python（Tk ≥ 8.6）：
+
+```bash
+brew install python@3.11 python-tk@3.11
+/opt/homebrew/bin/python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python start-app.py
+```
+
+Xcode 自带的 Python 3.9 使用 Tk 8.5，在 macOS 26 上会出现整窗持续重绘（CPU 占用高、内存上涨）；日志区已改用 Listbox，但运行图片步骤仍建议升级到 Tk 8.6+。
+
+仅 Windows 可用的功能：系统托盘、开机自启、系统计划任务、窗口操作、全局 F5/F9、UIA 控件点击、按键录制。其它平台会在菜单 / 设置里置灰或给出替代方案。
+
+### 新增流程能力
+
+- **循环**：`for_each`（按范围）、`while_var`（变量条件），循环内可用 `break` / `continue`，当前轮次写入 `{loop}` / `{loop_index}`；
+- **调用参数**：`调用执行组` 支持 `组名|键=值;键=值`，参数只在被调用组内生效；
+- **失败跳转**：高级选项里可设置失败后 `goto:组名`；
+- **常用原语**：文件操作、读取 JSON、正则提取、日期格式化、读取剪贴板、随机等待、小节标题；
+- **调试**：可从选中步骤开始运行，失败后从失败步骤继续；日志支持级别筛选与关键词搜索，运行报告包含变量快照与每步耗时。
+
 ## 界面说明
 
 ```

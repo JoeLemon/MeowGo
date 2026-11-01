@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import ast
 import csv
+import json
 import operator
 import os
 import random
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -18,12 +20,18 @@ from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
-from . import assets, theme
+from . import assets, platform_support, theme
 
 try:  # 窗口操作只在 Windows 上有意义；其它平台导入 engine 不应失败
     import ctypes
     import ctypes.wintypes as wt
 except ImportError:  # pragma: no cover - 非 Windows
+    ctypes = None  # type: ignore[assignment]
+    wt = None  # type: ignore[assignment]
+
+# macOS / Linux 也有 ctypes 与 ctypes.wintypes，但没有 WINFUNCTYPE/windll，
+# 统一按「不可用」处理，让窗口相关功能走各自的平台判断分支。
+if ctypes is not None and not hasattr(ctypes, "WINFUNCTYPE"):
     ctypes = None  # type: ignore[assignment]
     wt = None  # type: ignore[assignment]
 
@@ -76,6 +84,22 @@ STEP_TYPES = {
                False, ""),
     "http": ("HTTP 请求", "GET https://…|变量名；POST 可再加 |请求体",
              False, ""),
+    # ---- 循环与流程控制 ----
+    "for_each": ("循环：按范围", "起始,结束[,步长]|组名，如 1,5|处理",
+                 True, "轮次上限"),
+    "while_var": ("循环：变量条件", "变量名 运算符 值|组名，如 次数<5|重试",
+                  True, "最大轮次"),
+    "break": ("跳出循环", "留空", False, ""),
+    "continue": ("跳到下一轮", "留空", False, ""),
+    # ---- 文件 / 数据 / 文本 ----
+    "file": ("文件操作", "copy:源|目标 / move:源|目标 / delete:路径 / "
+             "mkdir:目录 / wait:路径|秒", False, ""),
+    "json": ("读取 JSON", "变量名|字段路径，如 data|user.name", False, ""),
+    "regex": ("正则提取", "变量名|表达式[|分组号]，如 结果|\\d+", False, ""),
+    "date": ("日期格式化", "变量名|格式，如 今天|%Y-%m-%d", False, ""),
+    "clipboard": ("读取剪贴板到变量", "变量名，如 文本", False, ""),
+    "random_wait": ("随机等待", "最小秒,最大秒，如 1,3", False, ""),
+    "section": ("小节标题", "标题文字，如 登录步骤", False, ""),
 }
 
 # Excel 中第 1 列使用的数字编号（1-9 与旧版 cmd.xls 完全兼容）
@@ -106,6 +130,17 @@ TYPE_TO_CODE = {
     "ui_click": 24.0,
     "if_var": 25.0,
     "http": 26.0,
+    "for_each": 27.0,
+    "while_var": 28.0,
+    "break": 29.0,
+    "continue": 30.0,
+    "file": 31.0,
+    "json": 32.0,
+    "regex": 33.0,
+    "date": 34.0,
+    "clipboard": 35.0,
+    "random_wait": 36.0,
+    "section": 37.0,
 }
 CODE_TO_TYPE = {v: k for k, v in TYPE_TO_CODE.items()}
 
@@ -118,7 +153,9 @@ REGION_STEP_TYPES = IMAGE_TYPES | TEXT_STEP_TYPES | {
     "if_image", "if_not_image", "if_else", "drag"}
 REPEAT_TYPES = {"click", "dblclick", "rightclick", "hotkey", "call",
                 "if_image", "if_not_image", "if_else", "if_window",
-                "click_xy"}
+                "click_xy", "for_each", "while_var"}
+# 循环步骤（内部可以执行 break / continue）
+LOOP_TYPES = {"for_each", "while_var"}
 # 界面上「截图替换」等图片相关操作适用的步骤类型
 IMAGE_STEP_TYPES = IMAGE_TYPES | {"if_image", "if_not_image", "if_else",
                                   "drag"}
@@ -225,7 +262,11 @@ def target_groups(step: "Step") -> list[str]:
     """这一步会调用哪些执行组（调用 / 条件满足或不满足时）。"""
     text = (step.content or "").strip()
     if step.type == "call":
-        return [text] if text else []
+        name = text.split("|", 1)[0].strip()
+        return [name] if name else []
+    if step.type in LOOP_TYPES:
+        parts = [p.strip() for p in text.split("|")]
+        return [parts[1]] if len(parts) > 1 and parts[1] else []
     if step.type in ("if_image", "if_not_image", "if_window"):
         parts = [p.strip() for p in text.split("|")]
         return [parts[1]] if len(parts) > 1 and parts[1] else []
@@ -238,7 +279,29 @@ def target_groups(step: "Step") -> list[str]:
     return []
 
 # 图片步骤超时后的处理方式（timeout > 0 时生效）
+# 除内置两项外，还支持 goto:<组名>：失败后跳到清理 / 重试组
 FAIL_ACTIONS = ("skip", "stop")
+
+
+def parse_on_fail(value) -> tuple[str, str]:
+    """把 on_fail 解析成 (动作, 目标组)；无法识别时返回空动作。"""
+    text = str(value or "").strip()
+    if not text:
+        return "skip", ""
+    if text in FAIL_ACTIONS:
+        return text, ""
+    if text.startswith("goto:"):
+        target = text[5:].strip()
+        return ("goto", target) if target else ("", "")
+    return "", ""
+
+
+def valid_on_fail(value) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    action, _target = parse_on_fail(text)
+    return action in FAIL_ACTIONS or action == "goto"
 # 文本输入方式：paste = 剪贴板粘贴（快，支持中文）；type = 逐字输入（兼容个别应用）
 INPUT_MODES = ("paste", "type")
 
@@ -294,6 +357,9 @@ def session_locked() -> bool:
     except Exception:  # noqa: BLE001 - 取不到状态时按可用处理
         return False
 MAX_CALL_DEPTH = 20
+# 循环运行没有自然的结束点；步数统计只保留最近一段，避免内存无限增长
+MAX_LOOP_STATS = 5000
+KEEP_LOOP_STATS = 2000
 HEADERS = ["指令类型", "内容", "重复次数(-1无限)", "备注"]
 GENERIC_SHEET_NAMES = {"sheet1", "sheet", "工作表1", "sheet2"}
 
@@ -366,6 +432,14 @@ def _box_iou(box1: tuple[int, int, int, int],
         return 0.0
     union = w1 * h1 + w2 * h2 - inter
     return inter / union if union else 0.0
+
+
+class LoopBreak(Exception):
+    """break 步骤：结束最近一层循环。"""
+
+
+class LoopContinue(Exception):
+    """continue 步骤：跳到最近一层循环的下一轮。"""
 
 
 class StepError(ValueError):
@@ -540,11 +614,31 @@ def _eval_expression(expr: str) -> str:
         result = _eval_arith(ast.parse(expr, mode="eval").body)
     except Exception:  # noqa: BLE001 — 求值失败按字符串原样保存
         return expr
-    if isinstance(result, float):
-        if result.is_integer():
-            return str(int(result))
-        return f"{result:.6f}".rstrip("0").rstrip(".")
-    return str(result)
+    return _plain_number(result)
+
+
+def _plain_number(value) -> str:
+    """把 1.0 显示成 1，把 1.234567 压到 6 位小数。"""
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+_JSON_TOKEN_RE = re.compile(r"[^.\[\]]+|\[(\d+)\]")
+
+
+def _json_path(data, path: str):
+    """按 user.name / items[0].id 这样的路径取 JSON 字段。"""
+    current = data
+    for token in _JSON_TOKEN_RE.finditer(str(path or "")):
+        index = token.group(1)
+        if index is not None:
+            current = current[int(index)]
+        else:
+            current = current[token.group(0)]
+    return current
 
 
 @dataclass
@@ -597,9 +691,13 @@ class Step:
                 errors.append(f"{where}：需要填写图片文件名")
         elif self.type in ("input", "hotkey", "time", "cmd", "call", "copy",
                            "set", "click_text", "wait_text", "assert_text",
-                           "ui_click", "if_var", "http"):
+                           "ui_click", "if_var", "http", "for_each",
+                           "while_var", "file", "json", "regex", "date",
+                           "clipboard", "random_wait", "section"):
             if not text:
                 errors.append(f"{where}：内容不能为空")
+        elif self.type in ("break", "continue") and text:
+            errors.append(f"{where}：跳出循环/跳到下一轮不需要填写内容")
         elif self.type == "wait":
             try:
                 if float(text) < 0:
@@ -631,8 +729,8 @@ class Step:
                     errors.append(f"{where}：等待超时不能为负数")
             except (TypeError, ValueError):
                 errors.append(f"{where}：等待超时必须是数字")
-            if self.on_fail and self.on_fail not in FAIL_ACTIONS:
-                errors.append(f"{where}：超时后处理只能是 skip 或 stop")
+        if self.on_fail and not valid_on_fail(self.on_fail):
+            errors.append(f"{where}：失败后处理只能是 skip、stop 或 goto:组名")
 
         if self.type == "if_image" and text:
             if "|" not in text:
@@ -691,6 +789,57 @@ class Step:
         elif self.type == "ui_click" and text:
             if not text.split("|", 1)[0].strip():
                 errors.append(f"{where}：控件名称不能为空")
+        elif self.type in LOOP_TYPES and text:
+            condition, sep, target = text.partition("|")
+            if not sep or not target.strip():
+                errors.append(f"{where}：循环要写成 条件|组名")
+            elif self.type == "for_each":
+                try:
+                    numbers = [float(p) for p in condition.split(",")]
+                except ValueError:
+                    numbers = []
+                if len(numbers) not in (2, 3):
+                    errors.append(f"{where}：范围要写成 起始,结束[,步长]")
+                elif len(numbers) == 3 and numbers[2] == 0:
+                    errors.append(f"{where}：循环步长不能为 0")
+            else:
+                try:
+                    _parse_var_condition(condition)
+                except StepError as exc:
+                    errors.append(f"{where}：{exc}")
+        elif self.type == "file" and text:
+            action = text.split(":", 1)[0].strip().lower()
+            if action not in ("copy", "move", "delete", "mkdir", "wait"):
+                errors.append(f"{where}：文件操作只支持 copy / move / "
+                              "delete / mkdir / wait")
+            elif action in ("copy", "move") and "|" not in text:
+                errors.append(f"{where}：复制/移动要写成 {action}:源|目标")
+            elif action == "wait" and not text.split(":", 1)[1].strip():
+                errors.append(f"{where}：等待文件要写成 wait:路径|秒")
+        elif self.type == "json" and text:
+            if "|" not in text or not text.split("|", 1)[0].strip():
+                errors.append(f"{where}：JSON 要写成 变量名|字段路径")
+        elif self.type == "regex" and text:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                errors.append(f"{where}：正则要写成 变量名|表达式[|分组号]")
+            else:
+                try:
+                    re.compile(parts[1])
+                except re.error as exc:
+                    errors.append(f"{where}：正则表达式无效：{exc}")
+        elif self.type == "date" and text:
+            if "|" not in text or not text.split("|", 1)[0].strip():
+                errors.append(f"{where}：日期格式化要写成 变量名|格式")
+        elif self.type == "random_wait" and text:
+            try:
+                low, high = [float(p) for p in text.split(",")[:2]]
+            except ValueError:
+                low, high = -1, -1
+            if low < 0 or high < 0:
+                errors.append(f"{where}：随机等待要写成 最小秒,最大秒")
+            elif low > high:
+                errors.append(f"{where}：随机等待的最小值不能大于最大值")
 
         if self.region and self.type in REGION_STEP_TYPES:
             if _parse_region(self.region) is None:
@@ -1746,6 +1895,11 @@ class Executor:
         parts = [k.strip() for k in keys.split(",") if k.strip()]
         if not parts:
             return
+        # macOS 上用户写的 ctrl / win 实际对应 Command
+        parts = [p.lower() for p in parts]
+        if platform_support.IS_MACOS:
+            parts = ["command" if p in ("ctrl", "control", "win") else p
+                     for p in parts]
         times = int(repeat) if repeat and repeat > 0 else 1
         if repeat == -1:
             while self._wait_ready():
@@ -1847,6 +2001,28 @@ class Executor:
             self._run_if_var(text, step, depth)
         elif step.type == "http":
             self._http_request(text)
+        elif step.type == "for_each":
+            self._run_range_loop(text, step, depth)
+        elif step.type == "while_var":
+            self._run_while_loop(text, step, depth)
+        elif step.type == "break":
+            raise LoopBreak()
+        elif step.type == "continue":
+            raise LoopContinue()
+        elif step.type == "file":
+            self._run_file(text, step)
+        elif step.type == "json":
+            self._run_json(text)
+        elif step.type == "regex":
+            self._run_regex(text)
+        elif step.type == "date":
+            self._run_date(text)
+        elif step.type == "clipboard":
+            self._read_clipboard(text)
+        elif step.type == "random_wait":
+            self._random_wait(text)
+        elif step.type == "section":
+            self._emit("info", f"── {text} ──")
         else:
             raise StepError(f"未知指令类型：{step.type}")
 
@@ -1873,7 +2049,7 @@ class Executor:
         except Exception:      # noqa: BLE001 - 剪贴板不可用时不影响主流程
             previous = ""
         pyperclip.copy(text)
-        pyautogui.hotkey("ctrl", "v")
+        pyautogui.hotkey(platform_support.MOD_KEY, "v")
         self._invalidate_screen()
         self._emit("info", f"输入：{text}")
         self._sleep(0.5)
@@ -2187,6 +2363,96 @@ class Executor:
         call_step = Step("call", target, step.repeat)
         self._call_group(call_step, depth)
 
+    # -- 循环 -------------------------------------------------------------
+    def _set_loop_vars(self, value, index: int) -> dict:
+        """写入 {loop} / {loop_index}，返回旧值（嵌套循环结束时还原）。"""
+        saved = {key: self.vars.get(key) for key in ("loop", "loop_index")}
+        self.vars["loop"] = _plain_number(value)
+        self.vars["loop_index"] = str(index)
+        return saved
+
+    def _restore_loop_vars(self, saved: dict) -> None:
+        for key, value in saved.items():
+            if value is None:
+                self.vars.pop(key, None)
+            else:
+                self.vars[key] = value
+
+    def _run_range_loop(self, text: str, step: Step, depth: int) -> None:
+        """按范围循环：起始,结束[,步长]|组名，每轮把当前值写进 {loop}。"""
+        spec, _, target = text.partition("|")
+        target = target.strip()
+        if not target:
+            raise StepError("循环要写成 起始,结束[,步长]|组名")
+        try:
+            numbers = [float(part) for part in spec.split(",")]
+        except ValueError:
+            raise StepError("循环范围必须是数字：起始,结束[,步长]") from None
+        if len(numbers) not in (2, 3):
+            raise StepError("循环范围要写成 起始,结束[,步长]")
+        start, end = numbers[0], numbers[1]
+        step_value = numbers[2] if len(numbers) == 3 else 1.0
+        if step_value == 0:
+            raise StepError("循环步长不能为 0")
+        limit = int(step.repeat) if step.repeat and step.repeat > 0 else 0
+        saved = self._set_loop_vars(start, 0)
+        rounds = 0
+        try:
+            value = start
+            while (value <= end) if step_value > 0 else (value >= end):
+                if limit and rounds >= limit:
+                    self._emit("warn", f"达到轮次上限 {limit}，循环结束")
+                    break
+                if not self._wait_ready():
+                    return
+                rounds += 1
+                self.vars["loop"] = _plain_number(value)
+                self.vars["loop_index"] = str(rounds)
+                self._emit("info", f"↻ 第 {rounds} 轮（loop={self.vars['loop']}）")
+                try:
+                    self._run_group(target, depth + 1)
+                except LoopContinue:
+                    pass
+                except LoopBreak:
+                    self._emit("info", "循环被 break 步骤结束")
+                    break
+                value += step_value
+        finally:
+            self._restore_loop_vars(saved)
+
+    def _run_while_loop(self, text: str, step: Step, depth: int) -> None:
+        """变量条件循环：条件|组名；repeat 是最大轮次（默认 1000）。"""
+        condition, _, target = text.partition("|")
+        target = target.strip()
+        if not target:
+            raise StepError("循环要写成 变量名 运算符 值|组名")
+        limit = int(step.repeat) if step.repeat and step.repeat > 0 else 1000
+        saved = self._set_loop_vars(1, 0)
+        rounds = 0
+        try:
+            while rounds < limit:
+                name, operator, expected = _parse_var_condition(condition)
+                actual = self.vars.get(name, "")
+                if not _compare_values(actual, operator, expected):
+                    break
+                if not self._wait_ready():
+                    return
+                rounds += 1
+                self.vars["loop"] = str(rounds)
+                self.vars["loop_index"] = str(rounds)
+                self._emit("info", f"↻ 第 {rounds} 轮（{name}={actual}）")
+                try:
+                    self._run_group(target, depth + 1)
+                except LoopContinue:
+                    pass
+                except LoopBreak:
+                    self._emit("info", "循环被 break 步骤结束")
+                    break
+            else:
+                self._emit("warn", f"达到最大轮次 {limit}，循环结束")
+        finally:
+            self._restore_loop_vars(saved)
+
     # -- 变量 -------------------------------------------------------------
     def _set_var(self, text: str) -> None:
         """设置变量：变量名=值。
@@ -2220,7 +2486,7 @@ class Executor:
         except Exception:      # noqa: BLE001 - 剪贴板不可用时不影响主流程
             previous = ""
         pyperclip.copy("")     # 清空：没选中文字时结果应为空而不是旧内容
-        pyautogui.hotkey("ctrl", "c")
+        pyautogui.hotkey(platform_support.MOD_KEY, "c")
         if not self._sleep(0.2):
             return             # 已停止
         try:
@@ -2239,6 +2505,158 @@ class Executor:
         self._row_var_keys.add(name)
         self._emit("info", f"已复制到变量 {name}：{value[:40]}"
                     + ("…" if len(value) > 40 else ""))
+
+    # -- 文件 / 数据 / 文本 -----------------------------------------------
+    def _value_of(self, name: str) -> str:
+        """先取运行期变量，其次取当前数据行的同名列。"""
+        if name in self.vars:
+            return str(self.vars[name])
+        value = self._row.get(name, "")
+        return "" if value is None else str(value)
+
+    def _run_file(self, text: str, step: Step) -> None:
+        """文件操作：copy / move / delete / mkdir / wait。"""
+        action, _, rest = text.partition(":")
+        action = action.strip().lower()
+        rest = rest.strip()
+        if action in ("copy", "move"):
+            source, _, target = rest.partition("|")
+            source, target = os.path.expanduser(source.strip()), \
+                os.path.expanduser(target.strip())
+            if not source or not target:
+                raise StepError(f"文件{action}要写成 {action}:源|目标")
+            if not os.path.exists(source):
+                raise StepError(f"源文件不存在：{source}")
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+            if action == "copy":
+                shutil.copy2(source, target)
+            else:
+                shutil.move(source, target)
+            self._emit("info", f"文件已{('复制' if action == 'copy' else '移动')}"
+                               f"：{source} → {target}")
+        elif action == "delete":
+            path = os.path.expanduser(rest)
+            if not path:
+                raise StepError("删除文件要写成 delete:路径")
+            if not os.path.exists(path):
+                self._step_ok = False
+                self._emit("warn", f"要删除的文件/目录不存在：{path}")
+                return
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            self._emit("info", f"已删除：{path}")
+        elif action == "mkdir":
+            path = os.path.expanduser(rest)
+            if not path:
+                raise StepError("建目录要写成 mkdir:目录")
+            os.makedirs(path, exist_ok=True)
+            self._emit("info", f"已创建目录：{path}")
+        elif action == "wait":
+            path, _, seconds = rest.partition("|")
+            path = os.path.expanduser(path.strip())
+            if not path:
+                raise StepError("等待文件要写成 wait:路径|秒")
+            try:
+                timeout = float(seconds.strip()) if seconds.strip() else \
+                    float(step.timeout or 10)
+            except ValueError:
+                raise StepError("等待文件的秒数必须是数字") from None
+            deadline = time.time() + max(0.0, timeout)
+            while not os.path.exists(path):
+                if not self._sleep(POLL_INTERVAL):
+                    return
+                if time.time() >= deadline:
+                    raise StepError(f"等待文件超时：{path}")
+            self._emit("info", f"文件已出现：{path}")
+        else:
+            raise StepError("文件操作只支持 copy / move / delete / mkdir / wait")
+
+    def _run_json(self, text: str) -> None:
+        """从变量里的 JSON 取字段：源变量|字段路径[|目标变量]。"""
+        parts = [part.strip() for part in text.split("|")]
+        source = parts[0]
+        path = parts[1] if len(parts) > 1 else ""
+        target = parts[2] if len(parts) > 2 and parts[2] else source
+        raw = self._value_of(source)
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            raise StepError(f"变量 {source} 不是合法 JSON：{exc}") from None
+        try:
+            value = _json_path(data, path)
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise StepError(f"JSON 字段不存在：{path}（{exc}）") from None
+        if isinstance(value, str):
+            self.vars[target] = value
+        else:
+            self.vars[target] = json.dumps(value, ensure_ascii=False)
+        self._row_var_keys.add(target)
+        self._emit("info", f"JSON 字段 {path} → {target}："
+                           f"{self.vars[target][:60]}")
+
+    def _run_regex(self, text: str) -> None:
+        """对变量做正则提取：变量名|表达式[|分组号]，结果写回同名变量。"""
+        parts = [part.strip() for part in text.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            raise StepError("正则要写成 变量名|表达式[|分组号]")
+        name, pattern = parts[0], parts[1]
+        group = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        source = self._value_of(name)
+        try:
+            match = re.search(pattern, source, re.MULTILINE)
+        except re.error as exc:
+            raise StepError(f"正则表达式无效：{exc}") from None
+        if not match:
+            self._step_ok = False
+            self._emit("warn", f"正则没有匹配到内容：{pattern}")
+            return
+        try:
+            value = match.group(group)
+        except IndexError:
+            raise StepError(f"正则没有第 {group} 个分组") from None
+        self.vars[name] = value
+        self._row_var_keys.add(name)
+        self._emit("info", f"正则提取 {name} = {value[:60]}")
+
+    def _run_date(self, text: str) -> None:
+        """日期格式化：变量名|格式，如 今天|%Y-%m-%d %H:%M。"""
+        name, _, fmt = text.partition("|")
+        name, fmt = name.strip(), fmt.strip()
+        if not name or not fmt:
+            raise StepError("日期格式化要写成 变量名|格式")
+        value = time.strftime(fmt, time.localtime())
+        self.vars[name] = value
+        self._row_var_keys.add(name)
+        self._emit("info", f"日期变量 {name} = {value}")
+
+    def _read_clipboard(self, text: str) -> None:
+        """读取剪贴板到变量。"""
+        import pyperclip
+
+        name = text.strip()
+        if not name:
+            raise StepError("读取剪贴板要写成 变量名")
+        try:
+            value = pyperclip.paste()
+        except Exception as exc:  # noqa: BLE001
+            raise StepError(f"读取剪贴板失败：{exc}") from None
+        self.vars[name] = value
+        self._row_var_keys.add(name)
+        self._emit("info", f"剪贴板 → {name}：{value[:60]}")
+
+    def _random_wait(self, text: str) -> None:
+        """随机等待：最小秒,最大秒。"""
+        try:
+            low, high = [float(part) for part in text.split(",")[:2]]
+        except ValueError:
+            raise StepError("随机等待要写成 最小秒,最大秒") from None
+        if low > high:
+            raise StepError("随机等待的最小值不能大于最大值")
+        seconds = random.uniform(max(0.0, low), max(0.0, high))
+        self._emit("info", f"随机等待 {seconds:.2f} 秒")
+        self._sleep(seconds)
 
     # -- 拖拽 -------------------------------------------------------------
     def _drag_point(self, text: str, step: Step, what: str):
@@ -2301,14 +2719,19 @@ class Executor:
             self._invalidate_screen()
 
     # -- 组执行 -----------------------------------------------------------
-    def _run_group(self, name: str, depth: int = 0) -> None:
+    def _run_group(self, name: str, depth: int = 0,
+                   start_index: int = 0) -> None:
         steps = self.groups.get(name)
         if steps is None:
             raise StepError(f"找不到执行组：{name}")
         if depth > MAX_CALL_DEPTH:
             raise StepError(f"调用层级过深（可能循环调用）：{name}")
-        self._emit("info", f"▶ 进入执行组「{name}」（{len(steps)} 步）")
-        for index, step in enumerate(steps):
+        if start_index:
+            self._emit("info", f"▶ 进入执行组「{name}」"
+                               f"（从第 {start_index + 1} 步开始）")
+        else:
+            self._emit("info", f"▶ 进入执行组「{name}」（{len(steps)} 步）")
+        for index, step in enumerate(steps[start_index:], start=start_index):
             if self.stop_event.is_set():
                 return
             if not self._wait_ready():
@@ -2328,18 +2751,23 @@ class Executor:
             started = time.time()
             failed = False
             fatal: Optional[StepError] = None
+            control: Optional[Exception] = None
             attempts = 0
             max_attempts = 1 + max(0, int(step.retry or 0))
             while True:
                 attempts += 1
                 failed = False
                 fatal = None
+                control = None
                 self._step_ok = True
                 try:
                     if step.type == "call":
                         self._call_group(step, depth)
                     else:
                         self.run_step(step, depth)
+                except (LoopBreak, LoopContinue) as exc:
+                    # break / continue 是控制流，不是失败：交回外层循环处理
+                    control = exc
                 except StepError as exc:
                     # 致命错误（如窗口等待超时）：记入统计后再向上抛，
                     # 保证报告里能看到是哪一步失败的
@@ -2357,8 +2785,9 @@ class Executor:
                         failed = True
                         self._emit("error", f"第 {index + 1} 步出错：{exc}")
 
-                ok = not failed and self._step_ok
-                if ok or fatal is not None or attempts >= max_attempts:
+                ok = control is not None or (not failed and self._step_ok)
+                if (ok or fatal is not None or control is not None
+                        or attempts >= max_attempts):
                     break
                 if self.stop_event.is_set() or not self._wait_ready():
                     break
@@ -2368,7 +2797,7 @@ class Executor:
                 if not self._sleep(step.retry_delay):
                     break
 
-            ok = not failed and self._step_ok
+            ok = control is not None or (not failed and self._step_ok)
             shot = ""
             # 调用组的失败截图由组内那一步负责，避免重复
             if (not ok and step.type != "call"
@@ -2387,6 +2816,15 @@ class Executor:
             if self.on_step_done:
                 self.on_step_done(name, index, step, ok)
             self._step_ok = True
+            if control is not None:
+                raise control
+            if not ok:
+                action, target = parse_on_fail(step.on_fail)
+                if action == "goto" and target:
+                    self._emit("warn", f"第 {index + 1} 步失败，"
+                                       f"跳转到「{target}」")
+                    self._run_group(target, depth + 1)
+                    fatal = None       # 已由跳转组接手，继续下一步
             if fatal is not None:
                 raise fatal
             if self.stop_event.is_set():
@@ -2412,20 +2850,48 @@ class Executor:
             return ""
 
     def _call_group(self, step: Step, depth: int) -> None:
-        target = (step.content or "").strip()
-        repeat = step.repeat or 0
-        if repeat == -1:
-            self._emit("info", f"↻ 无限调用「{target}」")
-            while self._wait_ready():
-                self._run_group(target, depth + 1)
-            return
-        times = int(repeat) if repeat and repeat > 0 else 1
-        for _ in range(times):
-            if not self._wait_ready():
+        """调用执行组，支持 组名|键=值;键=值 的参数（子组内局部生效）。"""
+        raw = (step.content or "").strip()
+        target, _, params = raw.partition("|")
+        target = target.strip()
+        if not target:
+            raise StepError("调用组要写成 组名 或 组名|键=值;键=值")
+        saved: dict[str, Optional[str]] = {}
+        if params.strip():
+            rendered = render_content(params, self._row, self._row_no,
+                                      self.vars)
+            for pair in re.split(r"[;；]", rendered):
+                pair = pair.strip()
+                if not pair:
+                    continue
+                key, sep, value = pair.partition("=")
+                if not sep or not key.strip():
+                    raise StepError("调用组参数要写成 键=值，用分号分隔")
+                key = key.strip()
+                saved[key] = self.vars.get(key)
+                self.vars[key] = value.strip()
+            self._emit("info", f"调用参数：{rendered}")
+        try:
+            repeat = step.repeat or 0
+            if repeat == -1:
+                self._emit("info", f"↻ 无限调用「{target}」")
+                while self._wait_ready():
+                    self._run_group(target, depth + 1)
                 return
-            self._run_group(target, depth + 1)
+            times = int(repeat) if repeat and repeat > 0 else 1
+            for _ in range(times):
+                if not self._wait_ready():
+                    return
+                self._run_group(target, depth + 1)
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    self.vars.pop(key, None)
+                else:
+                    self.vars[key] = value
 
-    def run(self, entry: Optional[str] = None, loop: bool = False) -> str:
+    def run(self, entry: Optional[str] = None, loop: bool = False,
+            start_step: int = 0) -> str:
         """阻塞执行。entry 为组名；None 表示按 order 顺序跑所有组。
 
         设置了 self.data 时，整个流程会对每一行数据完整执行一遍。
@@ -2473,12 +2939,16 @@ class Executor:
                         if self.stop_event.is_set():
                             self._emit("warn", "已停止")
                             return "stopped"
-                        self._run_group(name)
+                        self._run_group(
+                            name, start_index=(start_step if entry else 0))
                         if self.stop_event.is_set():
                             self._emit("warn", "已停止")
                             return "stopped"
                     if not loop:
                         break
+                    # 循环模式：只保留最近一段明细，防止 stats 无限增长
+                    if len(self.stats) > MAX_LOOP_STATS:
+                        self.stats = self.stats[-KEEP_LOOP_STATS:]
                     if not self._sleep(0.1):
                         self._emit("warn", "已停止")
                         return "stopped"
@@ -2491,6 +2961,11 @@ class Executor:
             if not loop:
                 self._record_row(self._row_no, stat_start, force_failed=True)
             return "stopped"
+        except (LoopBreak, LoopContinue):
+            self._emit("error", "break / continue 只能用在循环步骤里")
+            if not loop:
+                self._record_row(self._row_no, stat_start, force_failed=True)
+            return "error"
         except StepError as exc:
             self._emit("error", str(exc))
             if not loop:
@@ -2536,6 +3011,7 @@ class Executor:
             "seconds": round(total, 2),
             "rows": max((item["row"] for item in self.stats), default=0),
             "detail": list(self.stats),
+            "vars": dict(self.vars),
         }
 
 
@@ -2589,6 +3065,15 @@ def report_markdown(report: dict, result: str,
             else:
                 cells.append("")
         lines.append("| " + " | ".join(cells) + " |")
+    # 运行结束时变量快照（只记录最后一场运行的值，方便排查）
+    snapshot = report.get("vars") or {}
+    if snapshot:
+        lines += ["", "## 运行变量", ""]
+        for key in sorted(snapshot):
+            value = str(snapshot[key]).replace("\n", " ")
+            if len(value) > 200:
+                value = value[:200] + "…"
+            lines.append(f"- {key} = {value}")
     return "\n".join(lines) + "\n"
 
 
