@@ -17,21 +17,22 @@ import time
 import tkinter as tk
 import types
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from . import __version__ as APP_VERSION
 from . import assets, autostart, dialogs, i18n, logs, platform_support, theme, tray, uikit
 from .dialogs import BaseDialog, GroupDialog, ShortcutsDialog
 from .engine import (
     CONDITION_TYPES,
+    FAIL_ACTION_STEP_TYPES,
     IMAGE_STEP_TYPES,
-    IMAGE_TYPES,
+    LOOP_TYPES,
     REGION_STEP_TYPES,
     STEP_TYPES,
     TEXT_STEP_TYPES,
-    UIA_STEP_TYPES,
+    TIMEOUT_STEP_TYPES,
     Executor,
     Group,
     Project,
@@ -52,6 +53,15 @@ from .recorder import (
     KeyRecorder,
     MacroRecorder,
     vk_to_key_name,  # noqa: F401 - 保持旧的 gui.vk_to_key_name 导入路径
+)
+from .schedule import (
+    _valid_schedule_time,
+    make_schedule_task,
+    normalize_schedule_task,  # noqa: F401 - 兼容旧的 gui 导入路径
+    schedule_countdown_text,
+    schedule_day_text,
+    schedule_next_run,
+    schedule_tasks,
 )
 from .theme import (
     CONTROL_LG,
@@ -142,91 +152,6 @@ SCHEDULE_RESULT_TEXT = {
     "skipped": "已跳过",
 }
 
-
-def make_schedule_task(time_text: str = "09:00", group: str = "",
-                       enabled: bool = True) -> dict:
-    """生成一条新的定时任务（id 只用于区分同一分钟内的多条任务）。"""
-    return {
-        "id": f"task-{time.time_ns()}",
-        "enabled": bool(enabled),
-        "time": _valid_schedule_time(time_text),
-        "group": (group or "").strip(),
-    }
-
-
-def _valid_schedule_time(value) -> str:
-    """把各种输入夹成 HH:MM；非法值退回 09:00。"""
-    match = re.match(r"^\s*(\d{1,2})\s*:\s*(\d{1,2})\s*$", str(value or ""))
-    if not match:
-        return "09:00"
-    hour = min(23, max(0, int(match.group(1))))
-    minute = min(59, max(0, int(match.group(2))))
-    return f"{hour:02d}:{minute:02d}"
-
-
-def normalize_schedule_task(raw, index: int = 0) -> Optional[dict]:
-    """把磁盘上的任务字典补齐成可控结构；明显无效的条目返回 None。"""
-    if not isinstance(raw, dict):
-        return None
-    if not raw.get("time") and not raw.get("group") and not raw.get("enabled"):
-        return None
-    return {
-        "id": str(raw.get("id") or f"task-{index + 1}"),
-        "enabled": bool(raw.get("enabled", True)),
-        "time": _valid_schedule_time(raw.get("time", "09:00")),
-        "group": str(raw.get("group") or "").strip(),
-    }
-
-
-def schedule_tasks(settings: dict) -> list[dict]:
-    """读取定时任务列表，兼容旧版单条 schedule 配置。"""
-    raw = settings.get("schedules")
-    tasks: list[dict] = []
-    if isinstance(raw, list):
-        for index, item in enumerate(raw):
-            task = normalize_schedule_task(item, index)
-            if task is not None:
-                tasks.append(task)
-        return tasks
-    legacy = settings.get("schedule")
-    if isinstance(legacy, dict):
-        task = normalize_schedule_task(legacy, 0)
-        if task is not None:
-            task["id"] = "legacy"
-            tasks.append(task)
-    return tasks
-
-
-def schedule_next_run(task: dict, now: Optional[datetime] = None) -> datetime:
-    """下一次到点时间（每天一次；已过今天的点就算明天）。"""
-    now = now or datetime.now()
-    hour, minute = (int(part) for part in task.get("time", "09:00").split(":"))
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return target
-
-
-def schedule_countdown_text(target: datetime,
-                            now: Optional[datetime] = None) -> str:
-    """把剩余时间写成 02:13:45 / 1天 02:13:45。"""
-    now = now or datetime.now()
-    seconds = max(0, int((target - now).total_seconds()))
-    days, rest = divmod(seconds, 86400)
-    hours, rest = divmod(rest, 3600)
-    minutes, secs = divmod(rest, 60)
-    text = f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{days}{i18n.tr('天 ')}{text}" if days else text
-
-
-def schedule_day_text(target: datetime, now: Optional[datetime] = None) -> str:
-    now = now or datetime.now()
-    offset = (target.date() - now.date()).days
-    if offset == 0:
-        return i18n.tr("今天")
-    if offset == 1:
-        return i18n.tr("明天")
-    return i18n.tr("周" + "一二三四五六日"[target.weekday()])
 
 # 配色唯一来源是 rpa.theme；这里把用到的浅色令牌点名为模块常量，既有代码
 # 可直接写 BG / CARD / ACCENT ...。_apply_theme 切主题时由 _apply_palette
@@ -339,6 +264,10 @@ TYPE_ICONS = {
     "set": "text", "copy": "copy", "drag": "mouse",
     "click_text": "text", "wait_text": "clock", "assert_text": "check",
     "ui_click": "mouse", "if_var": "check", "http": "link",
+    "for_each": "redo", "while_var": "redo", "break": "close",
+    "continue": "next", "file": "folder_open", "json": "table",
+    "regex": "search", "date": "calendar", "clipboard": "copy",
+    "random_wait": "clock", "section": "note",
 }
 
 # 条件步骤里「图片 | 组名」两段式的类型（对话框用图形化双输入框）
@@ -347,7 +276,7 @@ PIPE_CONDITION_TYPES = ("if_image", "if_not_image", "if_window", "if_var")
 # 新增步骤对话框里「执行组」分类：这些类型会调用 / 进入其它执行组。
 # 其余类型统一归入「基础」，方便在下拉里按分组浏览。
 TYPE_GROUP_EXEC = {"call", "if_image", "if_not_image", "if_else",
-                   "if_window", "if_var"}
+                   "if_window", "if_var", "for_each", "while_var"}
 
 # 每种步骤类型的图标色调：遵循「墨黑为主、暖橙点睛、语义色克制」。
 # 鼠标 / 操作类用暖橙，输入类用信息蓝，等待类用警告黄，键盘类用成功绿，
@@ -365,6 +294,10 @@ TYPE_COLORS = {
     "if_window": DANGER, "window": DANGER,
     "click_text": INFO, "wait_text": WARNING, "assert_text": DANGER,
     "ui_click": ACCENT_STRONG, "if_var": DANGER, "http": SUCCESS,
+    "for_each": TEXT_WEAK, "while_var": TEXT_WEAK,
+    "break": TEXT_WEAK, "continue": TEXT_WEAK,
+    "file": MUTED, "json": INFO, "regex": INFO, "date": INFO,
+    "clipboard": MUTED, "random_wait": WARNING, "section": TEXT_WEAK,
 }
 TYPE_ICON_COLOR = MUTED
 # 深色下把类型图标提亮一档，避免深底看不清（_apply_theme 时整组替换）
@@ -386,6 +319,15 @@ TYPE_COLORS_DARK.update({
     "assert_text": DARK_PALETTE["DANGER"],
     "ui_click": DARK_PALETTE["ACCENT"], "if_var": DARK_PALETTE["DANGER"],
     "http": DARK_PALETTE["SUCCESS"],
+    "for_each": DARK_PALETTE["TEXT_WEAK"],
+    "while_var": DARK_PALETTE["TEXT_WEAK"],
+    "break": DARK_PALETTE["TEXT_WEAK"],
+    "continue": DARK_PALETTE["TEXT_WEAK"],
+    "file": DARK_PALETTE["MUTED"], "json": DARK_PALETTE["INFO"],
+    "regex": DARK_PALETTE["INFO"], "date": DARK_PALETTE["INFO"],
+    "clipboard": DARK_PALETTE["MUTED"],
+    "random_wait": DARK_PALETTE["WARNING"],
+    "section": DARK_PALETTE["TEXT_WEAK"],
 })
 
 # 步骤搜索框的占位文字（失焦为空时显示，不计入过滤条件）
@@ -404,8 +346,14 @@ def _is_search_placeholder(text: str) -> bool:
 def _make_no_activate(window) -> None:
     """让无边框窗口不抢焦点（拖拽落点指示线用；失败也只是普通置顶窗）。"""
     try:
-        hwnd = int(window.winfo_id())
+        hwnd = ctypes.wintypes.HWND(int(window.winfo_id()))
         user32 = ctypes.windll.user32
+        user32.GetWindowLongW.argtypes = [ctypes.wintypes.HWND,
+                                          ctypes.c_int]
+        user32.GetWindowLongW.restype = ctypes.c_long
+        user32.SetWindowLongW.argtypes = [ctypes.wintypes.HWND,
+                                          ctypes.c_int, ctypes.c_long]
+        user32.SetWindowLongW.restype = ctypes.c_long
         gwl_exstyle, no_activate = -20, 0x08000000
         user32.SetWindowLongW(hwnd, gwl_exstyle,
                               user32.GetWindowLongW(hwnd, gwl_exstyle)
@@ -445,7 +393,8 @@ def enable_tree_drag(tree, on_drop, show_line: bool = True) -> None:
     落到最后一行下方时直接排到末尾。
     on_drop(source_iid, target_iid) 在松开时调用。
     """
-    state = {"iid": None, "y": 0, "dragging": False, "line": None}
+    state: dict[str, Any] = {"iid": None, "y": 0, "dragging": False,
+                             "line": None}
 
     def hide_line() -> None:
         line, state["line"] = state["line"], None
@@ -754,7 +703,7 @@ class App(tk.Tk):
         # 步骤搜索：当前过滤词（空 = 不过滤）
         self._step_filter = ""
         # 图片预览：当前缩略图的 PhotoImage 与文件路径（防 GC / 打开目录用）
-        self._preview_photo = None
+        self._preview_photo: Any = None
         self._preview_path = ""
 
         # 日志筛选：原始条目留一份，切换级别 / 关键词时整体重绘
@@ -773,17 +722,20 @@ class App(tk.Tk):
         # 撤销 / 重做：存 (操作名, 变更前的 project 快照)
         self._undo_stack: list[tuple[str, dict]] = []
         self._redo_stack: list[tuple[str, dict]] = []
-        self._editor: Optional[tk.Widget] = None
+        self._editor: Optional[uikit.ReadonlySelect | uikit.TextField] = None
         # 定时运行：记录今天已经触发过的安排，避免同一天重复跑
         self._schedule_fired: set[str] = set()
         # 最近一次由定时任务启动的运行记录（结束时补结果）
         self._active_schedule: Optional[dict] = None
         self._schedule_pending = False
-        self._schedule_popover = None
+        self._schedule_popover: Optional[SchedulePopover] = None
         # 行内编辑时的按键录入（双击热键步骤的内容列）
-        self._inline_target: Optional[tk.Widget] = None
-        self._inline_record_btn: Optional[tk.Widget] = None
+        self._inline_target: Optional[uikit.ReadonlySelect | uikit.TextField] = None
+        self._inline_record_btn: Optional[uikit.RoundButton] = None
         self._inline_previous = ""
+        self._win_hwnd: Optional[int] = None
+        self._capture_callback: Optional[Callable[[str], None]] = None
+        self._capture_coords_callback: Optional[Callable[[int, int, int, int], None]] = None
         self._inline_recording = False
         self._inline_recorder = KeyRecorder(
             self,
@@ -935,7 +887,7 @@ class App(tk.Tk):
                     from PIL import Image, ImageTk
 
                     image = Image.open(path).convert("RGBA")
-                    image.thumbnail((size, size), Image.LANCZOS)
+                    image.thumbnail((size, size), Image.Resampling.LANCZOS)
                     photo = ImageTk.PhotoImage(image)
                     break
                 except Exception:  # noqa: BLE001
@@ -964,12 +916,16 @@ class App(tk.Tk):
                     width, src_height = image.size
                     target_h = max(1, self.s(height))
                     target_w = max(1, round(width * target_h / src_height))
-                    image = image.resize((target_w, target_h), Image.LANCZOS)
+                    image = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
                     if dark:
                         pixels = image.load()
+                        assert pixels is not None
                         for y in range(target_h):
                             for x in range(target_w):
-                                r, g, b, alpha = pixels[x, y]
+                                pixel = pixels[x, y]
+                                if not isinstance(pixel, tuple):
+                                    continue
+                                r, g, b, alpha = pixel
                                 if (alpha and max(r, g, b) < 170
                                         and max(r, g, b) - min(r, g, b) < 36):
                                     pixels[x, y] = (245, 242, 237, alpha)
@@ -988,7 +944,7 @@ class App(tk.Tk):
                 from PIL import Image, ImageTk
 
                 self._icon_image = ImageTk.PhotoImage(Image.open(icon))
-                self.iconphoto(True, self._icon_image)
+                self.iconphoto(True, self._icon_image)  # type: ignore[arg-type]
                 return
             except Exception:  # noqa: BLE001
                 continue
@@ -1158,6 +1114,9 @@ class App(tk.Tk):
         total = len(group.steps) if group else 0
         has = index is not None
         multi = len(rows) > 1
+        can_capture = (has and group is not None and index is not None
+                       and 0 <= index < len(group.steps)
+                       and group.steps[index].type in IMAGE_STEP_TYPES)
         return [
             MI(self._undo_label(), "undo", self.undo, "Ctrl+Z",
                enabled=bool(self._undo_stack)),
@@ -1182,7 +1141,7 @@ class App(tk.Tk):
             "-",
             MI("截取屏幕并替换图片…", "image",
                lambda: self.capture_region(self._apply_capture),
-               enabled=has and group.steps[index].type in IMAGE_STEP_TYPES),
+               enabled=can_capture),
             "-",
             MI("宏录制鼠标操作…", "mouse", self.open_macro_recorder,
                i18n.tr("仅 Windows") if not platform_support.available(
@@ -1747,7 +1706,7 @@ class App(tk.Tk):
 
     def _ui_state(self) -> dict:
         """收集界面状态（窗口大小、分隔条、列宽、日志展开），随配置一起保存。"""
-        state = {"log_visible": self.log_visible}
+        state: dict[str, Any] = {"log_visible": self.log_visible}
         try:
             state["window"] = self.geometry()
         except tk.TclError:
@@ -2389,7 +2348,7 @@ class App(tk.Tk):
 
             image = Image.open(path).convert("RGBA")
             width, height = image.size
-            image.thumbnail((self.s(132), self.s(60)), Image.LANCZOS)
+            image.thumbnail((self.s(132), self.s(60)), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image)
         except Exception:  # noqa: BLE001 — 读不动的图就当没有预览
             self.preview_frame.pack_forget()
@@ -2726,7 +2685,7 @@ class App(tk.Tk):
             return
 
         if field == "type":
-            widget: tk.Widget = uikit.ReadonlySelect(
+            widget: uikit.ReadonlySelect | uikit.TextField = uikit.ReadonlySelect(
                 self.step_tree,
                 values=[f"{i + 1} · {i18n.tr(info[0])}"
                         for i, info in enumerate(STEP_TYPES.values())],
@@ -2823,7 +2782,7 @@ class App(tk.Tk):
 
     def _inline_set_text(self, text: str) -> None:
         widget = self._inline_target
-        if widget is None:
+        if not isinstance(widget, uikit.TextField):
             return
         try:
             restore = str(widget.cget("state")) == "disabled"
@@ -2839,7 +2798,7 @@ class App(tk.Tk):
     def _inline_record_done(self, text: str) -> None:
         self._inline_set_text(text)
         widget = self._inline_target
-        if widget is not None:
+        if isinstance(widget, uikit.TextField):
             widget.focus_set()
             widget.select_range(0, "end")
         self._set_status(f"已录入热键：{text.replace(',', ' + ')}（回车确认）")
@@ -2975,7 +2934,9 @@ class App(tk.Tk):
         total = len(group.steps) if group else 0
         has = index is not None
         multi = len(rows) > 1
-        is_image = has and group.steps[index].type in IMAGE_STEP_TYPES
+        is_image = (has and group is not None and index is not None
+                    and 0 <= index < len(group.steps)
+                    and group.steps[index].type in IMAGE_STEP_TYPES)
         if multi:
             items = [
                 uikit.MenuItem(f"复制选中步骤（{len(rows)}）", "copy",
@@ -3002,9 +2963,10 @@ class App(tk.Tk):
                                enabled=is_image),
                 "-",
                 uikit.MenuItem("上移", "up", lambda: self.move_step(-1),
-                               enabled=has and index > 0),
+                               enabled=index is not None and index > 0),
                 uikit.MenuItem("下移", "down", lambda: self.move_step(1),
-                               enabled=has and index < total - 1),
+                               enabled=index is not None
+                               and index < total - 1),
                 "-",
                 uikit.MenuItem("删除步骤", "trash", self.delete_step,
                                "Delete", enabled=has, danger=True),
@@ -3566,9 +3528,9 @@ class App(tk.Tk):
         self.executor.order = ([entry] if entry else self.project.names())
         self.executor.confidence = float(self.settings.get("confidence", 0.9))
         # 显式设置（普通运行为 None）：避免上一次带数据运行影响这次
-        self.executor.data = data
+        self.executor.data = data  # type: ignore[assignment]  # None 表示清空
         self.executor.row_offset = int(row_offset or 0) if data else 0
-        self._data_path = data_path if data else ""
+        self._data_path = (data_path or "") if data else ""
         # 失败截图：默认开；设置里可以关掉（截图可能含敏感信息）
         self.executor.shot_dir = (SHOTS_DIR if self.settings.get(
             "shot_on_fail", True) else "")
@@ -4353,6 +4315,19 @@ class App(tk.Tk):
                 from ctypes import wintypes
 
                 user32 = ctypes.windll.user32
+                user32.RegisterHotKey.argtypes = [
+                    wintypes.HWND, ctypes.c_int, wintypes.UINT,
+                    wintypes.UINT]
+                user32.RegisterHotKey.restype = wintypes.BOOL
+                user32.UnregisterHotKey.argtypes = [
+                    wintypes.HWND, ctypes.c_int]
+                user32.UnregisterHotKey.restype = wintypes.BOOL
+                user32.GetMessageW.argtypes = [
+                    ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                    wintypes.UINT, wintypes.UINT]
+                user32.GetMessageW.restype = ctypes.c_int
+                user32.GetForegroundWindow.argtypes = []
+                user32.GetForegroundWindow.restype = wintypes.HWND
                 ok_stop = user32.RegisterHotKey(None, 1, 0, 0x78)   # VK_F9
                 ok_run = user32.RegisterHotKey(None, 2, 0, 0x74)    # VK_F5
                 if not ok_stop:
@@ -4587,9 +4562,11 @@ class App(tk.Tk):
         if self.tray is not None:
             if not self._tray_window_visible:
                 self._tray_show_window()     # 托盘要没了，别让窗口继续藏着
-            self.tray.stop()
-            self.tray = None
-            self._log("info", "托盘图标已关闭")
+            if self.tray.stop():
+                self.tray = None
+                self._log("info", "托盘图标已关闭")
+            else:
+                self._log("warn", "托盘图标退出超时，稍后保存设置时会再试一次")
 
     def _close_hides_to_tray(self) -> bool:
         return (self.tray is not None
@@ -4721,7 +4698,8 @@ class StepDialog(BaseDialog):
 
         # 条件步骤的第二段：要执行的组名（写成 图片|组名 的图形化版）
         self.var_group = tk.StringVar()
-        if editing.type in PIPE_CONDITION_TYPES and "|" in editing.content:
+        if (editing.type in PIPE_CONDITION_TYPES
+                or editing.type in LOOP_TYPES) and "|" in editing.content:
             image, _, group = editing.content.partition("|")
             self.var_content.set(image.strip())
             self.var_group.set(group.strip())
@@ -4941,14 +4919,15 @@ class StepDialog(BaseDialog):
             tooltip="选择失败后要执行的执行组")
         self.btn_fail_group.grid(row=0, column=1, padx=(parent.s(4), 0))
 
-        self._adv_timeout = [self.lbl_timeout, row_timeout]
-        self._adv_fail = [self.lbl_fail, self.combo_fail]
-        self._adv_fail_group = [self.lbl_fail_group, self.row_fail_group]
-        self._adv_image = [self.lbl_region, row_region]
-        self._adv_nth = [self.lbl_nth, self.spin_nth,
-                         self.lbl_nth_suffix, self.gray_box]
-        self._adv_match = [self.lbl_match, row_match]
-        self._adv_other = [self.lbl_other, row_other]
+        self._adv_timeout: list[tk.Widget] = [self.lbl_timeout, row_timeout]
+        self._adv_fail: list[tk.Widget] = [self.lbl_fail, self.combo_fail]
+        self._adv_fail_group: list[tk.Widget] = [self.lbl_fail_group,
+                                                  self.row_fail_group]
+        self._adv_image: list[tk.Widget] = [self.lbl_region, row_region]
+        self._adv_nth: list[tk.Widget] = [self.lbl_nth, self.spin_nth,
+                                          self.lbl_nth_suffix, self.gray_box]
+        self._adv_match: list[tk.Widget] = [self.lbl_match, row_match]
+        self._adv_other: list[tk.Widget] = [self.lbl_other, row_other]
 
         self.label("备注", 6)
         self.var_note = tk.StringVar(value=editing.note)
@@ -5133,6 +5112,9 @@ class StepDialog(BaseDialog):
             text += "\n截图、选图或拾取的结果将填入第一个空白段。"
         if key == "window":
             text += "\n窗口标题可只填写其中一部分，例如 activate:记事本。"
+        if key == "file":
+            text += ("\nwait 不写秒数时使用「等待」值（留空按 10 秒）；"
+                     "copy/move 的目标目录不存在会自动创建。")
         if key in ("click_xy", "move_xy"):
             text += "\n也可将鼠标移至目标位置，点击「拾取」自动填入坐标。"
         if key == "input":
@@ -5147,16 +5129,24 @@ class StepDialog(BaseDialog):
         if key == "http":
             text += ("\n要写成 方法 地址|变量名[|请求体]，如 "
                      "GET https://example.com|响应。\n响应内容会存入指定变量。")
+        if key == "for_each":
+            text += ("\n每轮把当前值写入 {loop}，轮次写入 {loop_index}；"
+                     "\n可把「重复次数」当作轮次上限（留空 = 不限制）。")
+        if key == "while_var":
+            text += ("\n每轮执行前重新判断条件；变量由循环内的步骤修改。"
+                     "\n「重复次数」是最大轮次（留空 = 1000）。")
+        if key in ("break", "continue"):
+            text += "\n只能放在循环调用的执行组里，直接放在循环外会报错。"
         if needs_image:
             text += ("\n截图或选图后，请点击「预览」核对内容。"
                      "\n若定位有误，可在「高级选项」中框选识别范围或指定第几个匹配项。")
         elif key in CONDITION_TYPES:
             text += "\n可在「高级选项」中设置最长等待时间。"
         self._show_hint(text)
-        is_image = key in IMAGE_TYPES
         is_hotkey = key == "hotkey"
         is_else = key == "if_else"
-        is_if = key in PIPE_CONDITION_TYPES or is_else
+        is_loop = key in LOOP_TYPES
+        is_if = key in PIPE_CONDITION_TYPES or is_else or is_loop
         is_xy = key in ("click_xy", "move_xy", "drag")
         has_actions = needs_image or is_hotkey or is_xy
         # 操作按钮单独一行：用不到的整个收起，把宽度让给内容输入框
@@ -5186,29 +5176,31 @@ class StepDialog(BaseDialog):
         self.btn_grab_xy.set_enabled(is_xy)
         self.btn_pick_group.set_enabled(is_if)
         if is_if:
-            self.lbl_group.configure(text="出现时执行" if is_else
-                                     else "满足后执行")
+            if is_else:
+                label = "出现时执行"
+            elif is_loop:
+                label = "每轮执行"
+            else:
+                label = "满足后执行"
+            self.lbl_group.configure(text=label)
             anchor = self.action_row if has_actions else self.entry
             self.group_box.pack(fill="x", after=anchor)
         else:
             self.group_box.pack_forget()
         # if_else 的第三段（没出现时执行的组）单独一行
+        widget: tk.Widget
         for widget in (self.label_group2, self.group2_entry,
                        self.btn_pick_group2):
             widget.grid() if is_else else widget.grid_remove()
-        # 等待策略：图片 / 拖拽 / 条件 / 命令 / 文字 / 控件（最多等几秒）
-        has_timeout = (is_image or key in ("drag", "cmd")
-                       or key in CONDITION_TYPES or key in TEXT_STEP_TYPES
-                       or key in UIA_STEP_TYPES)
+        # 等待策略：图片 / 拖拽 / 条件 / 命令 / 文字 / 控件 / 文件等待
+        has_timeout = key in TIMEOUT_STEP_TYPES
         for widget in self._adv_timeout:
             widget.grid() if has_timeout else widget.grid_remove()
         try:
             timeout = float(self.var_timeout.get() or 0)
         except ValueError:
             timeout = 0
-        show_fail = (is_image or key in ("drag", "cmd")
-                     or key in TEXT_STEP_TYPES or key in UIA_STEP_TYPES) \
-            and timeout > 0
+        show_fail = key in FAIL_ACTION_STEP_TYPES and timeout > 0
         for widget in self._adv_fail:
             widget.grid() if show_fail else widget.grid_remove()
         show_goto = self.var_on_fail.get() == "跳转到组…" and show_fail
@@ -5359,7 +5351,7 @@ class StepDialog(BaseDialog):
         if self._recorder.active:
             return                     # 录制中不提交（按钮本就禁用，双保险）
         key = self._type_key()
-        if key in PIPE_CONDITION_TYPES:
+        if key in PIPE_CONDITION_TYPES or key in LOOP_TYPES:
             content = f"{self.var_content.get().strip()}|" \
                       f"{self.var_group.get().strip()}"
         elif key == "if_else":
@@ -5376,9 +5368,7 @@ class StepDialog(BaseDialog):
             except ValueError:
                 messagebox.showwarning("格式错误", "重复次数必须是数字", parent=self)
                 return
-        has_timeout = (key in IMAGE_TYPES or key in ("drag", "cmd")
-                       or key in CONDITION_TYPES or key in TEXT_STEP_TYPES
-                       or key in UIA_STEP_TYPES)
+        has_timeout = key in TIMEOUT_STEP_TYPES
         if has_timeout:
             try:
                 step.timeout = float(self.var_timeout.get() or 0)
@@ -5438,11 +5428,21 @@ class StepDialog(BaseDialog):
         for name in names:
             menu.add_command(
                 label=name,
-                command=lambda n=name: (self.var_group.set(n),
-                                        self._show_hint(f"将执行组：{n}")))
+                command=self._group_picker(
+                    self.var_group, "将执行组", name))
         x = self.btn_pick_group.winfo_rootx()
         y = self.btn_pick_group.winfo_rooty() + self.btn_pick_group.winfo_height()
         menu.post(x, y)
+
+    def _choose_group(self, var: tk.StringVar, label: str, name: str) -> None:
+        var.set(name)
+        self._show_hint(f"{label}：{name}")
+
+    def _group_picker(self, var: tk.StringVar, label: str,
+                      name: str) -> Callable[[], None]:
+        def choose() -> None:
+            self._choose_group(var, label, name)
+        return choose
 
     def _pick_fail_group(self) -> None:
         """失败跳转：选择失败后要执行的组。"""
@@ -5454,8 +5454,8 @@ class StepDialog(BaseDialog):
         for name in names:
             menu.add_command(
                 label=name,
-                command=lambda n=name: (self.var_fail_group.set(n),
-                                        self._show_hint(f"失败后执行组：{n}")))
+                command=self._group_picker(
+                    self.var_fail_group, "失败后执行组", name))
         x = self.btn_fail_group.winfo_rootx()
         y = self.btn_fail_group.winfo_rooty() + self.btn_fail_group.winfo_height()
         menu.post(x, y)
@@ -5470,8 +5470,8 @@ class StepDialog(BaseDialog):
         for name in names:
             menu.add_command(
                 label=name,
-                command=lambda n=name: (self.var_group2.set(n),
-                                        self._show_hint(f"没出现时将执行组：{n}")))
+                command=self._group_picker(
+                    self.var_group2, "没出现时将执行组", name))
         x = self.btn_pick_group2.winfo_rootx()
         y = self.btn_pick_group2.winfo_rooty() \
             + self.btn_pick_group2.winfo_height()
@@ -5530,7 +5530,7 @@ class ImagePreviewDialog(BaseDialog):
         self.resizable(True, True)
         try:
             image = Image.open(path).convert("RGBA")
-            image.thumbnail(show, Image.LANCZOS)
+            image.thumbnail(show, Image.Resampling.LANCZOS)
             self._photo = ImageTk.PhotoImage(image)   # 保住引用，否则被 GC
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("预览失败", f"打不开图片：{exc}", parent=parent)
@@ -5729,8 +5729,11 @@ class ScheduleDialog(BaseDialog):
             group_label.grid(row=1, column=1, columnspan=2, sticky="ew",
                              padx=(app.s(4), app.s(6)),
                              pady=(0, app.s(6)))
+            def bind_select(_event: object, i: int = index) -> None:
+                self._select(i)
+
             for widget in (row, time_label, group_label):
-                widget.bind("<Button-1>", lambda _e, i=index: self._select(i))
+                widget.bind("<Button-1>", bind_select)
             self._task_rows.append({"row": row, "switch": switch,
                                     "time": time_label,
                                     "group": group_label})
@@ -6027,8 +6030,9 @@ class ScheduleDialog(BaseDialog):
     @staticmethod
     def _powershell(script: str, timeout: float = 20):
         """跑一段 PowerShell（用于读取任务状态 / 修改任务设置）。"""
-        kwargs = {"capture_output": True, "text": True, "errors": "replace",
-                  "timeout": timeout}
+        kwargs: dict[str, Any] = {
+            "capture_output": True, "text": True, "errors": "replace",
+            "timeout": timeout}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NO_WINDOW", 0)
@@ -6118,8 +6122,9 @@ class ScheduleDialog(BaseDialog):
             pass                       # 补跑设置失败不影响任务创建
 
     def _schtasks(self, args: list[str], timeout: float = 20):
-        kwargs = {"capture_output": True, "text": True, "errors": "replace",
-                  "timeout": timeout}
+        kwargs: dict[str, Any] = {
+            "capture_output": True, "text": True, "errors": "replace",
+            "timeout": timeout}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NO_WINDOW", 0)
@@ -6204,8 +6209,8 @@ class SchedulePopover(tk.Toplevel):
         self.overrideredirect(True)
         self._closed = False
         self._armed = False
-        self._after_id = None
-        self._poll_id = None
+        self._after_id: str | None = None
+        self._poll_id: str | None = None
         self._rows: list[dict] = []
         self._width = parent.s(330)
 
@@ -6386,6 +6391,7 @@ class SchedulePopover(tk.Toplevel):
             return
         try:
             get = ctypes.windll.user32.GetAsyncKeyState
+            get.restype = ctypes.c_short
             left, right = int(get(0x01)), int(get(0x02))
             edge = bool(left & 0x0001) or bool(right & 0x0001)
             down = bool(left & 0x8000) or bool(right & 0x8000)
@@ -6590,6 +6596,7 @@ class RunReportDialog(BaseDialog):
                 values.append(label)
                 if target:
                     self._links[(row_index, col_index)] = target
+            tags: tuple[str, ...]
             if "失败" in cells:
                 tags = ("failed",)
             elif row_index % 2:
@@ -7060,7 +7067,7 @@ class ImageManagerDialog(BaseDialog):
         name = self._selected()
         if not name:
             return
-        dialog = GroupDialog(self, f"重命名图片 {name}", name)
+        dialog = GroupDialog(self.app, f"重命名图片 {name}", name)
         new_name = dialog.wait()
         if not new_name or new_name == name:
             return

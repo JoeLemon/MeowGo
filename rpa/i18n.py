@@ -334,6 +334,7 @@ EN: dict[str, str] = {
     "把鼠标移到目标位置，点此倒计时拾取坐标":
         "Move the pointer to the target, then click to capture coordinates after a countdown",
     "满足后执行": "Run when matched",
+    "每轮执行": "Run each round",
     "选组": "Choose group",
     "选择条件满足时要执行的执行组": "Choose the group to run when the condition matches",
     "没出现时执行": "Run when not found",
@@ -855,6 +856,10 @@ EN: dict[str, str] = {
     "留空": "leave blank",
     "copy:源|目标 / move:源|目标 / delete:路径 / mkdir:目录 / wait:路径|秒":
         "copy:src|dst / move:src|dst / delete:path / mkdir:dir / wait:path|seconds",
+    "wait 不写秒数时使用「等待」值（留空按 10 秒）；"
+    "copy/move 的目标目录不存在会自动创建。":
+        "If wait has no seconds, the Wait value is used (blank = 10s); "
+        "copy/move creates a missing target directory automatically.",
     "变量名|字段路径，如 data|user.name":
         "variable|field path, e.g. data|user.name",
     "变量名|表达式[|分组号]，如 结果|\\d+":
@@ -941,6 +946,16 @@ EN: dict[str, str] = {
         "Write Method URL|variable[|body], e.g. GET https://example.com|response.",
     "响应内容会存入指定变量。":
         "The response body is stored in the specified variable.",
+    "每轮把当前值写入 {loop}，轮次写入 {loop_index}；":
+        "Each round stores the current value in {loop} and the round number in {loop_index};",
+    "可把「重复次数」当作轮次上限（留空 = 不限制）。":
+        "Set Repeat count as the maximum rounds (blank = unlimited).",
+    "每轮执行前重新判断条件；变量由循环内的步骤修改。":
+        "The condition is re-checked before each round; steps inside the loop update the variables.",
+    "「重复次数」是最大轮次（留空 = 1000）。":
+        "Repeat count is the maximum rounds (blank = 1000).",
+    "只能放在循环调用的执行组里，直接放在循环外会报错。":
+        "Only valid inside a group called by a loop; using it outside a loop raises an error.",
     "截图或选图后，请点击「预览」核对内容。":
         "After capturing or choosing an image, click Preview to verify it.",
     "若定位有误，可在「高级选项」中框选识别范围或指定第几个匹配项。":

@@ -27,7 +27,7 @@ class _KBDLLHOOKSTRUCT(ctypes.Structure):
                 ("dwExtraInfo", ctypes.c_void_p)]
 
 
-_HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int,
+_HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
                              ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
 
 _WH_KEYBOARD_LL = 13
@@ -70,6 +70,7 @@ def _win_user32() -> ctypes.WinDLL:
         user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
         user32.GetWindowThreadProcessId.argtypes = [
             ctypes.wintypes.HWND, ctypes.wintypes.LPDWORD]
+        user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
         user32.GetKeyboardLayout.argtypes = [ctypes.wintypes.DWORD]
         user32.GetKeyboardLayout.restype = ctypes.wintypes.HKL
         user32.MapVirtualKeyExW.argtypes = [ctypes.wintypes.UINT,
@@ -85,7 +86,8 @@ def _win_user32() -> ctypes.WinDLL:
         user32.CallNextHookEx.argtypes = [
             ctypes.wintypes.HHOOK, ctypes.c_int, ctypes.wintypes.WPARAM,
             ctypes.wintypes.LPARAM]
-        user32.CallNextHookEx.restype = ctypes.c_long
+        # LRESULT 在 64 位进程中是 8 字节；c_long 会把高位截掉。
+        user32.CallNextHookEx.restype = ctypes.c_ssize_t
         _user32 = user32
     return _user32
 
@@ -329,7 +331,7 @@ class _MSLLHOOKSTRUCT(ctypes.Structure):
                 ("dwExtraInfo", ctypes.c_void_p)]
 
 
-_MOUSEHOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int,
+_MOUSEHOOKPROC = ctypes.CFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
                                   ctypes.wintypes.WPARAM,
                                   ctypes.wintypes.LPARAM)
 

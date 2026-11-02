@@ -24,12 +24,6 @@ warn_unused_ignores = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-# 界面代码（Tk 控件频繁动态属性）暂未补齐类型，先不阻断合并；
-# 新增的逻辑模块（engine / logs / lock / recorder 等）必须通过检查。
-module = ["rpa.gui", "rpa.uikit"]
-ignore_errors = true
-
-[[tool.mypy.overrides]]
 # 运行时给 Tk 类打补丁做多语言，静态类型看不到这些动态属性。
 module = ["rpa.i18n"]
 disable_error_code = ["method-assign", "attr-defined", "call-overload", "misc", "call-arg"]
@@ -50,3 +44,4 @@ omit = ["rpa/__init__.py"]
 
 [tool.coverage.report]
 skip_empty = true
+fail_under = 70

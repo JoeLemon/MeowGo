@@ -1421,7 +1421,8 @@ def test_searchable_type_combo():
         dialog.combo._show_popup("执行组")
         values = {v for _, v in dialog.combo._rows if v}
         assert values == {"call", "if_image", "if_not_image", "if_else",
-                          "if_window", "if_var"}, values
+                          "if_window", "if_var", "for_each", "while_var"}, \
+            values
         dialog.combo._choose("if_else")
         app.update()
         assert dialog.var_type.get() == "条件：二选一"
@@ -1530,7 +1531,7 @@ def test_language_switch():
         app.update()
         try:
             assert step_dialog.combo_fail.cget("values") == (
-                "Skip this step", "Stop the run")
+                "Skip this step", "Stop the run", "Go to group…")
             step_dialog.var_on_fail.set("停止执行")
             assert step_dialog.combo_fail.get() == "Stop the run"
             assert step_dialog.combo_input.cget("values")[0].startswith(
@@ -1711,6 +1712,27 @@ def test_step_dialog_new_types():
             "if_else 的第二行把按钮顶出了对话框"
         dialog4.cancel()
 
+        # 循环步骤：范围 / 条件与「每轮执行」的组名分开填写，确定后拼回两段
+        dialog_loop = _RealStepDialog(app, app.project,
+                                      Step("click", "a.png"))
+        app.update()
+        dialog_loop.var_type.set("循环：按范围")
+        dialog_loop._sync()
+        app.update()
+        assert dialog_loop.group_entry.winfo_ismapped(), \
+            "循环步骤要能选每轮执行的组"
+        assert dialog_loop.lbl_group.cget("text") == "每轮执行"
+        dialog_loop.var_content.set("1,3")
+        dialog_loop.var_group.set("处理")
+        dialog_loop.ok()
+        assert dialog_loop.result.type == "for_each"
+        assert dialog_loop.result.content == "1,3|处理"
+        dialog_loop2 = _RealStepDialog(app, app.project, dialog_loop.result)
+        app.update()
+        assert dialog_loop2.var_content.get() == "1,3"
+        assert dialog_loop2.var_group.get() == "处理"
+        dialog_loop2.cancel()
+
         # drag：有等待超时（两端可能是图）、拾取坐标可用、分段填充
         dialog5 = _RealStepDialog(app, app.project, Step("click", "a.png"))
         app.update()
@@ -1743,6 +1765,22 @@ def test_step_dialog_new_types():
         dialog6.ok()
         assert dialog6.result.type == "set"
         assert dialog6.result.content == "订单号=ABC123"
+
+        # file wait：也显示等待超时，并能把超时值保存到步骤里
+        dialog_file = _RealStepDialog(app, app.project,
+                                      Step("click", "a.png"))
+        app.update()
+        dialog_file.var_type.set("文件操作")
+        dialog_file._sync()
+        dialog_file._toggle_advanced()
+        app.update()
+        assert dialog_file.spin_timeout.winfo_ismapped(), \
+            "等待文件要能设等待超时"
+        dialog_file.var_content.set("wait:some.txt|")
+        dialog_file.var_timeout.set("7")
+        dialog_file.ok()
+        assert dialog_file.result.type == "file"
+        assert dialog_file.result.timeout == 7
     finally:
         gui_module.StepDialog = fake
     mark("步骤对话框新类型")
@@ -2501,6 +2539,7 @@ def test_app_tray_lifecycle():
 
         def stop(self):
             self.stopped = True
+            return True
 
         def set_icon(self, dark):
             pass

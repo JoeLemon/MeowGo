@@ -420,11 +420,28 @@ Excel 直接打开不乱码）：保留原数据列，追加 `__行号 / __结�
 | 18 | 设置变量 | `变量名=值`，如 `订单号={index}` |
 | 19 | 复制选中文字到变量 | `变量名`，如 `订单号` |
 | 20 | 拖拽 | `起点\|终点`，各自是图片名或 `x,y`，如 `文件.png\|回收站.png` |
+| 21 | 点击文字 | 屏幕上要识别的文字，可加 `@x,y,宽,高`；依赖 OCR |
+| 22 | 等待文字出现 | 要等的文字，可加 `@x,y,宽,高`；依赖 OCR |
+| 23 | 断言文字出现 | 必须出现的文字；找不到视为失败；依赖 OCR |
+| 24 | 点击控件 | `名称` 或 `名称\|控件类型`；依赖 uiautomation |
+| 25 | 条件：变量比较则执行 | `变量名 运算符 值\|组名`，如 `次数<5\|重试` |
+| 26 | HTTP 请求 | `方法 地址\|变量名[\|请求体]`，如 `GET https://…\|响应` |
+| 27 | 循环：按范围 | `起始,结束[,步长]\|组名`，如 `1,5\|处理` |
+| 28 | 循环：变量条件 | `变量名 运算符 值\|组名`，如 `次数<5\|重试` |
+| 29 | 跳出循环 | 留空（只能在循环内使用） |
+| 30 | 跳到下一轮 | 留空（只能在循环内使用） |
+| 31 | 文件操作 | `copy:源\|目标` / `move:源\|目标` / `delete:路径` / `mkdir:目录` / `wait:路径\|秒` |
+| 32 | 读取 JSON | `变量名\|字段路径`，如 `data\|user.name` |
+| 33 | 正则提取 | `变量名\|表达式[\|分组号]`，如 `结果\|\d+` |
+| 34 | 日期格式化 | `变量名\|格式`，如 `今天\|%Y-%m-%d` |
+| 35 | 读取剪贴板到变量 | `变量名`，如 `文本` |
+| 36 | 随机等待 | `最小秒,最大秒`，如 `1,3` |
+| 37 | 小节标题 | 标题文字，如 `登录步骤`（只写日志，不执行操作） |
 
 热键注意事项（沿用旧版限制）：最多 10 个按键；单个数字键不识别（用 `num0` 这类写法）；
 英文逗号是分隔符，不能作为按键本身。
 
-> 新版类型（11~20）只在界面上用编号兼容 Excel 导入导出；`超时/超时后 /
+> 新版类型（11~37）只在界面上用编号兼容 Excel 导入导出；`超时/超时后 /
 > 识别范围 / 第几个 / 灰度 / 重试 / 输入方式` 这些高级参数只存在 JSON 里，
 > Excel 仍保持四列，旧表可以继续直接导入（高级参数走默认值）。
 
@@ -556,16 +573,30 @@ rpa/tray.py           系统托盘：通知区图标 / 右键菜单 / 气泡提�
 rpa/gui.py            界面：自绘菜单栏与菜单、组树、步骤列表、对话框、运行控制、
                       宏录制 / 定时运行 / 撤销重做 / 图片管家 / 备份恢复 /
                       深色主题 / 单步调试 / 批量操作 / 进度与搜索
+rpa/dialogs.py        对话框基类、执行组对话框与快捷键说明
+rpa/recorder.py       键鼠钩子、热键录入与宏录制
+rpa/schedule.py       定时文本解析、下次时间 / 倒计时计算与任务状态格式化
 rpa/uikit.py          矢量图标 + 圆角输入字段 / 按钮 / 表格 + 圆角菜单 + 动画开关 +
                       猫爪下拉选择 + 细滚动条等自绘组件
+rpa/theme.py          设计令牌、浅色 / 深色色板与字体尺寸
 rpa/i18n.py           简体中文 / English 文案、运行期 Tk 控件翻译与语言切换
 rpa/assets.py         区域截图与图片路径解析
+rpa/logs.py           崩溃兜底（crash.log）与运行日志落盘
+rpa/platform_support.py 平台能力表、修饰键换算与 macOS 权限自检
+rpa/ocr.py            OCR 文字定位（可选依赖 pytesseract）
+rpa/uia.py            UIA 控件定位（可选依赖 uiautomation）
+rpa/pixel_cat.py      空状态像素猫插画解码
 rpa/lock.py           跨进程单实例锁（防两个界面 / 两次自动运行抢鼠标）
-tests/test_engine.py  引擎单元测试（50 项，无需界面）
-tests/test_autostart.py 开机自启模块测试（3 项，注册表 Run 项，用专用测试键）
-tests/test_tray.py     托盘模块测试（31 项：图标生成 / 启停 / 菜单分发 / 会话钩子）
-tests/test_gui.py     界面冒烟测试（72 项，含中英文切换）+ 生成预览图
-tests/test_lock.py    单实例锁测试（1 项）
+tests/test_engine.py  引擎单元测试（无需界面）
+tests/test_engine_primitives.py 循环 / 文件 / JSON / 正则 / 日期等新原语测试
+tests/test_schedule.py 定时文本解析 / 倒计时 / 任务状态测试
+tests/test_recorder.py 键鼠钩子原型与热键名称转换测试
+tests/test_platform_optional.py OCR / UIA 可选依赖与平台能力测试
+tests/test_logs.py    崩溃兜底与运行日志测试
+tests/test_autostart.py 开机自启模块测试（注册表 Run 项，用专用测试键）
+tests/test_tray.py     托盘模块测试（图标生成 / 启停 / 菜单分发 / 会话钩子）
+tests/test_gui.py     界面冒烟测试（含中英文切换）+ 生成预览图
+tests/test_lock.py    单实例锁测试
 tests/test_e2e.py     真实屏幕端到端测试（识图点击/双击、输入、滚轮、拖拽、
                       条件分支、复制到变量、等图片出现再点）
 tests/probe_macro_e2e.py 宏录制真实钩子探针（手动跑：装真钩子 + 合成事件验证录制全链路）
@@ -643,13 +674,13 @@ python tests\verify_exe.py     :: 启动 exe、按进程 ID 找到窗口、截�
 ```bat
 pip install -r requirements-dev.txt
 
-python -m pytest -q                                 :: 全部用例（约 40 秒）
-python -m pytest -q -m "not slow"                   :: 跳过真实屏幕用例（CI 用）
-python -m pytest -q -m engine                       :: 只跑纯逻辑（引擎 / 日志 / 主题）
+python -m pytest -q -m "not slow"                   :: 日常 / CI 用例（当前 174 passed / 1 skipped，约 30 秒）
+python -m pytest -q                                 :: 全部用例（含 slow 真实屏幕用例，会移动鼠标）
+python -m pytest -q -m engine                       :: 只跑纯逻辑（引擎 / 调度 / 日志 / 主题）
 python -m pytest -q --cov=rpa --cov-report=term-missing
 
 python -m ruff check rpa start-app.py build.py      :: 语法 / 未定义名 / 未用导入 / 导入顺序
-python -m mypy                                      :: 类型检查（gui / uikit 暂缓）
+python -m mypy                                      :: 类型检查（20 个源文件，含 gui / uikit）
 ```
 
 真实屏幕 / 系统资源的探针不在默认用例里，需要时单独跑：
@@ -665,7 +696,8 @@ python tests\preview_menubar.py       :: 菜单栏下拉、点别处/别的程�
 ```
 
 CI（`.github/workflows/ci.yml`）在 Windows 上执行 ruff、mypy 和
-`pytest -m "not slow"`，覆盖率低于 65% 时失败。
+`pytest -m "not slow"`，覆盖率低于 70% 时失败；macOS 上执行 ruff、mypy 和
+`pytest -m engine`（runner 没有可交互桌面，不跑 GUI / 真实屏幕用例）。
 
 引擎测试还覆盖：图片后缀解析（候选 / 范围 / 第几个 / 偏移）、条件等待、
 失败重试与截图、命令退出码、输入方式与中文回退、数据断点续跑、结果回写、

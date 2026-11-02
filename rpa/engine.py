@@ -43,6 +43,50 @@ if ctypes is not None:  # pragma: no cover - 非 Windows
     _KEYEVENTF_KEYUP = 0x0002
     _WM_CLOSE = 0x0010
 
+_USER32_READY = False
+
+
+def _win_user32():
+    """返回声明过原型的 user32。
+
+    HWND 在 64 位进程中是 8 字节；不声明 argtypes 时 ctypes 会按 C int
+    截断，窗口操作会随机失败或把消息发到无效句柄。所有窗口相关调用统一
+    走这里，避免每个调用点重复设置。
+    """
+    global _USER32_READY
+    assert ctypes is not None and wt is not None
+    user32 = ctypes.windll.user32
+    if _USER32_READY:  # pragma: no branch - 只有首次调用做声明
+        return user32
+    user32.GetSystemMetrics.restype = ctypes.c_int
+    user32.OpenInputDesktop.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    user32.OpenInputDesktop.restype = wt.HANDLE
+    user32.CloseDesktop.argtypes = [wt.HANDLE]
+    user32.CloseDesktop.restype = wt.BOOL
+    user32.EnumWindows.argtypes = [_WNDENUMPROC, wt.LPARAM]
+    user32.EnumWindows.restype = wt.BOOL
+    user32.IsWindowVisible.argtypes = [wt.HWND]
+    user32.IsWindowVisible.restype = wt.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wt.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.IsIconic.argtypes = [wt.HWND]
+    user32.IsIconic.restype = wt.BOOL
+    user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wt.BOOL
+    user32.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD,
+                                   ctypes.c_size_t]
+    user32.keybd_event.restype = None
+    user32.SetForegroundWindow.argtypes = [wt.HWND]
+    user32.SetForegroundWindow.restype = wt.BOOL
+    user32.BringWindowToTop.argtypes = [wt.HWND]
+    user32.BringWindowToTop.restype = wt.BOOL
+    user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+    user32.PostMessageW.restype = wt.BOOL
+    _USER32_READY = True
+    return user32
+
 # ---------------------------------------------------------------------------
 # 步骤类型定义
 # ---------------------------------------------------------------------------
@@ -165,6 +209,12 @@ Point = namedtuple("Point", "x y")
 
 # 条件类步骤（内容里的 | 后面是执行组）
 CONDITION_TYPES = {"if_image", "if_not_image", "if_else", "if_window"}
+# 支持「最多等 N 秒」的步骤类型（文件 wait 也用步骤 timeout 作为兜底）
+TIMEOUT_STEP_TYPES = (IMAGE_TYPES | {"drag", "cmd", "file"}
+                      | CONDITION_TYPES | TEXT_STEP_TYPES | UIA_STEP_TYPES)
+# 界面上显示「失败后处理」的步骤类型（条件类不需要）
+FAIL_ACTION_STEP_TYPES = (IMAGE_TYPES | {"drag", "cmd", "file"}
+                          | TEXT_STEP_TYPES | UIA_STEP_TYPES)
 
 _OFFSET_RE = re.compile(r"\+\s*(-?\d+)\s*,\s*(-?\d+)\s*$")
 _NTH_RE = re.compile(r"#\s*(\d+)\s*$")
@@ -318,9 +368,7 @@ def virtual_screen_rect() -> tuple[int, int, int, int]:
     """整个虚拟桌面的 (left, top, width, height)；副屏在左侧时 left 为负。"""
     if os.name == "nt":
         try:
-            import ctypes
-
-            user32 = ctypes.windll.user32
+            user32 = _win_user32()
             left = user32.GetSystemMetrics(76)      # SM_XVIRTUALSCREEN
             top = user32.GetSystemMetrics(77)       # SM_YVIRTUALSCREEN
             width = user32.GetSystemMetrics(78)     # SM_CXVIRTUALSCREEN
@@ -346,9 +394,7 @@ def session_locked() -> bool:
     if os.name != "nt":
         return False
     try:
-        import ctypes
-
-        user32 = ctypes.windll.user32
+        user32 = _win_user32()
         desk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
         if not desk:
             return True
@@ -719,11 +765,8 @@ class Step:
             if any(k.isdigit() for k in keys):
                 errors.append(f"{where}：单个数字键无法识别，请改用 num0 这类写法")
 
-        # 图片类、拖拽、条件、命令、文字/控件都可以「最多等 N 秒」
-        if (self.type in IMAGE_TYPES or self.type in ("drag", "cmd")
-                or self.type in CONDITION_TYPES
-                or self.type in TEXT_STEP_TYPES
-                or self.type in UIA_STEP_TYPES) and self.timeout:
+        # 图片类、拖拽、条件、命令、文字/控件、文件等待都可以「最多等 N 秒」
+        if self.type in TIMEOUT_STEP_TYPES and self.timeout:
             try:
                 if float(self.timeout) < 0:
                     errors.append(f"{where}：等待超时不能为负数")
@@ -809,13 +852,24 @@ class Step:
                     errors.append(f"{where}：{exc}")
         elif self.type == "file" and text:
             action = text.split(":", 1)[0].strip().lower()
+            rest = text.split(":", 1)[1].strip() if ":" in text else ""
             if action not in ("copy", "move", "delete", "mkdir", "wait"):
                 errors.append(f"{where}：文件操作只支持 copy / move / "
                               "delete / mkdir / wait")
-            elif action in ("copy", "move") and "|" not in text:
+            elif action in ("copy", "move") and "|" not in rest:
                 errors.append(f"{where}：复制/移动要写成 {action}:源|目标")
-            elif action == "wait" and not text.split(":", 1)[1].strip():
-                errors.append(f"{where}：等待文件要写成 wait:路径|秒")
+            elif action in ("delete", "mkdir") and not rest:
+                errors.append(f"{where}：{action} 后面要填写路径")
+            elif action == "wait":
+                path, sep, seconds = rest.partition("|")
+                if not path.strip():
+                    errors.append(f"{where}：等待文件要写成 wait:路径|秒")
+                elif sep and seconds.strip():
+                    try:
+                        if float(seconds.strip()) < 0:
+                            errors.append(f"{where}：等待文件的秒数不能为负数")
+                    except ValueError:
+                        errors.append(f"{where}：等待文件的秒数必须是数字")
         elif self.type == "json" and text:
             if "|" not in text or not text.split("|", 1)[0].strip():
                 errors.append(f"{where}：JSON 要写成 变量名|字段路径")
@@ -823,23 +877,42 @@ class Step:
             parts = [p.strip() for p in text.split("|")]
             if len(parts) < 2 or not parts[0] or not parts[1]:
                 errors.append(f"{where}：正则要写成 变量名|表达式[|分组号]")
+            elif len(parts) > 3:
+                errors.append(f"{where}：正则最多写成 变量名|表达式|分组号")
             else:
                 try:
-                    re.compile(parts[1])
+                    pattern = re.compile(parts[1])
                 except re.error as exc:
                     errors.append(f"{where}：正则表达式无效：{exc}")
+                else:
+                    group_text = parts[2] if len(parts) > 2 else ""
+                    if group_text:
+                        try:
+                            group = int(group_text)
+                        except ValueError:
+                            errors.append(f"{where}：正则分组号必须是整数")
+                        else:
+                            if group < 0 or group > pattern.groups:
+                                errors.append(
+                                    f"{where}：正则只有 {pattern.groups} 个分组，"
+                                    f"分组号应在 0–{pattern.groups} 之间")
         elif self.type == "date" and text:
             if "|" not in text or not text.split("|", 1)[0].strip():
                 errors.append(f"{where}：日期格式化要写成 变量名|格式")
         elif self.type == "random_wait" and text:
-            try:
-                low, high = [float(p) for p in text.split(",")[:2]]
-            except ValueError:
-                low, high = -1, -1
-            if low < 0 or high < 0:
-                errors.append(f"{where}：随机等待要写成 最小秒,最大秒")
-            elif low > high:
-                errors.append(f"{where}：随机等待的最小值不能大于最大值")
+            parts = [p.strip() for p in text.split(",")]
+            if len(parts) != 2:
+                errors.append(f"{where}：随机等待要写成 最小秒,最大秒（两个数字）")
+            else:
+                try:
+                    low, high = (float(parts[0]), float(parts[1]))
+                except ValueError:
+                    errors.append(f"{where}：随机等待要写成 最小秒,最大秒")
+                else:
+                    if low < 0 or high < 0:
+                        errors.append(f"{where}：随机等待的秒数不能为负数")
+                    elif low > high:
+                        errors.append(f"{where}：随机等待的最小值不能大于最大值")
 
         if self.region and self.type in REGION_STEP_TYPES:
             if _parse_region(self.region) is None:
@@ -1436,10 +1509,11 @@ def _enum_windows() -> list[tuple[int, str]]:
         return []
     found: list[tuple[int, str]] = []
 
+    user32 = _win_user32()
+
     @_WNDENUMPROC
     def proc(hwnd, _lparam):
         # 回调里只做纯 Python 的标题读取与比较，绝不调外部函数
-        user32 = ctypes.windll.user32
         if not user32.IsWindowVisible(hwnd):
             return True
         length = user32.GetWindowTextLengthW(hwnd)
@@ -1452,7 +1526,7 @@ def _enum_windows() -> list[tuple[int, str]]:
             found.append((int(hwnd), title))
         return True
 
-    ctypes.windll.user32.EnumWindows(proc, 0)
+    user32.EnumWindows(proc, 0)
     return found
 
 
@@ -1469,7 +1543,7 @@ def _find_window(title: str) -> Optional[int]:
 
 def _force_foreground(hwnd: int) -> None:
     """把窗口带到前台。绕过系统对后台进程设置前台的限制。"""
-    user32 = ctypes.windll.user32
+    user32 = _win_user32()
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, _SW_RESTORE)
     user32.ShowWindow(hwnd, _SW_SHOW)
@@ -1511,7 +1585,7 @@ def _window_action(text: str) -> str:
         _force_foreground(hwnd)
         return f"已激活窗口「{title}」"
     if action == "close":
-        ctypes.windll.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+        _win_user32().PostMessageW(hwnd, _WM_CLOSE, 0, 0)
         return f"已关闭窗口「{title}」"
     raise StepError(f"未知窗口操作：{action}")
 
@@ -2601,8 +2675,16 @@ class Executor:
         parts = [part.strip() for part in text.split("|")]
         if len(parts) < 2 or not parts[0] or not parts[1]:
             raise StepError("正则要写成 变量名|表达式[|分组号]")
+        if len(parts) > 3:
+            raise StepError("正则最多写成 变量名|表达式|分组号")
         name, pattern = parts[0], parts[1]
-        group = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        group_text = parts[2] if len(parts) > 2 else ""
+        try:
+            group = int(group_text) if group_text else 0
+        except ValueError:
+            raise StepError("正则分组号必须是整数") from None
+        if group < 0:
+            raise StepError("正则分组号不能为负数")
         source = self._value_of(name)
         try:
             match = re.search(pattern, source, re.MULTILINE)
@@ -2648,13 +2730,18 @@ class Executor:
 
     def _random_wait(self, text: str) -> None:
         """随机等待：最小秒,最大秒。"""
+        parts = [part.strip() for part in text.split(",")]
+        if len(parts) != 2:
+            raise StepError("随机等待要写成 最小秒,最大秒（两个数字）")
         try:
-            low, high = [float(part) for part in text.split(",")[:2]]
+            low, high = float(parts[0]), float(parts[1])
         except ValueError:
             raise StepError("随机等待要写成 最小秒,最大秒") from None
+        if low < 0 or high < 0:
+            raise StepError("随机等待的秒数不能为负数")
         if low > high:
             raise StepError("随机等待的最小值不能大于最大值")
-        seconds = random.uniform(max(0.0, low), max(0.0, high))
+        seconds = random.uniform(low, high)
         self._emit("info", f"随机等待 {seconds:.2f} 秒")
         self._sleep(seconds)
 

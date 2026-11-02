@@ -11,7 +11,7 @@ import sys
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
-from typing import Optional
+from typing import Callable, Optional
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
@@ -43,7 +43,9 @@ def _mix(color: str, other: str, amount: float) -> str:
         a, b = _hex_to_rgb(color), _hex_to_rgb(other)
     except (ValueError, IndexError):
         return color        # Tk 颜色名（如 white）无法直接解析时放弃阴影
-    return _rgb_to_hex(tuple(a[i] + (b[i] - a[i]) * amount for i in range(3)))
+    mixed = tuple(int(round(a[i] + (b[i] - a[i]) * amount))
+                  for i in range(3))
+    return _rgb_to_hex((mixed[0], mixed[1], mixed[2]))
 
 
 class _ScaledDraw:
@@ -343,8 +345,8 @@ def _draw(name: str, draw: "_ScaledDraw", color, lw: int) -> None:
         draw.ellipse([11.5, 3.9, 16.0, 9.0], fill=c)
         draw.ellipse([15.3, 6.9, 20.6, 12.1], fill=c)
     elif name == "more":
-        for x in (6.5, 12.0, 17.5):
-            draw.ellipse([x - 1.35, 10.65, x + 1.35, 13.35], fill=c)
+        for dot_x in (6.5, 12.0, 17.5):
+            draw.ellipse([dot_x - 1.35, 10.65, dot_x + 1.35, 13.35], fill=c)
     else:  # 兜底：方块
         draw.rounded_rectangle([6, 6, 18, 18], radius=2, fill=c)
 
@@ -354,7 +356,7 @@ def icon_image(name: str, size: int, color: str) -> Image.Image:
     canvas = Image.new("RGBA", (GRID * SUPER, GRID * SUPER), (0, 0, 0, 0))
     draw = _ScaledDraw(ImageDraw.Draw(canvas), SUPER)
     _draw(name, draw, _hex_to_rgb(color), 2)
-    return canvas.resize((size, size), Image.LANCZOS)
+    return canvas.resize((size, size), Image.Resampling.LANCZOS)
 
 
 def icon(name: str, size: int, color: str) -> ImageTk.PhotoImage:
@@ -613,7 +615,7 @@ class TextField(tk.Frame):
                  show: str | None = None, state: str = "normal"):
         bg = bg or theme.token("CARD")
         super().__init__(master, bg=bg)
-        self.scale = scale
+        self._scale = scale
         self.bg = bg
         self.var = textvariable if textvariable is not None else tk.StringVar()
         pad = max(2, int(round(2 * scale))) if padding is None else padding
@@ -632,7 +634,7 @@ class TextField(tk.Frame):
         }
         if show is not None:
             entry_opts["show"] = show
-        self.entry = ttk.Entry(self.body, **entry_opts)
+        self.entry = ttk.Entry(self.body, **entry_opts)  # type: ignore[arg-type]
         self.entry.pack(side="left", fill="both", expand=True)
         self.entry.bind("<FocusIn>", self._on_focus_in, add="+")
         self.entry.bind("<FocusOut>", self._on_focus_out, add="+")
@@ -709,7 +711,7 @@ class TextField(tk.Frame):
         if kwargs:
             super().configure(**kwargs)
 
-    config = configure
+    config = configure  # type: ignore[assignment]
 
     def cget(self, key: str):
         if key in ("state", "foreground", "show", "font", "textvariable",
@@ -731,20 +733,29 @@ def style_window(window: tk.Misc, dark: bool | None = None,
         return
     try:
         import ctypes
+        from ctypes import wintypes
 
-        hwnd = int(window.winfo_id())
-        parent = ctypes.windll.user32.GetParent(hwnd)
+        hwnd = wintypes.HWND(int(window.winfo_id()))
+        user32 = ctypes.windll.user32
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+        parent = user32.GetParent(hwnd)
         if parent:
             hwnd = parent
         dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
         if rounded:
             pref = ctypes.c_int(2)          # DWMWCP_ROUND
-            dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref),
-                                      ctypes.sizeof(pref))
+            dwm.DwmSetWindowAttribute(
+                hwnd, 33, ctypes.cast(ctypes.byref(pref), ctypes.c_void_p),
+                ctypes.sizeof(pref))
         if dark is not None:
             flag = ctypes.c_int(1 if dark else 0)
-            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(flag),
-                                      ctypes.sizeof(flag))
+            dwm.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.cast(ctypes.byref(flag), ctypes.c_void_p),
+                ctypes.sizeof(flag))
     except Exception:  # noqa: BLE001 — 非 Win11 / 无 DWM 时保持系统默认
         pass
 
@@ -763,7 +774,7 @@ class SlimScrollbar(tk.Canvas):
         self.orient = "horizontal" if str(orient).startswith("h") else "vertical"
         self.command = command
         self.variant = variant
-        self.scale = scale
+        self._scale = scale
         self.thickness = max(8, int(round(width * scale)))
         if bg is None:
             try:
@@ -776,7 +787,7 @@ class SlimScrollbar(tk.Canvas):
         self._drag_offset = 0.0
         self._dragging = False
         self._hover = False
-        self._paw_photo = None
+        self._paw_photo: ImageTk.PhotoImage | None = None
         if self.orient == "vertical":
             super().__init__(master, width=self.thickness, bg=bg,
                              highlightthickness=0, bd=0, takefocus=0,
@@ -815,12 +826,12 @@ class SlimScrollbar(tk.Canvas):
             self.bg = str(bg)
         return super().configure(bg=self.bg, **kwargs)
 
-    config = configure
+    config = configure  # type: ignore[assignment]
 
     # -- 绘制 -------------------------------------------------------------
     def _extent(self) -> tuple[int, int, int, int]:
         """返回轨道可用区域与圆角。"""
-        pad = max(2, int(round(2 * self.scale)))
+        pad = max(2, int(round(2 * self._scale)))
         if self.orient == "vertical":
             w = max(1, self.winfo_width())
             h = max(1, self.winfo_height())
@@ -871,7 +882,7 @@ class SlimScrollbar(tk.Canvas):
             if bottom > y2:
                 top, bottom = y2 - thumb_len, y2
             cx = (x1 + x2) / 2
-            pad = max(1.0, 1.0 * self.scale)
+            pad = max(1.0, 1.0 * self._scale)
             half = max(2.0, (self.thickness - 2 * 2) / 2 - pad)
             fill = _mix(thumb, "#FFFFFF", 0.10) if self._hover else thumb
             round_rect(self, cx - half, top, cx + half, bottom,
@@ -891,7 +902,7 @@ class SlimScrollbar(tk.Canvas):
             if right > x2:
                 left, right = x2 - thumb_len, x2
             cy = (y1 + y2) / 2
-            pad = max(1.0, 1.0 * self.scale)
+            pad = max(1.0, 1.0 * self._scale)
             half = max(2.0, (self.thickness - 2 * 2) / 2 - pad)
             fill = _mix(thumb, "#FFFFFF", 0.10) if self._hover else thumb
             round_rect(self, left, cy - half, right, cy + half,
@@ -1128,6 +1139,7 @@ def desktop_bounds():
         import ctypes
 
         metric = ctypes.windll.user32.GetSystemMetrics
+        metric.restype = ctypes.c_int
         left, top = metric(76), metric(77)      # SM_X/YVIRTUALSCREEN
         width, height = metric(78), metric(79)  # SM_CX/CYVIRTUALSCREEN
         if width <= 0 or height <= 0:
@@ -1177,7 +1189,7 @@ class ContextMenu(tk.Toplevel):
         super().__init__(master)
         self.withdraw()
         self.overrideredirect(True)
-        self.scale = scale
+        self._scale = scale
 
         def s(value: float) -> int:
             return int(round(value * scale))
@@ -1218,9 +1230,9 @@ class ContextMenu(tk.Toplevel):
         self._press = -1
         self._closed = False
         self._armed = False
-        self._poll_id = None
-        self.on_close = None          # 关闭后的回调（菜单栏用它恢复按钮样式）
-        self.on_outside_right = None  # 在菜单外点右键时的回调（x_root, y_root）
+        self._poll_id: str | None = None
+        self.on_close: Callable[[], None] | None = None
+        self.on_outside_right: Callable[[int, int], None] | None = None
 
         bg = TRANSPARENT_KEY
         try:
@@ -1366,6 +1378,7 @@ class ContextMenu(tk.Toplevel):
             import ctypes
 
             get = ctypes.windll.user32.GetAsyncKeyState
+            get.restype = ctypes.c_short
             return (int(get(0x01)), int(get(0x02)))
         except Exception:  # noqa: BLE001
             return (0, 0)
@@ -1470,7 +1483,7 @@ class RoundButton(tk.Canvas):
 
     def __init__(self, master, text: str = "", icon_name: str | None = None,
                  command=None, kind: str = SOLID, scale: float = 1.0,
-                 height: int = theme.CONTROL_MD, pad: tuple[int, int] = (14, 14),
+                 height: int = theme.CONTROL_MD, pad: int | tuple[int, int] = (14, 14),
                  icon_size: int = theme.ICON_MD, radius: int = theme.RADIUS_M,
                  tooltip: str = "", font_size: int = theme.FONT_SIZE_NOTE,
                  bg: str | None = None, bold: bool = False,
@@ -1478,7 +1491,7 @@ class RoundButton(tk.Canvas):
         if isinstance(pad, (int, float)):
             pad = (pad, pad)
         bg = bg or theme.token("BG")
-        self.scale = scale
+        self._scale = scale
         self.kind = kind
         self.command = command
         self.icon_name = icon_name
@@ -1632,7 +1645,7 @@ class RoundButton(tk.Canvas):
         text_w = self.font.measure(self.text) if self.text else 0
         width = self.pad[0] * 2 + text_w
         if self.icon_name:
-            self.gap = int(round(6 * self.scale)) if self.text else 0
+            self.gap = int(round(6 * self._scale)) if self.text else 0
             width += self.icon_size + self.gap
         self.configure(width=width)
         self.coords(self._shape, *self._shape_points(width))
@@ -1678,7 +1691,7 @@ class Switch(tk.Canvas):
                  scale: float = 1.0, bg: str | None = None,
                  tooltip: str = ""):
         bg = bg or theme.token("CARD")
-        self.scale = scale
+        self._scale = scale
         self.variable = variable
         self.command = command
         self.track_w = max(46, int(round(48 * scale)))
@@ -1698,8 +1711,8 @@ class Switch(tk.Canvas):
         self._anim_after: str | None = None
         self._track_item: int | None = None
         self._thumb_item: int | None = None
-        self._track_key = None
-        self._thumb_key = None
+        self._track_key: tuple[object, ...] | None = None
+        self._thumb_key: tuple[object, ...] | None = None
         self._track_photo: ImageTk.PhotoImage | None = None
         self._thumb_photo: ImageTk.PhotoImage | None = None
         self._trace = variable.trace_add("write", self._on_variable)
@@ -1777,7 +1790,7 @@ class Switch(tk.Canvas):
         """生成带柔和阴影的轨道图（4 倍超采样后缩放）。"""
         cw = self.track_w + self._margin * 2
         ch = self.track_h + self._margin * 2
-        key = (cw, ch, round(self.scale, 3), spec["top"], spec["bottom"],
+        key = (cw, ch, round(self._scale, 3), spec["top"], spec["bottom"],
                spec["border"], spec["track_shadow"], spec["focus"],
                self._focused and self._enabled)
         if key == self._track_key and self._track_photo is not None:
@@ -1791,12 +1804,12 @@ class Switch(tk.Canvas):
         image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
         shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        offset = max(1, int(round(1.3 * self.scale * SUPER)))
+        offset = max(1, int(round(1.3 * self._scale * SUPER)))
         ImageDraw.Draw(shadow).rounded_rectangle(
             (box[0], box[1] + offset, box[2], box[3] + offset),
             radius=radius, fill=(0, 0, 0, spec["track_shadow"]))
         shadow = shadow.filter(ImageFilter.GaussianBlur(
-            max(1.0, 1.8 * self.scale * SUPER)))
+            max(1.0, 1.8 * self._scale * SUPER)))
         image = Image.alpha_composite(image, shadow)
 
         # 竖向轻微渐变：浅色轨道更接近参考图，开启态保持品牌橙色
@@ -1815,26 +1828,26 @@ class Switch(tk.Canvas):
         image = Image.alpha_composite(image, gradient)
 
         draw = ImageDraw.Draw(image)
-        width = max(1, int(round(1.0 * self.scale * SUPER)))
+        width = max(1, int(round(1.0 * self._scale * SUPER)))
         draw.rounded_rectangle(box, radius=radius,
                                outline=spec["border"], width=width)
         if self._focused and self._enabled:
-            gap = max(1, int(round(1.1 * self.scale * SUPER)))
-            ring = max(1, int(round(1.2 * self.scale * SUPER)))
+            gap = max(1, int(round(1.1 * self._scale * SUPER)))
+            ring = max(1, int(round(1.2 * self._scale * SUPER)))
             ring_box = (box[0] - gap, box[1] - gap,
                         box[2] + gap, box[3] + gap)
             draw.rounded_rectangle(
                 ring_box, radius=radius + gap,
                 outline=_hex_to_rgb(spec["focus"]) + (210,), width=ring)
 
-        image = image.resize((cw, ch), Image.LANCZOS)
+        image = image.resize((cw, ch), Image.Resampling.LANCZOS)
         self._track_key = key
         self._track_photo = ImageTk.PhotoImage(image)
         return self._track_photo
 
     def _thumb_image(self, spec: dict, knob: float) -> ImageTk.PhotoImage:
         """生成带投影和猫爪图案的滑块图。"""
-        shadow_pad = max(4, int(round(4 * self.scale)))
+        shadow_pad = max(4, int(round(4 * self._scale)))
         size = max(8, int(round((knob + shadow_pad) * 2)))
         key = (size, round(knob, 2), spec["thumb"], spec["thumb_border"],
                spec["paw"], spec["thumb_shadow"], spec["dark"],
@@ -1848,23 +1861,23 @@ class Switch(tk.Canvas):
         image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
         shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        offset = max(1, int(round(1.3 * self.scale * SUPER)))
+        offset = max(1, int(round(1.3 * self._scale * SUPER)))
         ImageDraw.Draw(shadow).ellipse(
             (center - r, center - r + offset,
              center + r, center + r + offset),
             fill=(0, 0, 0, spec["thumb_shadow"]))
         shadow = shadow.filter(ImageFilter.GaussianBlur(
-            max(1.0, 1.6 * self.scale * SUPER)))
+            max(1.0, 1.6 * self._scale * SUPER)))
         image = Image.alpha_composite(image, shadow)
 
         draw = ImageDraw.Draw(image)
-        border = max(1, int(round(0.8 * self.scale * SUPER)))
+        border = max(1, int(round(0.8 * self._scale * SUPER)))
         draw.ellipse((center - r, center - r, center + r, center + r),
                      fill=spec["thumb"], outline=spec["thumb_border"],
                      width=border)
         self._draw_paw(draw, center, center, r, spec["paw"])
 
-        image = image.resize((size, size), Image.LANCZOS)
+        image = image.resize((size, size), Image.Resampling.LANCZOS)
         self._thumb_key = key
         self._thumb_photo = ImageTk.PhotoImage(image)
         return self._thumb_photo
@@ -2056,7 +2069,7 @@ class _DropdownPanel(tk.Frame):
         super().__init__(host, bg=outer_bg, bd=0, highlightthickness=0)
         self.rows = list(rows)
         self.font = font
-        self.scale = scale
+        self._scale = scale
         self.outer_bg = outer_bg
         self.on_pick = on_pick
         self.on_hover = on_hover
@@ -2074,7 +2087,7 @@ class _DropdownPanel(tk.Frame):
                 (i for i, (_t, value) in enumerate(self.rows)
                  if value is not None), None)
         self._scrollbar = None
-        self._images = []
+        self._images: list[ImageTk.PhotoImage] = []
         self.canvas = tk.Canvas(self, bg=outer_bg, bd=0,
                                 highlightthickness=0, width=width,
                                 height=height)
@@ -2221,7 +2234,7 @@ class _DropdownPanel(tk.Frame):
             cy = y + self.row_h / 2
             if value is None:
                 self.canvas.create_text(
-                    self.pad + int(round(8 * self.scale)), cy,
+                    self.pad + int(round(8 * self._scale)), cy,
                     text=text, anchor="w", fill=theme.token("TEXT_WEAK"),
                     font=self.font)
                 continue
@@ -2232,17 +2245,17 @@ class _DropdownPanel(tk.Frame):
                         else theme.token("MENU_ROW_HOVER"))
                 round_rect(self.canvas, self.pad, y + 2, row_right,
                            y + self.row_h - 2,
-                           max(4, int(round(8 * self.scale))),
+                           max(4, int(round(8 * self._scale))),
                            fill=fill, outline="")
-            text_x = self.pad + int(round(12 * self.scale))
+            text_x = self.pad + int(round(12 * self._scale))
             if selected:
-                size = max(14, int(round(18 * self.scale)))
-                left = self.pad + int(round(8 * self.scale))
+                size = max(14, int(round(18 * self._scale)))
+                left = self.pad + int(round(8 * self._scale))
                 check = icon("check", max(9, int(round(size * 0.78))),
                              theme.token("TEXT"))
                 self._images.append(check)
                 self.canvas.create_image(left + size / 2, cy, image=check)
-                text_x = left + size + int(round(6 * self.scale))
+                text_x = left + size + int(round(6 * self._scale))
             color = theme.token("TEXT")
             self.canvas.create_text(text_x, cy, text=text, anchor="w",
                                     fill=color, font=self.font)
@@ -2269,7 +2282,7 @@ class SearchableCombo(tk.Frame):
                  readonly: bool = False, shell: bool = False):
         bg = bg or theme.token("CARD")
         super().__init__(master, bg=bg)
-        self.scale = scale
+        self._scale = scale
         self.bg = bg
         self.command = command
         self.readonly = bool(readonly)
@@ -2301,8 +2314,8 @@ class SearchableCombo(tk.Frame):
 
         # shell=True 时控件自带参考图同款圆角字段，供只读下拉和独立使用；
         # 步骤对话框保留原来的外层容器，避免重复描边。
-        self._shell = None
-        field_parent = self
+        self._shell: RoundedCard | None = None
+        field_parent: tk.Misc = self
         field_bg = bg
         field_pad = max(1, int(round(2 * scale)))
         if shell:
@@ -2334,11 +2347,11 @@ class SearchableCombo(tk.Frame):
         self.entry.bind("<FocusIn>", self._on_focus_in)
         self.entry.bind("<FocusOut>", self._on_focus_out)
         if self._shell is not None:
-            self.entry.bind(
+            self.entry.bind(  # type: ignore[call-overload]
                 "<FocusIn>",
                 lambda e: self._shell.set_colors(
                     border=theme.token("FIELD_FOCUS")), add="+")
-            self.entry.bind(
+            self.entry.bind(  # type: ignore[call-overload]
                 "<FocusOut>",
                 lambda e: self._shell.set_colors(
                     border=theme.token("BORDER")), add="+")
@@ -2407,9 +2420,9 @@ class SearchableCombo(tk.Frame):
         if kwargs:
             super().configure(**kwargs)
 
-    config = configure
+    config = configure  # type: ignore[assignment]
 
-    def focus_set(self) -> None:  # type: ignore[override]
+    def focus_set(self) -> None:
         self.entry.focus_set()
 
     def set_bg(self, color: str) -> None:
@@ -2472,10 +2485,10 @@ class SearchableCombo(tk.Frame):
         """计算下拉面板在宿主窗口内的位置与高度（放不下就向上展开）。"""
         host = self.winfo_toplevel()
         line = self.font.metrics("linespace")
-        row_h = max(int(round(30 * self.scale)),
-                    line + int(round(14 * self.scale)))
-        pad = max(6, int(round(6 * self.scale)))
-        width = max(self.winfo_width(), int(round(240 * self.scale)))
+        row_h = max(int(round(30 * self._scale)),
+                    line + int(round(14 * self._scale)))
+        pad = max(6, int(round(6 * self._scale)))
+        width = max(self.winfo_width(), int(round(240 * self._scale)))
         # 最多显示 6 行，其余滚动：保持参考图的轻量面板，也避免在较矮的
         # 步骤对话框里盖住下方备注输入框。
         desired = min(len(self._rows), 6) * row_h + pad * 2
@@ -2504,7 +2517,7 @@ class SearchableCombo(tk.Frame):
         x, y, width, height = self._popup_geometry()
         panel = _DropdownPanel(
             host, self._rows, self._value, x=x, y=y, width=width,
-            height=height, scale=self.scale, font=self.font,
+            height=height, scale=self._scale, font=self.font,
             outer_bg=self.bg, on_pick=self._choose)
         self._popup = panel
         self._panel = panel

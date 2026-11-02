@@ -104,11 +104,10 @@ def test_start_stop_cycle():
     started = icon.start(dark=False)
     check("托盘图标启动", started and icon.running)
     time.sleep(0.2)
-    icon.stop()
-    check("托盘图标移除", not icon.running)
-    # 重复 stop 不报错
-    icon.stop()
-    check("重复 stop 安全", True)
+    stopped = icon.stop()
+    check("托盘图标移除", stopped and not icon.running)
+    # 重复 stop 不报错，且仍视为已停止
+    check("重复 stop 安全", icon.stop() is True)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="系统托盘只支持 Windows")

@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from rpa import logs  # noqa: E402
 from rpa.logs import RunLog  # noqa: E402
 
 pytestmark = pytest.mark.engine
@@ -47,3 +48,43 @@ def test_run_log_unwritable_dir_does_not_raise():
         assert not run.opened
         run.write("info", "x")            # 没有文件也应静默
         run.close("summary")
+
+
+def test_run_log_after_close_is_silent(tmp_path):
+    run = RunLog(str(tmp_path), "")
+    assert run.opened
+    run.close()
+    assert not run.opened
+    run.write("info", "closed")
+    run.close("again")
+
+
+def test_app_dir_and_logger_names(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    expected = os.path.dirname(os.path.dirname(os.path.abspath(logs.__file__)))
+    assert logs.app_dir() == expected
+    assert logs.log_dir() == os.path.join(expected, "logs")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "MeowGo.exe"))
+    assert logs.app_dir() == str(tmp_path)
+    assert logs.get_logger("engine").name == "meowgo.engine"
+    assert logs.get_logger().name == "meowgo"
+
+
+def test_tk_handler_and_crash_dialog_are_safe(monkeypatch):
+    class Root:
+        report_callback_exception = None
+
+    root = Root()
+    logs.install_tk_handler(root)
+    assert callable(root.report_callback_exception)
+    # 没有 Tk 根窗口时弹窗直接放弃，不抛异常；同一错误只记录一次
+    import tkinter as tk
+
+    monkeypatch.setattr(tk, "_default_root", None, raising=False)
+    logs._dialog_shown.clear()
+    error = ValueError("boom")
+    logs._show_crash_dialog(ValueError, error)
+    logs._show_crash_dialog(ValueError, error)
+    assert ("ValueError", "boom") in logs._dialog_shown
+    logs._dialog_shown.clear()

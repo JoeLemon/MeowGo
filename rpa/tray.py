@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 from ctypes import wintypes
+from typing import Any
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -64,6 +65,10 @@ INFO_TITLE_MAX = 63             # szInfoTitle 64 个字符
 # ---------------------------------------------------------------- 结构
 IS_WINDOWS = os.name == "nt"
 
+# 非 Windows 下为 None；显式标注 Any，避免 mypy 把首次赋值的 WinDLL 当成固定类型。
+user32: Any
+shell32: Any
+kernel32: Any
 if IS_WINDOWS:
     user32 = ctypes.windll.user32
     shell32 = ctypes.windll.shell32
@@ -123,9 +128,11 @@ class WNDCLASSEXW(ctypes.Structure):
                 ("hIconSm", wintypes.HICON)]
 
 
+WNDPROC: Any
 if IS_WINDOWS:
-    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT,
-                                 wintypes.WPARAM, wintypes.LPARAM)
+    WNDPROC = ctypes.WINFUNCTYPE(wintypes.LPARAM, wintypes.HWND,
+                                 wintypes.UINT, wintypes.WPARAM,
+                                 wintypes.LPARAM)
 
     user32.CreateWindowExW.restype = wintypes.HWND
     user32.CreateWindowExW.argtypes = [
@@ -134,7 +141,14 @@ if IS_WINDOWS:
         wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
     user32.RegisterClassExW.restype = wintypes.ATOM
     user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
-    user32.DefWindowProcW.restype = ctypes.c_long
+    user32.UnregisterClassW.restype = wintypes.BOOL
+    user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR,
+                                        wintypes.HINSTANCE]
+    # 不声明 restype 时 ctypes 默认按 32 位 int 返回，模块句柄会被截断，
+    # RegisterClassExW 拿到无效 hInstance 会直接 access violation。
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    user32.DefWindowProcW.restype = wintypes.LPARAM
     user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
                                       wintypes.WPARAM, wintypes.LPARAM]
     user32.GetMessageW.restype = wintypes.BOOL
@@ -169,7 +183,7 @@ if IS_WINDOWS:
     user32.SetWindowLongPtrW.restype = ctypes.c_void_p
     user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int,
                                          ctypes.c_void_p]
-    user32.CallWindowProcW.restype = ctypes.c_long
+    user32.CallWindowProcW.restype = wintypes.LPARAM
     user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND,
                                        wintypes.UINT, wintypes.WPARAM,
                                        wintypes.LPARAM]
@@ -329,6 +343,10 @@ class TrayIcon:
         self._stopped = threading.Event()
         self._wndproc_ref: object = None
         self._balloon_click = None
+        # 每个实例用独立的窗口类名：托盘反复启停时若复用同名类，
+        # Windows 会沿用第一次注册的 wndproc，旧的 TrayIcon 被回收后
+        # 消息仍打进已释放的回调，进程会直接 access violation。
+        self._class_name = f"{WINDOW_CLASS}{id(self):x}"
 
     # ------------------------------------------------------------ 生命周期
     @property
@@ -343,7 +361,12 @@ class TrayIcon:
         if os.name != "nt":
             return False
         if self._thread:
-            return True
+            if self._thread.is_alive():
+                return True
+            # 上一次的消息循环已退出，但 stop() 没来得及清引用：允许重新启动。
+            self._thread = None
+            self._hwnd = None
+            self._hicon = None
         self._dark = bool(dark)
         path = icon_file(source, dark)
         icon = _load_hicon(path)
@@ -361,21 +384,42 @@ class TrayIcon:
             return False
         return True
 
-    def stop(self, wait: bool = True) -> None:
-        """移除托盘图标并结束消息循环。"""
-        if not self._thread:
-            return
+    def stop(self, wait: bool = True) -> bool:
+        """移除托盘图标并结束消息循环。
+
+        返回 True 表示已确认停止（可以丢弃本对象）。超时返回 False 并
+        保留线程 / 句柄状态，调用方可以稍后重试；不要误以为线程已经结束。
+        ``wait=False`` 只发出停止请求，因此也返回 False。
+        """
+        thread = self._thread
+        if not thread:
+            return True
+        if self._stopped.is_set():
+            if thread.is_alive():
+                thread.join(0.5)
+            if thread.is_alive():
+                return False
+            self._thread = None
+            self._hicon = None
+            self._hwnd = None
+            return True
 
         def job():
             self._delete_icon()
             user32.PostQuitMessage(0)
 
         self._post(job)
-        if wait:
-            self._stopped.wait(2.0)
+        if not wait:
+            return False
+        if not self._stopped.wait(2.0):
+            return False
+        thread.join(0.5)
+        if thread.is_alive():
+            return False
         self._thread = None
         self._hicon = None
         self._hwnd = None
+        return True
 
     # ------------------------------------------------------------ 图标更新
     def set_tip(self, text: str) -> None:
@@ -454,14 +498,14 @@ class TrayIcon:
         wndclass.cbSize = ctypes.sizeof(wndclass)
         wndclass.lpfnWndProc = ctypes.cast(proc, ctypes.c_void_p)
         wndclass.hInstance = kernel32.GetModuleHandleW(None)
-        wndclass.lpszClassName = WINDOW_CLASS
+        wndclass.lpszClassName = self._class_name
         if not user32.RegisterClassExW(ctypes.byref(wndclass)):
-            # 类已注册过（同进程第二次启动托盘）也没关系，继续建窗口
-            pass
+            return False
         hwnd = user32.CreateWindowExW(
-            0, WINDOW_CLASS, "MeowGo", 0, 0, 0, 0, 0,
+            0, self._class_name, "MeowGo", 0, 0, 0, 0, 0,
             ctypes.c_void_p(HWND_MESSAGE), None, wndclass.hInstance, None)
         if not hwnd:
+            user32.UnregisterClassW(self._class_name, wndclass.hInstance)
             return False
         self._wndproc_ref = proc       # 保活，防回调被 GC
         self._hwnd = hwnd
@@ -472,6 +516,9 @@ class TrayIcon:
             user32.DestroyWindow(self._hwnd)
         self._hwnd = None
         self._wndproc_ref = None
+        # 注销本实例的窗口类，允许下次 start() 重新注册新回调。
+        user32.UnregisterClassW(self._class_name,
+                                kernel32.GetModuleHandleW(None))
 
     def _cleanup(self) -> None:
         self._delete_icon()
