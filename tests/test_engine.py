@@ -346,6 +346,30 @@ def _executor(**kwargs):
     return executor
 
 
+def test_disabled_step_skipped_and_roundtrip():
+    step = Step("wait", "1", enabled=False)
+    assert step.copy().enabled is False
+    assert Step.from_dict(step.to_dict()).enabled is False
+    # 旧配置 / Excel 没有 enabled 字段时默认启用
+    assert Step.from_dict({"type": "wait", "content": "1"}).enabled is True
+
+    ex = _executor()
+    ex._sleep = lambda seconds: True
+    ex.groups = {"g": [Step("set", "x=1"),
+                       Step("set", "x=2", enabled=False),
+                       Step("set", "x=3")]}
+    assert ex.run("g") == "finished"
+    assert ex.vars["x"] == "3"
+    assert any("已禁用" in msg for _level, msg in ex.logs)
+
+
+def test_disabled_step_ignored_by_validation():
+    # 禁用步骤即使配置不完整、调用了不存在的组，也不应阻止运行
+    groups = [Group("A", [Step("click", "", enabled=False),
+                          Step("call", "不存在的组", enabled=False)])]
+    assert validate_project(groups) == []
+
+
 def test_executor_call_group():
     logs = []
     ex = Executor()
@@ -1119,6 +1143,66 @@ def test_locate_region_nth_grayscale_offset():
         assert ex._locate("missing.png;good.png") is not None
 
 
+def _scaled_screen(tmp_path, factor, copies=1):
+    """生成「模板 + 缩放后的屏幕」，模拟 DPI / 显示缩放变化。"""
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+
+    rng = np.random.default_rng(7)
+    base = rng.integers(0, 256, (400, 600, 3), dtype=np.uint8)
+    template = base[120:180, 200:320].copy()
+    if copies > 1:
+        base[220:280, 350:470] = template
+    path = tmp_path / "tpl.png"
+    cv2.imwrite(str(path), template)
+    screen = cv2.resize(base, None, fx=factor, fy=factor,
+                        interpolation=cv2.INTER_LINEAR)
+    return path, screen, rng
+
+
+def test_locate_auto_adapts_scale(tmp_path):
+    """模板原尺寸匹配失败时，自动按常见 DPI 比例缩放再找。"""
+    for factor in (1.25, 0.8, 1.5):
+        path, screen, _rng = _scaled_screen(tmp_path, factor)
+        ex = Executor(confidence=0.9)
+        ex._grab_screen = lambda s=screen: (s, (0, 0))
+        point = ex._locate_one(str(path), None, 0, False)
+        assert point is not None, f"缩放 {factor} 应能找到"
+        assert abs(point.x - 260 * factor) < 2
+        assert abs(point.y - 150 * factor) < 2
+        # 验证成功的比例会被记住，后续轮询不再做完整扫描
+        mtime = os.path.getmtime(path)
+        assert ex._scale_hints[(str(path), mtime)] == pytest.approx(
+            factor, abs=0.01)
+
+
+def test_locate_multi_scale_nth(tmp_path):
+    """缩放后仍要支持「第 N 个」：两处相同图标按位置排序。"""
+    path, screen, _rng = _scaled_screen(tmp_path, 1.25, copies=2)
+    ex = Executor(confidence=0.9)
+    ex._grab_screen = lambda: (screen, (0, 0))
+    first = ex._locate_one(str(path), None, 0, False)
+    second = ex._locate_one(str(path), None, 1, False)
+    assert first is not None and second is not None
+    assert abs(first.x - 325) < 2 and abs(first.y - 187.5) < 2
+    assert abs(second.x - 512.5) < 2 and abs(second.y - 312.5) < 2
+    assert ex._locate_one(str(path), None, 2, False) is None
+
+
+def test_find_images_auto_adapts_scale(tmp_path, monkeypatch):
+    """界面「检测图片」也要能适配缩放，而不是只有执行时能找。"""
+    from rpa import engine as engine_module
+
+    path, screen, _rng = _scaled_screen(tmp_path, 1.25)
+    monkeypatch.setattr(engine_module, "capture_screen",
+                        lambda: (screen, (0, 0)))
+    items = engine_module.find_images(path.name, str(tmp_path))
+    assert items[0]["missing"] is False
+    assert len(items[0]["points"]) == 1
+    x, y = items[0]["points"][0]
+    assert abs(x - 325) < 2 and abs(y - 188) < 2
+
+
 def test_condition_wait_and_not_image():
     """条件步骤支持「最多等 N 秒」，if_not_image 没图时执行分支。"""
     calls = []
@@ -1544,6 +1628,35 @@ def test_screen_helpers_smoke():
     rect = virtual_screen_rect()
     assert len(rect) == 4 and all(isinstance(value, int) for value in rect)
     assert isinstance(session_locked(), bool)
+
+
+def test_debug_snapshot_copies_current_state():
+    """单步调试快照：变量 / 数据行 / 行号，且为浅拷贝，后续改动不影响。"""
+    ex = _executor()
+    ex.vars = {"文本": "答案42"}
+    ex._row = {"名字": "张三"}
+    ex._row_no = 3
+
+    snap = ex.debug_snapshot()
+    assert snap == {"vars": {"文本": "答案42"},
+                    "row": {"名字": "张三"}, "row_no": 3}
+
+    # 快照之后继续改运行状态：已取走的内容应保持不变
+    ex.vars["文本"] = "改成别的"
+    ex._row["名字"] = "李四"
+    ex._row_no = 4
+    assert snap["vars"] == {"文本": "答案42"}
+    assert snap["row"] == {"名字": "张三"}
+    assert snap["row_no"] == 3
+
+
+def test_window_title_safe_lookup():
+    """窗口标题查询：None / 不存在的 hwnd 都安全返回空串。"""
+    from rpa.engine import window_title
+
+    assert window_title(None) == ""
+    assert window_title(0) == ""
+    assert window_title(0x00010000) == ""
 
 
 def main():

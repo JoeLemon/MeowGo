@@ -859,6 +859,43 @@ def test_schedule_multiple_tasks_and_history():
     mark("多定时任务与执行历史")
 
 
+def test_toggle_steps_enabled():
+    """步骤可以临时禁用：列表灰显 + 运行时跳过。"""
+    app.project.groups = [Group("禁用测试", [Step("wait", "1"),
+                                             Step("wait", "2")])]
+    app.group_index = 0
+    app._refresh_all()
+    app._undo_stack.clear()
+    app._redo_stack.clear()
+
+    app.step_tree.selection_set("0")
+    app.toggle_steps_enabled()
+    assert app.project.groups[0].steps[0].enabled is False
+    assert app.project.groups[0].steps[1].enabled is True
+    assert "⏸" in app.step_tree.item("0", "values")[1]
+    assert "disabled" in app.step_tree.item("0", "tags")
+
+    app.step_tree.selection_set("0")
+    app.toggle_steps_enabled()
+    assert app.project.groups[0].steps[0].enabled is True
+    assert "⏸" not in app.step_tree.item("0", "values")[1]
+    app._undo_stack.clear()
+    app._redo_stack.clear()
+
+
+def test_step_dialog_keeps_disabled_state():
+    dialog = _RealStepDialog(
+        app, app.project, Step("wait", "1", enabled=False))
+    try:
+        assert dialog.var_enabled.get() is False
+        dialog.ok()
+        assert dialog.result is not None
+        assert dialog.result.enabled is False
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
 def test_editing_features():
     """撤销重做、拖拽移动、图片管家、配置备份。"""
     import json
@@ -2285,7 +2322,7 @@ def test_debug_confirm_roundtrip():
     real_dialog = gui_module.DebugStepDialog
 
     class _Fake:
-        def __init__(self, parent, name, index, step):
+        def __init__(self, parent, name, index, step, **_kwargs):
             self.result = "run"
 
         def wait(self):
@@ -2354,7 +2391,7 @@ def test_debug_flow_feedback():
     class _Continue:
         result = "continue"
 
-        def __init__(self, parent, name, index, step):
+        def __init__(self, parent, name, index, step, **_kwargs):
             pass
 
         def wait(self):
@@ -2399,6 +2436,230 @@ def test_debug_flow_feedback():
         app._debug_dialog = None
         app.executor.stop_event.clear()
     mark("单步调试流程反馈")
+
+
+def test_debug_dialog_standalone_when_minimized():
+    """主窗最小化时确认框要独立显示，确认完把焦点还给目标窗口。
+
+    真实报障：单步执行完一步后主窗被激活，下一步就找不到刚才的目标窗口。
+    """
+    import threading as _threading
+
+    app.iconify()
+    app.update()
+    assert app.state() == "iconic"
+    try:
+        dialog = gui_module.DebugStepDialog(app, "甲组", 0,
+                                            Step("wait", "0.1"))
+        app.update()
+        assert dialog.state() == "normal", "主窗最小化时确认框不能被一起藏起来"
+        assert dialog.winfo_ismapped(), "确认框应可见"
+        dialog._skip()
+    finally:
+        app.deiconify()
+        app.update()
+
+    # _ask_debug：主窗保持最小化，对话框关掉后把焦点还给目标窗口
+    real_dialog = gui_module.DebugStepDialog
+    real_target = gui_module._target_foreground_window
+    real_focus = gui_module._focus_window
+    focused = []
+
+    class _Fake:
+        def __init__(self, parent, name, index, step, **_kwargs):
+            pass
+
+        def wait(self):
+            return "skip"
+
+    gui_module.DebugStepDialog = _Fake
+    gui_module._target_foreground_window = lambda: 4242
+    gui_module._focus_window = lambda hwnd: focused.append(hwnd)
+    saved_running, saved_target = app.running, app._debug_target
+    app.running = True
+    app._debug_target = None
+    try:
+        event, box = _threading.Event(), {}
+        app._ask_debug("甲组", 0, Step("wait", "0.1"), event, box)
+        assert app.state() == "iconic", "单步调试时主窗应保持最小化"
+        assert box["answer"] == "skip"
+        assert focused == [4242], "确认后应把焦点还给目标窗口"
+    finally:
+        gui_module.DebugStepDialog = real_dialog
+        gui_module._target_foreground_window = real_target
+        gui_module._focus_window = real_focus
+        app.running = saved_running
+        app._debug_target = saved_target
+        app.deiconify()
+        app.update()
+    mark("单步确认框独立显示与焦点归还")
+
+
+def test_run_to_step_confirms_from_breakpoint():
+    """「运行到这一步」：断点前照常执行，到达断点才开始逐步确认。"""
+    import threading as _threading
+
+    real_ask = app._ask_debug
+    asked = []
+    saved_breakpoint = app._debug_breakpoint
+
+    def fake_ask(name, index, step, event, box):
+        asked.append((name, index))
+        box["answer"] = "skip"
+        event.set()
+
+    app._debug_breakpoint = ("甲组", 2)
+    app._ask_debug = fake_ask
+    try:
+        # 断点之前 / 其他执行组的步骤：自动放行，不询问、不断点
+        assert app._confirm_step("甲组", 0, Step("wait", "0.1")) == "run"
+        assert app._confirm_step("乙组", 1, Step("wait", "0.2")) == "run"
+        assert app._debug_breakpoint == ("甲组", 2), "没到断点不应清空"
+        assert asked == []
+
+        # 到达断点：先清断点，再走正常确认流程
+        result = {}
+
+        def worker():
+            result["answer"] = app._confirm_step("甲组", 2, Step("wait", "0.3"))
+
+        thread = _threading.Thread(target=worker, daemon=True)
+        thread.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and "answer" not in result:
+            app.update()               # 让 _drain_queue 把确认请求取走
+            time.sleep(0.02)
+        assert result.get("answer") == "skip"
+        assert asked == [("甲组", 2)]
+        assert app._debug_breakpoint is None, "到达断点后应清空"
+    finally:
+        app._ask_debug = real_ask
+        app._debug_breakpoint = saved_breakpoint
+        app._pending_step = None
+    mark("运行到这一步 · 断点确认")
+
+
+def test_run_to_step_menu_passes_breakpoint():
+    """菜单「运行到这一步」：把选中步骤的坐标作为断点传给 _start。"""
+    saved_start = app._start
+    saved_once = app._debug_once
+    started = {}
+
+    def fake_start(entry, **kwargs):
+        started.update(kwargs)
+
+    app.project.groups = [Group("甲组", [Step("wait", "0.1"),
+                                          Step("wait", "0.2")]),
+                          Group("乙组", [Step("wait", "0.1")])]
+    app.group_index = 0
+    app._refresh_all()
+    app.step_tree.selection_set("1")
+    try:
+        app._start = fake_start
+        app.run_to_step()
+    finally:
+        app._start = saved_start
+        app._debug_once = saved_once
+        app._refresh_all()
+    assert started.get("entry") == "甲组", started
+    assert started.get("debug_breakpoint") == ("甲组", 1), started
+    mark("运行到这一步 · 菜单项传断点")
+
+
+def test_debug_dialog_write_var():
+    """确认框现场信息 + 临时改变量：只写本程运行，不落盘。"""
+    app.project.groups = [Group("甲组", [Step("wait", "0.1")])]
+    app.group_index = 0
+    app._refresh_all()
+    app.executor.vars = {"文本": "一个初始值"}
+    app.executor._row = {"名字": "张三"}
+    app.executor._row_no = 2
+    logs = []
+    real_log = app._log
+    app._log = lambda level, msg: logs.append((level, msg))
+    try:
+        dialog = gui_module.DebugStepDialog(
+            app, "甲组", 0, Step("wait", "0.1"),
+            snapshot=app.executor.debug_snapshot(),
+            target_title="记事本 - 示例")
+        app.update()
+        try:
+            text = dialog.context_label.cget("text")
+            assert "记事本 - 示例" in text, "应显示目标窗口"
+            assert "名字=张三" in text, "应显示当前数据行"
+            assert "文本=一个初始值" in text, "应显示运行变量"
+
+            # 改已有变量的值
+            dialog.var_name.set("文本")
+            dialog.var_value_var.set("新值")
+            dialog._write_var()
+            app.update()
+            assert app.executor.vars["文本"] == "新值"
+            assert "文本=新值" in dialog.context_label.cget("text"), \
+                "写完应现场信息同步刷新"
+            new_logs = [msg for _level, msg in logs]
+            assert any("已改为" in msg for msg in new_logs), new_logs
+
+            # 新增一个原本不存在的变量
+            dialog.var_name.set("新鲜变量")
+            dialog.var_value_var.set("42")
+            dialog._write_var()
+            assert app.executor.vars["新鲜变量"] == "42"
+            assert "新鲜变量=42" in dialog.context_label.cget("text")
+            values = list(dialog.var_name["values"])
+            assert "新鲜变量" in values, "变量名下拉应可补录新名字"
+
+            # 空变量名：提示且不写入
+            count = len(app.executor.vars)
+            dialog.var_name.set("")
+            dialog._write_var()
+            assert dialog.var_note_label.cget("text")
+            assert len(app.executor.vars) == count, "空变量名不应写入"
+        finally:
+            dialog._skip()
+
+        # 输入框里敲 Enter / 空格：写变量或原样输入，不触发「运行 / 跳过」
+        dialog2 = gui_module.DebugStepDialog(
+            app, "甲组", 0, Step("wait", "0.1"),
+            snapshot=app.executor.debug_snapshot(), target_title="")
+        app.update()
+        try:
+            dialog2.var_name.set("Enter键专用")
+            dialog2.var_value_var.set("行内写值")
+            dialog2.var_value.entry.generate_event("<Return>")
+            dialog2.var_value.entry.generate_event("<space>")
+            dialog2.update()
+            assert app.executor.vars.get("Enter键专用") == "行内写值", \
+                "输入框里的 Enter 应写变量"
+            assert dialog2.result is None, "输入框里的 Enter / 空格不应触发运行"
+        finally:
+            dialog2._skip()
+    finally:
+        app._log = real_log
+        app.executor.vars = {}
+        app.executor._row = {}
+        app.executor._row_no = 0
+    mark("单步调试 · 现场信息与临时改变量")
+
+
+def test_mini_bar_shows_full_step_text():
+    """运行迷你条：长步骤说明按需加宽 / 折行，不再被硬裁掉。"""
+    bar = gui_module.RunMiniBar(app)
+    app.update()
+    try:
+        text = "12. 输入文字 " + "很长的步骤内容" * 8
+        bar.set_step(text)
+        app.update()
+        assert bar.text.cget("text") == text, "步骤文字不应再按字符数截断"
+        width = bar.win.winfo_width()
+        assert width >= app.s(320)
+        assert width <= max(app.s(320),
+                            int(bar.win.winfo_screenwidth() * 0.6))
+        assert bar.win.winfo_height() >= app.s(58)
+    finally:
+        bar.destroy()
+    assert hasattr(app, "log_xscroll"), "日志控制台应有横向滚动条"
+    mark("迷你条完整显示步骤")
 
 
 def test_settings_dialog_mini_bar():

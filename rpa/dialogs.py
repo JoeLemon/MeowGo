@@ -60,11 +60,28 @@ class BaseDialog(tk.Toplevel):
         h = max(self.winfo_reqheight(), self.app.s(min_height))
         self.geometry(f"{int(w)}x{int(h)}")
 
-    def center(self) -> None:
+    def center(self, on_screen: bool = False) -> None:
+        """把对话框放到主窗口中间。
+
+        on_screen=True 时改为放在鼠标所在屏幕的中上位置：主窗最小化 /
+        收进托盘时它的坐标不可靠（可能变成 -32000），不能当锚点。
+        """
         self.update_idletasks()
-        x = self.app.winfo_rootx() + (self.app.winfo_width() - self.winfo_width()) // 2
-        y = self.app.winfo_rooty() + (self.app.winfo_height() - self.winfo_height()) // 3
-        self.app.place_window(self, x, y, self.winfo_width(), self.winfo_height())
+        if on_screen:
+            rect = uikit.monitor_work_area(self.winfo_pointerx(),
+                                           self.winfo_pointery())
+            if rect is None:
+                x = (self.winfo_screenwidth() - self.winfo_width()) // 2
+                y = (self.winfo_screenheight() - self.winfo_height()) // 3
+            else:
+                left, top, right, bottom = rect
+                x = left + (right - left - self.winfo_width()) // 2
+                y = top + (bottom - top - self.winfo_height()) // 3
+            self.geometry(f"+{int(x)}+{int(y)}")
+        else:
+            x = self.app.winfo_rootx() + (self.app.winfo_width() - self.winfo_width()) // 2
+            y = self.app.winfo_rooty() + (self.app.winfo_height() - self.winfo_height()) // 3
+            self.app.place_window(self, x, y, self.winfo_width(), self.winfo_height())
         self.wait_visibility(self)
         self.grab_set()
         self.focus_force()
@@ -163,6 +180,7 @@ class ShortcutsDialog(BaseDialog):
         ("Ctrl+G", "新建执行组"),
         ("Ctrl+Enter", "新增步骤"),
         ("Ctrl+A", "全选当前组的步骤（可批量删除/复制/移动）"),
+        ("Ctrl+E", "启用 / 禁用选中的步骤"),
         ("F2", "编辑选中的步骤"),
         ("Delete", "删除选中的步骤"),
         ("F5", "运行当前组（全局，任何时候有效）"),

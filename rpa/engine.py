@@ -402,6 +402,31 @@ def session_locked() -> bool:
         return False
     except Exception:  # noqa: BLE001 - 取不到状态时按可用处理
         return False
+
+
+def capture_screen():
+    """采集一帧整个虚拟桌面，返回 (BGR ndarray, (left, top))。
+
+    副屏在主屏左侧时 left/top 为负。单独一层便于测试注入假屏幕。
+    """
+    import numpy as np
+
+    try:
+        from PIL import ImageGrab
+
+        image = ImageGrab.grab(all_screens=True)
+        frame = np.asarray(image)
+        if frame.ndim == 3 and frame.shape[2] >= 3:
+            frame = frame[:, :, :3][:, :, ::-1]      # RGB -> BGR
+        origin = virtual_screen_rect()[:2]
+    except Exception:  # noqa: BLE001 - ImageGrab 不可用时退回 pyautogui
+        import pyautogui
+
+        frame = np.asarray(pyautogui.screenshot())[:, :, ::-1]
+        origin = (0, 0)
+    return frame, origin
+
+
 MAX_CALL_DEPTH = 20
 # 循环运行没有自然的结束点；步数统计只保留最近一段，避免内存无限增长
 MAX_LOOP_STATS = 5000
@@ -436,11 +461,12 @@ def find_images(text: str, base_dir: str = "",
     """在屏幕上找内容里写的图片（界面「检测图片」用，不点击）。
 
     返回每个候选图的命中情况：name / missing / points。points 是匹配框
-    的中心点，按从上到下、从左到右排序。
+    的中心点，按从上到下、从左到右排序。与执行引擎一样支持 DPI /
+    屏幕缩放变化：原尺寸找不到时会自动尝试常见缩放比例。
     """
-    import pyautogui
-
     result = []
+    frame = None
+    origin = (0, 0)
     for target in parse_image_targets(text):
         path = assets.resolve_image(target.name, base_dir or None)
         item = {"name": target.name, "missing": False, "points": []}
@@ -450,18 +476,55 @@ def find_images(text: str, base_dir: str = "",
             continue
         if not opencv_available():
             raise StepError(OPENCV_HINT)
-        kwargs: dict[str, Any] = {"confidence": confidence,
-                                  "grayscale": grayscale}
+        import cv2
+        import numpy as np
+
+        if frame is None:
+            frame, origin = capture_screen()
+            if frame.size == 0:
+                result.append(item)
+                continue
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+            template = (cv2.imdecode(data, cv2.IMREAD_COLOR)
+                        if data.size else None)
+        except (OSError, ValueError):
+            template = None
+        if template is None:
+            template = cv2.imread(path, cv2.IMREAD_COLOR)
+        if template is None:
+            result.append(item)
+            continue
+
         use_region = target.region or region
         if use_region:
-            kwargs["region"] = use_region
-        try:
-            boxes = list(pyautogui.locateAllOnScreen(path, **kwargs))
-        except Exception:  # noqa: BLE001 - 找不到/环境不支持都按「没命中」
-            boxes = []
-        boxes.sort(key=lambda box: (box.top, box.left))
-        item["points"] = [(box.left + box.width / 2,
-                           box.top + box.height / 2) for box in boxes]
+            rx, ry, rw, rh = use_region
+            x0 = max(0, rx - origin[0])
+            y0 = max(0, ry - origin[1])
+            x1 = min(frame.shape[1], x0 + rw)
+            y1 = min(frame.shape[0], y0 + rh)
+            if x1 <= x0 or y1 <= y0:
+                result.append(item)
+                continue
+            search = frame[y0:y1, x0:x1]
+            base_x, base_y = origin[0] + x0, origin[1] + y0
+        else:
+            search = frame
+            base_x, base_y = origin
+
+        if grayscale:
+            search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+            template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        boxes = _match_at_scale(search, template, confidence, 1.0)
+        if not boxes:
+            scaled_confidence = _scale_confidence(confidence)
+            factor = _discover_scale(search, template, scaled_confidence)
+            if factor is not None:
+                boxes = _match_at_scale(search, template,
+                                        scaled_confidence, factor)
+        item["points"] = [(base_x + x + width / 2,
+                           base_y + y + height / 2)
+                          for _score, x, y, width, height in boxes]
         result.append(item)
     return result
 
@@ -478,6 +541,145 @@ def _box_iou(box1: tuple[int, int, int, int],
         return 0.0
     union = w1 * h1 + w2 * h2 - inter
     return inter / union if union else 0.0
+
+
+# DPI / 屏幕缩放变化时，模板需要按比例缩放再匹配。这里覆盖 Windows
+# 常见缩放档位（100% / 125% / 150% / 175% / 200%）两两之间的比例；
+# 先试最常用的，命中后把比例记到 _scale_hints，后续轮询只试这个比例。
+MULTI_SCALE_FACTORS = (
+    1.25, 0.8, 1.5, 2 / 3, 1.2, 5 / 6, 4 / 3, 0.75,
+    1.75, 4 / 7, 2.0, 0.5, 1.6, 0.625, 7 / 6, 6 / 7,
+)
+# 全比例扫描时把屏幕缩到这个宽度以内，降低 matchTemplate 的开销；
+# 找到候选后再回原图局部验证，精度不受影响。
+COARSE_MATCH_MAX = 960.0
+SCALE_SWEEP_INTERVAL = 0.8       # 同一张图两次全比例扫描的最小间隔（秒）
+
+
+def _scale_confidence(confidence: float) -> float:
+    """缩放匹配会经过重采样，分数通常比原尺寸略低。
+
+    给 0.1 的容差（不低于 0.7），避免明明能认出来却因为 0.90 vs 0.89
+    的差距一直等到超时；原尺寸匹配仍然使用用户设置的严格阈值。
+    """
+    return max(0.7, float(confidence) - 0.1)
+
+
+def _resize_template(template: Any, factor: float) -> Any:
+    """按比例缩放模板；1.0 直接返回原图，避免无谓拷贝。"""
+    if abs(factor - 1.0) < 1e-6:
+        return template
+    import cv2
+
+    width = max(1, int(round(template.shape[1] * factor)))
+    height = max(1, int(round(template.shape[0] * factor)))
+    interpolation = cv2.INTER_AREA if factor < 1 else cv2.INTER_LINEAR
+    return cv2.resize(template, (width, height), interpolation=interpolation)
+
+
+def _match_template_boxes(
+        search: Any, template: Any,
+        confidence: float) -> list[tuple[float, int, int, int, int]]:
+    """单尺度匹配，返回 (分数, x, y, w, h) 列表（未去重）。"""
+    import cv2
+    import numpy as np
+
+    height, width = template.shape[:2]
+    if (height <= 0 or width <= 0
+            or height > search.shape[0] or width > search.shape[1]):
+        return []
+    result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+    result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    ys, xs = np.where(result >= float(confidence))
+    if len(xs) == 0:
+        return []
+    order = np.argsort(-result[ys, xs])[:400]
+    return [(float(result[int(ys[index]), int(xs[index])]),
+             int(xs[index]), int(ys[index]), width, height)
+            for index in order]
+
+
+def _dedupe_boxes(
+        boxes: list[tuple[float, int, int, int, int]]
+        ) -> list[tuple[float, int, int, int, int]]:
+    """同一目标会产出一片相邻命中：按分数优先保留，再按位置排序。"""
+    boxes.sort(key=lambda item: item[0], reverse=True)
+    kept: list[tuple[float, int, int, int, int]] = []
+    for box in boxes[:400]:
+        _score, x, y, width, height = box
+        if any(_box_iou((x, y, width, height),
+                        (kx, ky, kw, kh)) > 0.3
+               for _s, kx, ky, kw, kh in kept):
+            continue
+        kept.append(box)
+    kept.sort(key=lambda item: (item[2], item[1]))
+    return kept
+
+
+def _match_at_scale(search: Any, template: Any, confidence: float,
+                    factor: float) -> list[tuple[float, int, int, int, int]]:
+    scaled = _resize_template(template, factor)
+    return _dedupe_boxes(_match_template_boxes(search, scaled, confidence))
+
+
+def _discover_scale(search: Any, template: Any, confidence: float,
+                    stop_event: Optional[threading.Event] = None
+                    ) -> Optional[float]:
+    """在缩小的搜索图上快速试各种比例，再回原图局部验证。
+
+    返回第一个通过原图验证的比例；都不匹配返回 None。这样即使屏幕是
+    4K，也只需要在小图上跑十几次 matchTemplate，而不是每次都在原图上跑。
+    """
+    import cv2
+    import numpy as np
+
+    longest = max(search.shape[0], search.shape[1])
+    if longest <= 0:
+        return None
+    coarse_scale = min(1.0, COARSE_MATCH_MAX / longest)
+    if coarse_scale < 1.0:
+        coarse = cv2.resize(search, None, fx=coarse_scale, fy=coarse_scale,
+                            interpolation=cv2.INTER_AREA)
+    else:
+        coarse = search
+
+    for factor in MULTI_SCALE_FACTORS:
+        if stop_event is not None and stop_event.is_set():
+            return None
+        full = _resize_template(template, factor)
+        full_h, full_w = full.shape[:2]
+        cw = max(1, int(round(full_w * coarse_scale)))
+        ch = max(1, int(round(full_h * coarse_scale)))
+        # 太小 / 太大都没有可靠匹配的意义
+        if (cw < 6 or ch < 6
+                or cw > coarse.shape[1] or ch > coarse.shape[0]):
+            continue
+        ctemplate = cv2.resize(
+            full, (cw, ch),
+            interpolation=(cv2.INTER_AREA if coarse_scale < 1
+                           else cv2.INTER_LINEAR))
+        result = cv2.matchTemplate(coarse, ctemplate, cv2.TM_CCOEFF_NORMED)
+        result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        ys, xs = np.where(result >= float(confidence))
+        if len(xs) == 0:
+            continue
+        order = np.argsort(-result[ys, xs])[:3]
+        for index in order:
+            cx, cy = int(xs[index]), int(ys[index])
+            fx = int(round(cx / coarse_scale))
+            fy = int(round(cy / coarse_scale))
+            # 留一点边，抵消缩图取整带来的位置偏差
+            pad = max(8, int(max(full_w, full_h) * 0.15),
+                      int(2 / coarse_scale) + 2)
+            x0 = max(0, fx - pad)
+            y0 = max(0, fy - pad)
+            x1 = min(search.shape[1], fx + full_w + pad)
+            y1 = min(search.shape[0], fy + full_h + pad)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            if _match_template_boxes(search[y0:y1, x0:x1], full, confidence):
+                return factor
+    return None
 
 
 class LoopBreak(Exception):
@@ -705,6 +907,9 @@ class Step:
       grayscale  灰度匹配，抗颜色抖动
     retry / retry_delay：这一步没成功时重试几次、每次间隔多少秒。
     input_mode：input 步骤用 paste（默认）还是 type（逐字，仅英文数字）。
+    enabled：False 时运行会跳过这一步（配置校验、环境检查也一并忽略），
+            方便临时停用某一步而不用删除。旧配置 / Excel 里没有该字段，
+            默认按启用处理。
     """
 
     type: str = "click"
@@ -719,6 +924,7 @@ class Step:
     retry: int = 0
     retry_delay: float = 0.5
     input_mode: str = "paste"
+    enabled: bool = True
 
     def label(self) -> str:
         return STEP_TYPES.get(self.type, (self.type,))[0]
@@ -972,7 +1178,7 @@ class Step:
         return Step(self.type, self.content, self.repeat, self.note,
                     self.timeout, self.on_fail, self.region, self.nth,
                     self.grayscale, self.retry, self.retry_delay,
-                    self.input_mode)
+                    self.input_mode, self.enabled)
 
     def to_dict(self) -> dict:
         return {"type": self.type, "content": self.content,
@@ -981,7 +1187,8 @@ class Step:
                 "region": self.region, "nth": self.nth,
                 "grayscale": self.grayscale, "retry": self.retry,
                 "retry_delay": self.retry_delay,
-                "input_mode": self.input_mode}
+                "input_mode": self.input_mode,
+                "enabled": self.enabled}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Step":
@@ -999,7 +1206,8 @@ class Step:
                        data.get("retry_delay", 0.5)
                        if data.get("retry_delay") not in (None, "") else 0.5),
                    input_mode=str(data.get("input_mode", "paste")
-                                 or "paste"))
+                                 or "paste"),
+                   enabled=bool(data.get("enabled", True)))
 
 
 @dataclass
@@ -1088,6 +1296,8 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
 
     for group in groups:
         for index, step in enumerate(group.steps, start=1):
+            if not step.enabled:
+                continue              # 禁用步骤：不校验、不检查图片
             for message in step.validate(row=index):
                 problems.append(f"[{group.name}] {message}")
             if check_images and step.type in IMAGE_TYPES:
@@ -1116,6 +1326,8 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
     by_name = {group.name: group for group in groups}
     for group in groups:
         for step in group.steps:
+            if not step.enabled:
+                continue
             for target in target_groups(step):
                 if target not in by_name:
                     problems.append(f"[{group.name}] 调用的执行组不存在：{target}")
@@ -1135,6 +1347,8 @@ def validate_environment(groups: Iterable[Group]) -> list[str]:
     needs_uia = False
     for group in groups:
         for step in group.steps:
+            if not step.enabled:
+                continue
             if step.type in IMAGE_TYPES or step.type in (
                     "if_image", "if_not_image", "if_else"):
                 needs_opencv = True
@@ -1177,6 +1391,8 @@ def _find_cycles(index: dict[str, Group]) -> list[str]:
         state[name] = 1
         stack.append(name)
         for step in group.steps:
+            if not step.enabled:
+                continue
             for target in target_groups(step):
                 if target not in index:
                     continue
@@ -1541,6 +1757,16 @@ def _find_window(title: str) -> Optional[int]:
     return None
 
 
+def window_title(hwnd: Optional[int]) -> str:
+    """按 hwnd 查标题；查不到（已关闭 / 非 Windows）返回空串。"""
+    if not hwnd:
+        return ""
+    for found, title in _enum_windows():
+        if found == hwnd:
+            return title
+    return ""
+
+
 def _force_foreground(hwnd: int) -> None:
     """把窗口带到前台。绕过系统对后台进程设置前台的限制。"""
     user32 = _win_user32()
@@ -1683,6 +1909,13 @@ class Executor:
     # 模板图缓存：path -> (mtime, ndarray)
     _template_cache: dict[str, tuple[float, object]] = field(
         default_factory=dict)
+    # 多尺度匹配：图片文件 + mtime -> 验证过的缩放比例
+    _scale_hints: dict[tuple[str, float], float] = field(default_factory=dict)
+    # 同一张图两次全比例扫描的时间戳（节流）
+    _scale_sweep_at: dict[tuple[str, float], float] = field(
+        default_factory=dict)
+    # 本场运行已经提示过缩放命中的图片
+    _scale_notices: set[tuple[str, float]] = field(default_factory=set)
     # 锁屏检测（节流）
     _session_locked: bool = False
     _session_checked_at: float = 0.0
@@ -1690,6 +1923,8 @@ class Executor:
     # 递归调用栈 / 当前数据行（reset 时清空，运行期由执行器维护）
     _stack: list = field(default_factory=list)
     _row: dict = field(default_factory=dict)
+    # 当前数据行号（1 起；非数据驱动运行时为 0）
+    _row_no: int = 0
 
     # -- 生命周期 ---------------------------------------------------------
     def reset(self) -> None:
@@ -1706,6 +1941,8 @@ class Executor:
         self._progress_done = 0
         self._screen_frame = None
         self._screen_at = 0.0
+        self._scale_notices.clear()
+        self._scale_sweep_at.clear()
         self._session_locked = False
         self._session_checked_at = 0.0
         self._session_warned = False
@@ -1713,6 +1950,16 @@ class Executor:
     def stop(self) -> None:
         self.stop_event.set()
         self.pause_event.clear()
+
+    def debug_snapshot(self) -> dict:
+        """单步调试用快照：当前变量、数据行和行号。
+
+        工作线程停在 confirm 等待时调用，读的是一份浅拷贝，
+        确认框里改变量不会影响这里已经取走的内容。
+        """
+        return {"vars": dict(self.vars),
+                "row": dict(self._row),
+                "row_no": int(self._row_no)}
 
     def toggle_pause(self) -> bool:
         if self.pause_event.is_set():
@@ -1803,26 +2050,8 @@ class Executor:
         self._screen_at = 0.0
 
     def _capture_screen(self):
-        """采集一帧整个虚拟桌面，返回 (BGR ndarray, (left, top))。
-
-        副屏在主屏左侧时 left/top 为负。单独一层便于测试注入假屏幕。
-        """
-        import numpy as np
-
-        try:
-            from PIL import ImageGrab
-
-            image = ImageGrab.grab(all_screens=True)
-            frame = np.asarray(image)
-            if frame.ndim == 3 and frame.shape[2] >= 3:
-                frame = frame[:, :, :3][:, :, ::-1]      # RGB -> BGR
-            origin = virtual_screen_rect()[:2]
-        except Exception:  # noqa: BLE001 - ImageGrab 不可用时退回 pyautogui
-            import pyautogui
-
-            frame = np.asarray(pyautogui.screenshot())[:, :, ::-1]
-            origin = (0, 0)
-        return frame, origin
+        """采集一帧整个虚拟桌面（单独一层便于测试注入假屏幕）。"""
+        return capture_screen()
 
     def _grab_screen(self):
         """取一帧屏幕（带 TTL 缓存）。
@@ -1867,15 +2096,41 @@ class Executor:
             raise StepError(f"图片无法读取（文件损坏或格式不支持）：{path}")
         if len(self._template_cache) >= 64:
             self._template_cache.clear()
+            self._scale_hints.clear()
+            self._scale_sweep_at.clear()
         self._template_cache[path] = (mtime, image)
         return image
+
+    def _allow_scale_sweep(self, key: tuple[str, float]) -> bool:
+        """同一张图的全比例扫描做节流，避免等待图片时持续占满 CPU。"""
+        now = time.time()
+        last = self._scale_sweep_at.get(key, 0.0)
+        if now - last < SCALE_SWEEP_INTERVAL:
+            return False
+        self._scale_sweep_at[key] = now
+        return True
+
+    def _note_scale(self, path: str, factor: float) -> None:
+        """缩放命中时提示一次，方便用户知道 DPI 适配生效了。"""
+        if abs(factor - 1.0) < 1e-6:
+            return
+        key = (path, round(factor, 4))
+        if key in self._scale_notices:
+            return
+        self._scale_notices.add(key)
+        self._emit("info", f"图片 {os.path.basename(path)} 按 "
+                           f"{factor:.0%} 缩放命中（已自动适配 DPI / 屏幕缩放）")
 
     def _locate_one(self, path: str,
                     region: Optional[tuple[int, int, int, int]],
                     nth: int, grayscale: bool):
-        """在单张模板图上找第 nth 个（0 = 第一个）。"""
+        """在单张模板图上找第 nth 个（0 = 第一个）。
+
+        先按原尺寸匹配（旧行为）；失败后再尝试常见 DPI 缩放比例。
+        某个比例验证成功后记进 _scale_hints，后续轮询优先用它，
+        避免每次都做完整的比例扫描。
+        """
         import cv2
-        import numpy as np
 
         if not opencv_available():
             raise StepError(OPENCV_HINT)
@@ -1901,32 +2156,54 @@ class Executor:
         if grayscale:
             search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
             template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-        height, width = template.shape[:2]
-        if (height > search.shape[0] or width > search.shape[1]
-                or height == 0 or width == 0):
+        if template.size == 0:
             return None
 
-        result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
-        result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
-        ys, xs = np.where(result >= float(self.confidence))
-        if len(xs) == 0:
-            return None
-        # 先把高分命中留下，再按重叠度去重（同一目标会产出一片相邻点）
-        order = np.argsort(-result[ys, xs])[:400]
-        boxes: list[tuple[float, int, int]] = []
-        for index in order:
-            x, y = int(xs[index]), int(ys[index])
-            score = float(result[y, x])
-            if any(_box_iou((x, y, width, height),
-                            (bx, by, width, height)) > 0.3
-                   for _, bx, by in boxes):
-                continue
-            boxes.append((score, x, y))
-        boxes.sort(key=lambda box: (box[2], box[1]))
-        if nth and nth >= len(boxes):
-            return None
-        _score, x, y = boxes[nth if nth and nth > 0 else 0]
-        return Point(base_x + x + width / 2, base_y + y + height / 2)
+        mtime = self._template_cache.get(path, (0.0, None))[0]
+        key = (path, float(mtime))
+        hint = self._scale_hints.get(key)
+        scaled_confidence = _scale_confidence(self.confidence)
+
+        def pick(boxes: list[tuple[float, int, int, int, int]]):
+            if not boxes:
+                return None
+            index = nth if nth and nth > 0 else 0
+            if index >= len(boxes):
+                return None
+            _score, x, y, width, height = boxes[index]
+            return Point(base_x + x + width / 2,
+                         base_y + y + height / 2)
+
+        # 1. 上次验证成功的比例优先（DPI 通常整场运行都不变）
+        if hint is not None:
+            conf = (self.confidence if abs(hint - 1.0) < 1e-6
+                    else scaled_confidence)
+            point = pick(_match_at_scale(search, template, conf, hint))
+            if point is not None:
+                self._note_scale(path, hint)
+                return point
+            if abs(hint - 1.0) < 1e-6:
+                hint = None
+
+        # 2. 原尺寸（旧行为；也覆盖用户把缩放改回去的情况）
+        if hint != 1.0:
+            point = pick(_match_at_scale(search, template, self.confidence,
+                                         1.0))
+            if point is not None:
+                return point
+
+        # 3. 全比例扫描：首次遇到 DPI 变化时最多每 0.8 秒一次
+        if self._allow_scale_sweep(key):
+            factor = _discover_scale(search, template, scaled_confidence,
+                                     self.stop_event)
+            if factor is not None:
+                self._scale_hints[key] = factor
+                point = pick(_match_at_scale(search, template,
+                                             scaled_confidence, factor))
+                if point is not None:
+                    self._note_scale(path, factor)
+                    return point
+        return None
 
     def _click(self, image: str, clicks: int, button: str, repeat: float,
                timeout: float = 0, on_fail: str = "skip",
@@ -2823,6 +3100,15 @@ class Executor:
                 return
             if not self._wait_ready():
                 return
+            if not step.enabled:
+                # 禁用步骤：不确认、不执行、不计入明细，但进度条仍算一步
+                self._emit("info", f"第 {index + 1} 步已禁用，跳过"
+                                   f"（{step.label()}）")
+                self._progress_done += 1
+                if self.on_progress:
+                    self.on_progress(self._progress_done,
+                                     self._progress_total)
+                continue
             if self.confirm is not None and step.type != "call":
                 answer = self.confirm(name, index, step)
                 if answer == "stop":

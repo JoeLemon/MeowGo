@@ -47,6 +47,7 @@ from .engine import (
     parse_report_table,
     validate_environment,
     validate_project,
+    window_title,
 )
 from .lock import InstanceLock, make_lock_name
 from .recorder import (
@@ -118,6 +119,22 @@ MAX_CONFIG_BACKUPS = 10
 MAX_LOG_LINES = 2000              # 日志上限：超出后从最早的行开始丢弃
 DEFAULT_GROUPS_KEY = "default_groups_version"   # 状态文件里的预置组版本
 DEFAULT_GROUPS_VERSION = 2
+
+
+def _post_webhook(url: str, text: str, timeout: float = 10) -> None:
+    """向企业微信 / 钉钉机器人 Webhook 发送一条文本消息。
+
+    失败时抛异常，由调用方决定是写日志还是提示用户。
+    """
+    import json
+    from urllib.request import Request, urlopen
+
+    payload = {"msgtype": "text", "text": {"content": text}}
+    request = Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310
+        response.read()
 # 步骤表列宽随界面状态保存；#0 在配置里用 icon 作为键，避免特殊字符。
 STEP_COLUMN_STATE_KEYS = (
     ("#0", "icon"),
@@ -359,6 +376,80 @@ def _make_no_activate(window) -> None:
                               user32.GetWindowLongW(hwnd, gwl_exstyle)
                               | no_activate)
     except Exception:  # noqa: BLE001 — 非 Windows / 老系统无所谓
+        pass
+
+
+def _win_foreground_window() -> Optional[int]:
+    """当前前台窗口的句柄；非 Windows / 取不到时返回 None。"""
+    if not platform_support.IS_WINDOWS:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+        hwnd = user32.GetForegroundWindow()
+        return int(hwnd) if hwnd else None
+    except Exception:  # noqa: BLE001 — 取不到就当没有目标窗口
+        return None
+
+
+def _win_window_pid(hwnd: int) -> int:
+    """窗口属于哪个进程；取不到返回 0。"""
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetWindowThreadProcessId.argtypes = [
+            ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(ctypes.wintypes.HWND(hwnd),
+                                        ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _target_foreground_window() -> Optional[int]:
+    """当前前台窗口里属于其它程序的句柄（单步调试结束后要还给它的窗口）。"""
+    hwnd = _win_foreground_window()
+    if hwnd and _win_window_pid(hwnd) != os.getpid():
+        return hwnd
+    return None
+
+
+def _focus_window(hwnd: Optional[int]) -> None:
+    """把前台焦点还给目标窗口（单步确认框关掉后调用）。"""
+    if not platform_support.IS_WINDOWS or not hwnd:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        user32.IsWindow.argtypes = [ctypes.wintypes.HWND]
+        user32.IsWindow.restype = ctypes.wintypes.BOOL
+        user32.IsIconic.argtypes = [ctypes.wintypes.HWND]
+        user32.IsIconic.restype = ctypes.wintypes.BOOL
+        user32.ShowWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = ctypes.wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+        user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [ctypes.wintypes.HWND]
+        user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
+        handle = ctypes.wintypes.HWND(hwnd)
+        if not user32.IsWindow(handle):
+            return
+        if user32.IsIconic(handle):
+            user32.ShowWindow(handle, 9)          # SW_RESTORE
+        user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+        current = user32.GetForegroundWindow()
+        if current and int(current) == hwnd:
+            return
+        user32.BringWindowToTop(handle)
+        if user32.SetForegroundWindow(handle):
+            return
+        # 前台锁生效时再模拟一次 Alt（与 engine._force_foreground 相同），
+        # 只在必要时才按，避免无谓地触发目标程序的菜单。
+        user32.keybd_event(0x12, 0, 0, 0)          # VK_MENU down
+        user32.keybd_event(0x12, 0, 2, 0)          # VK_MENU up
+        user32.SetForegroundWindow(handle)
+        user32.BringWindowToTop(handle)
+    except Exception:  # noqa: BLE001 — 焦点恢复失败不该影响运行
         pass
 
 
@@ -675,6 +766,10 @@ class App(tk.Tk):
         self._debug_continue = False   # 本程是否已选择「继续运行」
         self._debug_dialog: Optional[DebugStepDialog] = None
         self._pending_step: Optional[tuple[str, int]] = None
+        # 单步调试时被操作的目标窗口：确认框关掉后把焦点还给它
+        self._debug_target: Optional[int] = None
+        # 「运行到这一步」的断点：到这一步才开始单步确认
+        self._debug_breakpoint: Optional[tuple[str, int]] = None
         self._dirty = False
         self._last_saved_payload: Optional[str] = None
         self._last_save_error = ""
@@ -1117,6 +1212,9 @@ class App(tk.Tk):
         can_capture = (has and group is not None and index is not None
                        and 0 <= index < len(group.steps)
                        and group.steps[index].type in IMAGE_STEP_TYPES)
+        all_disabled = bool(rows) and group is not None and all(
+            0 <= row < len(group.steps) and not group.steps[row].enabled
+            for row in rows)
         return [
             MI(self._undo_label(), "undo", self.undo, "Ctrl+Z",
                enabled=bool(self._undo_stack)),
@@ -1136,6 +1234,8 @@ class App(tk.Tk):
             MI("编辑步骤…", "pencil", self.edit_step, "F2", enabled=has),
             MI(f"复制选中步骤（{len(rows)}）" if multi else "复制步骤", "copy",
                self.duplicate_step, enabled=has),
+            MI("启用步骤" if all_disabled else "禁用步骤", "check",
+               self.toggle_steps_enabled, "Ctrl+E", enabled=has),
             MI(f"删除选中步骤（{len(rows)}）" if multi else "删除步骤", "trash",
                self.delete_step, "Delete", enabled=has, danger=True),
             "-",
@@ -1154,6 +1254,8 @@ class App(tk.Tk):
         return [
             MI("运行当前组", "run", self.run_group, "F5", accent=True),
             MI("从选中步骤开始运行", "run", self.run_from_step, "从当前行继续"),
+            MI("运行到这一步", "debug", self.run_to_step, "到它才单步确认",
+               enabled=self._selected_steps() != []),
             MI("循环运行当前组", "loop", self.run_loop),
             MI("运行全部组", "table", self.run_all),
             MI("带数据运行…", "table", self.run_with_data, "CSV/Excel"),
@@ -1189,6 +1291,8 @@ class App(tk.Tk):
         MI = uikit.MenuItem
         items = [MI("使用说明", "info", self.show_help),
                  MI("快捷键速查", "question", self.show_shortcuts, "?")]
+        items.append(MI("导出诊断信息…", "save", self.export_diagnostics))
+        items.append(MI("打开日志目录", "folder", self.open_logs_dir))
         if platform_support.IS_MACOS:
             items.append(MI("检查 macOS 权限…", "check",
                             lambda: self._check_platform_permissions(True)))
@@ -1477,10 +1581,13 @@ class App(tk.Tk):
         self.step_tree.tag_configure("failed", background=MARK_FAILED)
         self.step_tree.tag_configure("even", background=CARD)
         self.step_tree.tag_configure("odd", background=ZEBRA)
+        # 只换前景色，背景仍由斑马纹 / 运行染色决定（禁用行灰显）
+        self.step_tree.tag_configure("disabled", foreground=MUTED)
         self.step_tree.bind("<Double-1>", self._on_step_double)
         self.step_tree.bind("<Button-3>", self._step_menu)
         self.step_tree.bind("<Delete>", self._on_step_key_delete)
         self.step_tree.bind("<F2>", self._on_step_key_edit)
+        self.step_tree.bind("<Control-e>", self._on_step_key_toggle)
         mod = "Command" if platform_support.IS_MACOS else "Control"
         self.step_tree.bind(f"<{mod}-a>", self._select_all_steps)
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_select)
@@ -1621,10 +1728,17 @@ class App(tk.Tk):
         self.log_scroll = uikit.SlimScrollbar(
             self.log_body, orient="vertical", command=self.log_list.yview,
             scale=self.scale, bg=LOG_BG, variant="console")
+        # 横向滚动条先占底部：长路径 / 长内容不再被 Listbox 直接裁掉
+        self.log_xscroll = uikit.SlimScrollbar(
+            self.log_body, orient="horizontal", command=self.log_list.xview,
+            scale=self.scale, bg=LOG_BG, variant="console")
+        self.log_xscroll.pack(side="bottom", fill="x", padx=self.s(12),
+                              pady=(0, self.s(4)))
         self.log_scroll.pack(side="right", fill="y", padx=(self.s(2), 0))
         self.log_list.pack(side="left", fill="both", expand=True,
                            padx=self.s(12), pady=self.s(8))
-        self.log_list.configure(yscrollcommand=self.log_scroll.set)
+        self.log_list.configure(yscrollcommand=self.log_scroll.set,
+                                xscrollcommand=self.log_xscroll.set)
         # 点击带跳转目标的日志行：跳到步骤表对应行
         self.log_list.bind("<Button-1>", self._on_log_link_click)
         self.log_list.bind("<Motion>", self._on_log_hover)
@@ -2148,7 +2262,8 @@ class App(tk.Tk):
         if len(text) > 22:
             text = text[:22] + "…"
         repeat = f"  ×{step.repeat:g}" if step.repeat else ""
-        return f"{index + 1}. {i18n.tr(step.label())} {text}{repeat}"
+        prefix = "⏸ " if not step.enabled else ""
+        return f"{prefix}{index + 1}. {i18n.tr(step.label())} {text}{repeat}"
 
     def _refresh_steps(self, select: Optional[int] = None) -> None:
         self.step_tree.delete(*self.step_tree.get_children())
@@ -2163,12 +2278,13 @@ class App(tk.Tk):
             matched += 1
             repeat = "" if not step.repeat else f"{step.repeat:g}"
             iid = str(index)
+            label = ("⏸ " if not step.enabled else "") + step.label()
             self.step_tree.insert(
                 "", "end", iid=iid,
                 image=self.step_pic(step.type, 14),
-                values=(index + 1, step.label(), step.content, repeat,
+                values=(index + 1, label, step.content, repeat,
                         step.note),
-                tags=(self._zebra_tag(index),))
+                tags=self._step_tags(index))
         filtered = self._step_filter_active()
         if matched:
             self.step_empty_box.place_forget()
@@ -2208,6 +2324,16 @@ class App(tk.Tk):
         """斑马纹：奇数行浅蓝底（与运行染色共存，后者优先级更高）。"""
         return "odd" if index % 2 else "even"
 
+    def _step_tags(self, index: int) -> tuple[str, ...]:
+        """步骤行的基础标签：禁用灰显 + 斑马纹。"""
+        group = self._current_group()
+        tags: list[str] = []
+        if (group is not None and 0 <= index < len(group.steps)
+                and not group.steps[index].enabled):
+            tags.append("disabled")
+        tags.append(self._zebra_tag(index))
+        return tuple(tags)
+
     def _selected_step(self) -> Optional[int]:
         selection = self.step_tree.selection()
         if not selection:
@@ -2240,10 +2366,12 @@ class App(tk.Tk):
             return
         step = group.steps[index]
         repeat = "" if not step.repeat else f"{step.repeat:g}"
+        label = ("⏸ " if not step.enabled else "") + step.label()
         self.step_tree.item(str(index),
                             image=self.step_pic(step.type, 14),
-                            values=(index + 1, step.label(), step.content,
-                                    repeat, step.note))
+                            values=(index + 1, label, step.content,
+                                    repeat, step.note),
+                            tags=self._step_tags(index))
         self._refresh_groups()
         self._mark_dirty()
 
@@ -2578,6 +2706,32 @@ class App(tk.Tk):
         count = len(copies)
         self._set_status(f"已复制 {count} 个步骤" if count > 1 else "已复制步骤")
 
+    def toggle_steps_enabled(self) -> None:
+        """启用 / 禁用选中的步骤（多选时整块切换）。
+
+        有任意一步启用时，整体改为禁用；全部已禁用时整体恢复启用。
+        """
+        group = self._current_group()
+        rows = self._selected_steps()
+        if group is None or not rows:
+            return
+        enabled = not all(group.steps[index].enabled for index in rows)
+        self._push_undo("启用步骤" if enabled else "禁用步骤")
+        for index in rows:
+            group.steps[index].enabled = enabled
+        self._refresh_groups()
+        self._refresh_steps()
+        ids = [str(index) for index in rows
+               if self.step_tree.exists(str(index))]
+        if ids:
+            self.step_tree.selection_set(ids)
+            self.step_tree.see(ids[0])
+        self._mark_dirty()
+        action = "已启用" if enabled else "已禁用"
+        count = len(rows)
+        self._set_status(f"{action} {count} 个步骤" if count > 1
+                         else f"{action}第 {rows[0] + 1} 步")
+
     def delete_step(self) -> None:
         group = self._current_group()
         rows = self._selected_steps()
@@ -2653,6 +2807,10 @@ class App(tk.Tk):
 
     def _on_step_key_edit(self, _event=None) -> str:
         self.edit_step()
+        return "break"
+
+    def _on_step_key_toggle(self, _event=None) -> str:
+        self.toggle_steps_enabled()
         return "break"
 
     # ------------------------------------------------------- 列表内编辑
@@ -2937,10 +3095,17 @@ class App(tk.Tk):
         is_image = (has and group is not None and index is not None
                     and 0 <= index < len(group.steps)
                     and group.steps[index].type in IMAGE_STEP_TYPES)
+        all_disabled = bool(rows) and group is not None and all(
+            0 <= row < len(group.steps) and not group.steps[row].enabled
+            for row in rows)
+        toggle_item = uikit.MenuItem(
+            "启用步骤" if all_disabled else "禁用步骤", "check",
+            self.toggle_steps_enabled, "Ctrl+E", enabled=has)
         if multi:
             items = [
                 uikit.MenuItem(f"复制选中步骤（{len(rows)}）", "copy",
                                self.duplicate_step, accent=True),
+                toggle_item,
                 uikit.MenuItem(f"删除选中步骤（{len(rows)}）", "trash",
                                self.delete_step, "Delete", danger=True),
                 "-",
@@ -2958,9 +3123,13 @@ class App(tk.Tk):
                                enabled=has),
                 uikit.MenuItem("复制步骤", "copy", self.duplicate_step,
                                enabled=has),
+                toggle_item,
                 uikit.MenuItem("截取屏幕并替换图片…", "image",
                                lambda: self.capture_region(self._apply_capture),
                                enabled=is_image),
+                "-",
+                uikit.MenuItem("运行到这一步", "debug", self.run_to_step,
+                               "到它才单步确认", enabled=has),
                 "-",
                 uikit.MenuItem("上移", "up", lambda: self.move_step(-1),
                                enabled=index is not None and index > 0),
@@ -3437,6 +3606,25 @@ class App(tk.Tk):
         self._debug_once = True
         self._start(self._current_group_name())
 
+    def run_to_step(self) -> None:
+        """运行到选中步骤：到它才开始单步确认（相当于设个断点）。
+
+        断点之前的步骤照常执行；到达选中的那一步时弹出第一张确认框，
+        之后的每步都需要确认，方便长流程里只盯着后半段调试。
+        """
+        if self.running:
+            messagebox.showinfo("提示", "正在运行中，请先停止", parent=self)
+            return
+        group = self._current_group()
+        rows = self._selected_steps()
+        if group is None or not rows:
+            messagebox.showinfo("提示", "请先在步骤表里选中一行", parent=self)
+            return
+        index = rows[0]
+        self._log("info", f"运行到「{group.name}」第 {index + 1} 步时暂停确认")
+        self._debug_once = True
+        self._start(group.name, debug_breakpoint=(group.name, index))
+
     def run_all(self) -> None:
         self._start(None)
 
@@ -3511,7 +3699,8 @@ class App(tk.Tk):
     def _start(self, entry: Optional[str], loop: bool = False,
                data: Optional[list] = None,
                data_path: Optional[str] = None,
-               row_offset: int = 0, start_step: int = 0) -> bool:
+               row_offset: int = 0, start_step: int = 0,
+               debug_breakpoint: Optional[tuple[str, int]] = None) -> bool:
         if self.running:
             messagebox.showinfo("提示", "正在运行中，请先停止", parent=self)
             return False
@@ -3541,11 +3730,13 @@ class App(tk.Tk):
         # 一次性调试（右键「单步调试运行」）不落盘，随这次运行生效
         debug = self.debug_mode or self._debug_once
         delay = int(self.settings.get("delay", 3))
-        if not debug:
-            self.iconify()            # 单步调试时保留窗口，方便看步骤高亮
+        # 单步调试也最小化主窗：确认框关掉时如果主窗是前台，Windows 会把
+        # 焦点交给它，下一步就丢了目标窗口。只留确认框和迷你条在前台。
+        self.iconify()
         self._countdown(delay,
                         lambda: self._launch(entry, loop, debug=debug,
-                                             start_step=start_step),
+                                             start_step=start_step,
+                                             breakpoint=debug_breakpoint),
                         debug=debug)
         return True
 
@@ -3556,22 +3747,28 @@ class App(tk.Tk):
             callback()
             return
         overlay = tk.Toplevel(self)
+        overlay.withdraw()            # 先按文字量好尺寸再显示，避免闪一下
         overlay.overrideredirect(True)
         overlay.attributes("-topmost", True)
         overlay.configure(bg=LOG_BG)
-        width, height = self.s(280), self.s(126)
-        x = (self.winfo_screenwidth() - width) // 2
-        y = (self.winfo_screenheight() - height) // 2
-        overlay.geometry(f"{width}x{height}+{x}+{y}")
         label = tk.Label(overlay, text="", bg=LOG_BG, fg=LOG_FG,
                          font=FONT_HERO)
         label.pack(expand=True)
-        tk.Label(overlay,
-                 text=("即将开始（单步调试），请切换到目标窗口（Esc 取消）"
-                       if debug else
-                       "即将开始，请切换到目标窗口（Esc 取消）"),
-                 bg=LOG_BG, fg=LOG_HEAD_MUTED,
-                 font=FONT_NOTE).pack(pady=(0, self.s(12)))
+        hint = tk.Label(overlay,
+                        text=("即将开始（单步调试），请切换到目标窗口（Esc 取消）"
+                              if debug else
+                              "即将开始，请切换到目标窗口（Esc 取消）"),
+                        bg=LOG_BG, fg=LOG_HEAD_MUTED, font=FONT_NOTE,
+                        wraplength=self.s(360), justify="center")
+        hint.pack(padx=self.s(16), pady=(0, self.s(12)))
+        # 固定 280 宽会把中文提示裁掉：按文字实际请求尺寸撑开窗口
+        overlay.update_idletasks()
+        width = max(self.s(280), overlay.winfo_reqwidth())
+        height = max(self.s(126), overlay.winfo_reqheight())
+        x = (self.winfo_screenwidth() - width) // 2
+        y = (self.winfo_screenheight() - height) // 2
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
+        overlay.deiconify()
         state = {"left": seconds, "cancelled": False}
 
         def cancel(_event=None):
@@ -3604,7 +3801,8 @@ class App(tk.Tk):
         tick()
 
     def _launch(self, entry: Optional[str], loop: bool, debug: bool = False,
-                start_step: int = 0) -> None:
+                start_step: int = 0,
+                breakpoint: Optional[tuple[str, int]] = None) -> None:
         self._schedule_pending = False
         # 防止界面和计划任务 / 另一个副本同时抢鼠标
         lock = InstanceLock(make_lock_name(APP_DIR, "RUN"))
@@ -3622,6 +3820,8 @@ class App(tk.Tk):
         self._debug_once = False        # 一次性开关跑完即弃
         self._debug_continue = False    # 每次运行都重新逐步骤确认
         self._pending_step = None
+        # 倒计时期间用户已经切到目标窗口：记下来，之后每步确认完把焦点还它
+        self._debug_target = _target_foreground_window()
         # 每次运行单独落一份过程日志，事后能按时间/步骤回查
         self._run_log = logs.RunLog(REPORTS_DIR,
                                     entry or "全部执行组")
@@ -3651,6 +3851,8 @@ class App(tk.Tk):
         self._show_mini_bar()
         # 单步调试：引擎每步执行前会调 confirm（None = 不启用）
         self.executor.confirm = self._confirm_step if debug else None
+        # 「运行到这一步」的断点只在这程用；非调试运行清空
+        self._debug_breakpoint = breakpoint if debug else None
         if debug:
             self._log("info", "单步调试：每一步执行前都会确认")
 
@@ -3677,6 +3879,8 @@ class App(tk.Tk):
             self.paused = False
             self._schedule_pending = False
             self._debug_continue = False
+            self._debug_breakpoint = None
+            self._debug_target = None
             self._pending_step = None
             if self._run_lock is not None:
                 self._run_lock.release()
@@ -3824,6 +4028,13 @@ class App(tk.Tk):
         """
         if self._debug_continue:      # 已点「继续运行」：剩余步骤不再询问
             return "run"
+        # 「运行到这一步」：断点之前照常执行；到了断点才开始逐步确认
+        if self._debug_breakpoint is not None:
+            if (name, index) != self._debug_breakpoint:
+                return "run"
+            self._debug_breakpoint = None
+            self._log("info", f"单步调试：已到达「{name}」第 {index + 1} 步，"
+                              "从这里开始逐步确认")
         event = threading.Event()
         box = {"answer": "stop"}
         self.ui_queue.put(("pending", (name, index)))
@@ -3870,14 +4081,27 @@ class App(tk.Tk):
 
     def _ask_debug(self, name: str, index: int, step: Step,
                    event: threading.Event, box: dict) -> None:
-        """主线程：弹出单步调试对话框，把用户选择交回工作线程。"""
+        """主线程：弹出单步调试对话框，把用户选择交回工作线程。
+
+        单步调试期间主窗一直保持最小化（见 _start）：否则对话框一关，
+        焦点会落到主窗上，下一步就找不到刚才的目标窗口了。对话框独立
+        置顶显示；用户点完按钮后把前台焦点还给目标窗口。
+        """
         if not self.running:
             box["answer"] = "stop"
             event.set()
             return
-        self.deiconify()              # 运行时会最小化，先把窗口唤回
+        if self.state() == "normal":
+            self.iconify()            # 用户中途把主窗点回来了：继续最小化
+        foreground = _target_foreground_window()
+        if foreground:                # 记住用户当前操作的目标窗口
+            self._debug_target = foreground
+        answer = "stop"
         try:
-            dialog = DebugStepDialog(self, name, index, step)
+            dialog = DebugStepDialog(
+                self, name, index, step,
+                snapshot=self.executor.debug_snapshot(),
+                target_title=window_title(foreground or self._debug_target))
             self._debug_dialog = dialog
             answer = dialog.wait()
         except tk.TclError:
@@ -3885,6 +4109,10 @@ class App(tk.Tk):
         finally:
             self._debug_dialog = None
             self._clear_pending_step()
+            # 对话框拿过焦点，关掉后还给目标窗口：下一步直接在原窗口执行。
+            # 停止 / 出错时不用还，免得打断用户正在做的事。
+            if answer != "stop":
+                _focus_window(self._debug_target)
         if answer == "continue":
             # 「继续运行」= 本步照常执行，之后不再询问
             self._debug_continue = True
@@ -4092,18 +4320,10 @@ class App(tk.Tk):
         text = (f"MeowGo 运行结束：{result}，"
                 f"{report['steps']} 步，失败 {report['failed']}，"
                 f"耗时 {report['seconds']:g} 秒")
-        payload = {"msgtype": "text", "text": {"content": text}}
 
         def post():
             try:
-                import json
-                from urllib.request import Request, urlopen
-
-                request = Request(
-                    url, data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"})
-                with urlopen(request, timeout=10) as response:  # noqa: S310
-                    response.read()
+                _post_webhook(url, text)
                 self._enqueue_log("info", "结束通知已发送")
             except Exception as exc:  # noqa: BLE001
                 self._enqueue_log("warn", f"结束通知发送失败：{exc}")
@@ -4125,6 +4345,54 @@ class App(tk.Tk):
             self._set_status(f"日志已导出：{os.path.basename(path)}")
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc), parent=self)
+
+    def _open_folder(self, path: str) -> None:
+        """跨平台打开文件夹（资源管理器 / Finder / xdg-open）。"""
+        try:
+            if os.name == "nt":
+                os.startfile(path)                 # noqa: S606 (Windows)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror("打开失败", str(exc), parent=self)
+
+    def open_logs_dir(self) -> None:
+        path = logs.log_dir()
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("打开失败", str(exc), parent=self)
+            return
+        self._open_folder(path)
+
+    def export_diagnostics(self) -> None:
+        """导出环境、依赖、配置摘要和最近日志（敏感项已打码）。"""
+        path = filedialog.asksaveasfilename(
+            parent=self, title="导出诊断信息", defaultextension=".zip",
+            initialfile=("meowgo_diagnostics_"
+                         f"{time.strftime('%Y%m%d_%H%M%S')}.zip"),
+            filetypes=[("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            from . import diagnostics
+
+            diagnostics.write_zip(
+                path, self.settings, app_dir=APP_DIR,
+                image_dir=self.image_dir, report_dir=REPORTS_DIR,
+                version=APP_VERSION)
+        except Exception as exc:  # noqa: BLE001 - 导出失败要明确告知
+            messagebox.showerror("导出失败", str(exc), parent=self)
+            return
+        self._set_status(f"诊断信息已导出：{os.path.basename(path)}")
+        if messagebox.askyesno(
+                "诊断信息已导出",
+                i18n.tr("已保存到：") + f"\n{path}\n\n"
+                + i18n.tr("是否打开所在文件夹？"),
+                parent=self):
+            self._open_folder(os.path.dirname(path) or ".")
 
     def open_reports_dir(self) -> None:
         """打开运行报告所在目录。"""
@@ -4238,17 +4506,19 @@ class App(tk.Tk):
                 self._refresh_steps()
         self._repaint_step_marks()
         if self.step_tree.exists(str(index)):
-            self.step_tree.item(str(index),
-                                tags=(self._zebra_tag(index), "running"))
+            self.step_tree.item(
+                str(index), tags=self._step_tags(index) + ("running",))
             self.step_tree.see(str(index))
         self._set_status(f"正在执行：{group_name} · 第 {index + 1} 步")
         if self._mini_bar is not None and group_name in names:
             group = self.project.groups[names.index(group_name)]
             if 0 <= index < len(group.steps):
                 step = group.steps[index]
-                summary = step.content.strip().replace("\n", " ")[:24]
+                summary = (step.content or "").strip().replace("\n", " ")
+                if len(summary) > 120:      # 迷你条只做提示，超长内容给省略号
+                    summary = summary[:120] + "…"
                 self._mini_bar.set_step(
-                    f"{index + 1}. {step.label()} {summary}")
+                    f"{index + 1}. {step.label()} {summary}".strip())
 
     def _apply_step_done(self, group_name: str, index: int, ok: bool) -> None:
         """主线程：把单步结果染成绿（成功）/ 红（失败），供结束后定位。"""
@@ -4266,8 +4536,8 @@ class App(tk.Tk):
                          and pending[0] == self._current_group_name() else None)
         for item in self.step_tree.get_children():
             index = int(item)
-            # 先回到斑马纹，再按需叠运行染色（标记标签优先级更高，盖得住）
-            tags = [self._zebra_tag(index)]
+            # 先回到斑马纹/禁用灰显，再按需叠运行染色（标记标签优先级更高）
+            tags = list(self._step_tags(index))
             mark = marks.get(index)
             if mark:
                 tags.append(mark)
@@ -4467,8 +4737,8 @@ class App(tk.Tk):
             if repeat_hint:
                 lines.append(f"     {i18n.tr('重复次数：')}{i18n.tr(repeat_hint)}")
         lines += ["", i18n.tr("【快捷键】"),
-                  i18n.tr("Ctrl+G 新建执行组　Ctrl+Enter 新增步骤　F2 编辑步骤　"
-                          "Delete 删除步骤"),
+                  i18n.tr("Ctrl+G 新建执行组　Ctrl+Enter 新增步骤　"
+                          "Ctrl+E 启用/禁用步骤　F2 编辑步骤　Delete 删除步骤"),
                   i18n.tr("F5 运行当前组（全局）　F9 停止（全局，任何时候均有效）"),
                   "",
                   i18n.tr("【安全】将鼠标快速移至屏幕左上角，可立即中断执行。")]
@@ -4939,7 +5209,19 @@ class StepDialog(BaseDialog):
         # 兼容既有调用/测试：note_entry 指向真正接收键盘焦点的 Entry。
         self.note_entry = self.note_field.entry
 
-        _, self.btn_ok, self.btn_cancel = self.footer(7)
+        # 启用开关：禁用后该步骤仍保留在列表里，但运行 / 校验时都会跳过。
+        self.var_enabled = tk.BooleanVar(value=bool(editing.enabled))
+        self.enable_box = tk.Frame(self, bg=CARD)
+        self.enable_box.grid(row=7, column=0, columnspan=2, sticky="w",
+                             padx=parent.s(16), pady=(0, parent.s(2)))
+        uikit.Switch(self.enable_box, self.var_enabled, scale=parent.scale,
+                     bg=CARD).pack(side="left")
+        self.enable_label = tk.Label(
+            self.enable_box, text="启用此步骤（禁用后运行时跳过）",
+            bg=CARD, fg=TEXT, font=FONT_NOTE)
+        self.enable_label.pack(side="left", padx=(parent.s(6), 0))
+
+        _, self.btn_ok, self.btn_cancel = self.footer(8)
 
         self._recorder = KeyRecorder(
             self,
@@ -5029,7 +5311,7 @@ class StepDialog(BaseDialog):
                 if missing and not points:
                     message = "找不到图片文件：" + "、".join(missing)
                 elif not points:
-                    message = "当前屏幕未找到匹配图像（请确认目标窗口已打开且缩放比例一致）"
+                    message = "当前屏幕未找到匹配图像（请确认目标窗口已打开、图片未过期）"
                 elif len(points) == 1:
                     message = "找到 1 处匹配 ✓"
                     warn = False
@@ -5361,7 +5643,8 @@ class StepDialog(BaseDialog):
         else:
             content = self.var_content.get()
         step = Step(type=key, content=content, repeat=0.0,
-                    note=self.var_note.get())
+                    note=self.var_note.get(),
+                    enabled=bool(self.var_enabled.get()))
         if STEP_TYPES[step.type][2]:
             try:
                 step.repeat = float(self.var_repeat.get() or 0)
@@ -5859,10 +6142,22 @@ class ScheduleDialog(BaseDialog):
                  font=FONT_NOTE).pack(side="left", padx=(app.s(6), 0))
 
         row_label("Webhook", 6)
-        uikit.TextField(right, textvariable=self.var_webhook,
+        row_hook = tk.Frame(right, bg=CARD)
+        row_hook.grid(row=6, column=1, sticky="ew", pady=app.s(5))
+        row_hook.columnconfigure(0, weight=1)
+        uikit.TextField(row_hook, textvariable=self.var_webhook,
                         scale=app.scale, bg=CARD,
                         font_size=FONT_SIZE_NOTE).grid(
-            row=6, column=1, sticky="ew", pady=app.s(5))
+            row=0, column=0, sticky="ew")
+        self.btn_webhook_test = uikit.RoundButton(
+            row_hook, "测试", "meow", self._test_webhook, kind="outline",
+            scale=app.scale, bg=CARD, height=CONTROL_SM, pad=app.s(8),
+            font_size=FONT_SIZE_NOTE,
+            tooltip="向当前地址发送一条测试消息")
+        self.btn_webhook_test.grid(row=0, column=1, padx=(app.s(6), 0))
+        self.lbl_webhook_test = tk.Label(
+            row_hook, text="", bg=CARD, fg=MUTED, font=FONT_CAPTION)
+        self.lbl_webhook_test.grid(row=0, column=2, padx=(app.s(6), 0))
         tk.Label(right, text="填写企业微信或钉钉机器人地址，任务结束后自动推送；"
                              "留空则不推送。完成通知由所有定时任务共用。",
                  bg=CARD, fg=MUTED, font=FONT_CAPTION,
@@ -5951,6 +6246,43 @@ class ScheduleDialog(BaseDialog):
         self.btn_task_create.set_enabled(enabled)
         self.btn_task_delete.set_enabled(enabled)
         self.btn_delete_task.set_enabled(enabled)
+
+    # -- Webhook 测试 -------------------------------------------------------
+    def _test_webhook(self) -> None:
+        """用当前输入框里的地址发一条测试消息（不依赖保存）。"""
+        url = self.var_webhook.get().strip()
+        if not url:
+            self.lbl_webhook_test.configure(text="请先填写地址", fg=WARNING)
+            return
+        if not url.lower().startswith(("http://", "https://")):
+            self.lbl_webhook_test.configure(
+                text="地址需以 http(s):// 开头", fg=WARNING)
+            return
+        self.btn_webhook_test.set_enabled(False)
+        self.lbl_webhook_test.configure(text="发送中…", fg=MUTED)
+
+        def run() -> None:
+            error = ""
+            try:
+                _post_webhook(url, "MeowGo 测试消息：Webhook 配置成功。")
+            except Exception as exc:  # noqa: BLE001 - 展示给用户即可
+                error = str(exc)
+            try:
+                self.after(0, lambda: self._webhook_test_done(error))
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _webhook_test_done(self, error: str) -> None:
+        if not self.winfo_exists():
+            return
+        self.btn_webhook_test.set_enabled(True)
+        if error:
+            self.lbl_webhook_test.configure(text="发送失败", fg=DANGER)
+            messagebox.showerror("Webhook 测试失败", error, parent=self)
+        else:
+            self.lbl_webhook_test.configure(text="发送成功 ✓", fg=SUCCESS)
 
     def _commit_current(self) -> None:
         if self._loading or not (0 <= self._selected < len(self._tasks)):
@@ -6890,13 +7222,11 @@ class RunMiniBar:
     def __init__(self, parent: App):
         self.parent = parent
         self.win = tk.Toplevel(parent)
+        self.win.withdraw()            # 量好文字宽度再显示，避免闪一下
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
         self.win.configure(bg=LOG_BG)
         s = parent.s
-        width, height = s(320), s(58)
-        x = (self.win.winfo_screenwidth() - width) // 2
-        self.win.geometry(f"{width}x{height}+{x}+{s(8)}")
 
         box = tk.Frame(self.win, bg=LOG_BG)
         box.pack(fill="both", expand=True, padx=s(12), pady=s(7))
@@ -6905,15 +7235,35 @@ class RunMiniBar:
                                font=FONT_NOTE_BOLD)
         self.counts.pack(anchor="w")
         self.text = tk.Label(box, text="", bg=LOG_BG, fg=LOG_FG,
-                             font=FONT_NOTE)
+                             font=FONT_NOTE, justify="left")
         self.text.pack(anchor="w")
         self.bar = ttk.Progressbar(box, style="Mini.Horizontal.TProgressbar",
-                                   mode="determinate", maximum=100,
-                                   length=width - s(24))
+                                   mode="determinate", maximum=100)
         self.bar.pack(fill="x", pady=(s(4), 0))
         for widget in (self.win, box, self.counts, self.text, self.bar):
             widget.bind("<Button-1>", self._restore)
         self.win.bind("<Escape>", self._restore)
+        self._last_text = ""
+        self._fit()
+        self.win.deiconify()
+
+    def _fit(self) -> None:
+        """按文字实际宽度收放小黑条：长步骤说明不再被硬裁掉。"""
+        s = self.parent.s
+        screen_w = self.win.winfo_screenwidth()
+        max_width = max(s(320), int(screen_w * 0.6))
+        self.text.configure(wraplength=0)
+        self.win.update_idletasks()
+        width = min(max(s(320), self.win.winfo_reqwidth()), max_width)
+        if self.win.winfo_reqwidth() > max_width:
+            # 超长内容在最大宽度内折行，窗口高度跟着长，内容仍能看全
+            self.text.configure(wraplength=max(s(160), width - s(24)))
+            self.win.update_idletasks()
+        width = min(max(s(320), self.win.winfo_reqwidth()), max_width)
+        height = max(s(58), self.win.winfo_reqheight())
+        x = (screen_w - width) // 2
+        self.win.geometry(f"{width}x{height}+{x}+{s(8)}")
+        self.bar.configure(length=max(s(80), width - s(24)))
 
     def _restore(self, _event=None) -> None:
         try:
@@ -6936,7 +7286,11 @@ class RunMiniBar:
             self.counts.configure(text=f"已执行 {done} 步")
 
     def set_step(self, text: str) -> None:
-        self.text.configure(text=text[:42] + ("…" if len(text) > 42 else ""))
+        if text == self._last_text:
+            return
+        self._last_text = text
+        self.text.configure(text=text)
+        self._fit()
 
     def destroy(self) -> None:
         try:
@@ -7539,8 +7893,15 @@ class DebugStepDialog(BaseDialog):
 
     AUTO_STOP_SECONDS = 180
 
-    def __init__(self, parent: App, group_name: str, index: int, step: Step):
+    def __init__(self, parent: App, group_name: str, index: int, step: Step,
+                 snapshot: Optional[dict] = None, target_title: str = ""):
         super().__init__(parent, "单步调试", width=520, height=330)
+        self._snapshot = snapshot if snapshot is not None else {}
+        # 单步调试时主窗是刻意最小化的；Tk 会把 transient 子窗跟着藏起来，
+        # 所以主窗不可见时去掉 transient 关系，让确认框独立置顶显示。
+        self._standalone = parent.state() != "normal"
+        if self._standalone:
+            self.tk.call("wm", "transient", str(self), "")
         self.attributes("-topmost", True)
         self.columnconfigure(0, weight=1)
         self._timeout_id: Optional[str] = None
@@ -7587,9 +7948,47 @@ class DebugStepDialog(BaseDialog):
                 row=4, column=0, sticky="w", padx=parent.s(16),
                 pady=(parent.s(4), 0))
 
+        # 现场信息：目标窗口 / 数据行 / 运行变量（单步调试时最常看的）
+        self._target_title = target_title
+        self.context_label = tk.Label(
+            self, text=self._context_text(self._snapshot, target_title),
+            bg=CARD, fg=MUTED, font=FONT_CAPTION, wraplength=parent.s(460),
+            justify="left")
+        self.context_label.grid(
+            row=5, column=0, sticky="w", padx=parent.s(16),
+            pady=(parent.s(8), 0))
+        # 临时改变量：只写进这一程运行，不会保存到项目配置
+        editor_row = tk.Frame(self, bg=CARD)
+        editor_row.grid(row=6, column=0, sticky="ew", padx=parent.s(16),
+                        pady=(parent.s(6), 0))
+        self.var_name = ttk.Combobox(
+            editor_row, values=sorted(self._snapshot.get("vars") or {}),
+            width=12, font=FONT_NOTE)  # type: ignore[arg-type]
+        self.var_name.pack(side="left")
+        self.var_value_var = tk.StringVar()
+        self.var_value = uikit.TextField(
+            editor_row, textvariable=self.var_value_var, width=16,
+            scale=parent.scale, bg=CARD, font_size=FONT_SIZE_NOTE)
+        self.var_value.pack(side="left", padx=(parent.s(6), 0))
+        uikit.RoundButton(
+            editor_row, "写入", "check", self._write_var, kind="outline",
+            scale=parent.scale, bg=CARD, height=CONTROL_SM,
+            pad=parent.s(6), font_size=FONT_SIZE_NOTE,
+            tooltip="调试期间临时改变量（{变量名} 将使用新值）"
+            ).pack(side="left", padx=(parent.s(6), 0))
+        self.var_note_label = tk.Label(
+            editor_row, text="（选中的变量会被替换）", bg=CARD, fg=MUTED,
+            font=FONT_CAPTION)
+        self.var_note_label.pack(side="left", padx=(parent.s(6), 0))
+        # 输入框里按空格 / 回车不能触发「跳过 / 运行」
+        for widget in (self.var_name, self.var_value):
+            widget.bind("<space>", lambda _event: "break")
+            widget.bind("<Return>", lambda _event: self._write_var()
+                        or "break")
+
         # 快捷键提示 + 自动停止倒计时：让“没人管”的情况也可预期
         hint_row = tk.Frame(self, bg=CARD)
-        hint_row.grid(row=5, column=0, sticky="ew", padx=parent.s(16),
+        hint_row.grid(row=7, column=0, sticky="ew", padx=parent.s(16),
                       pady=(parent.s(8), 0))
         tk.Label(hint_row, text="Enter 运行　·　Space 跳过　·　"
                                 "F5 继续运行　·　Esc 停止",
@@ -7599,7 +7998,7 @@ class DebugStepDialog(BaseDialog):
         self._timeout_label.pack(side="right")
 
         buttons = tk.Frame(self, bg=CARD)
-        buttons.grid(row=6, column=0, sticky="ew", padx=parent.s(16),
+        buttons.grid(row=8, column=0, sticky="ew", padx=parent.s(16),
                      pady=(parent.s(10), parent.s(14)))
         uikit.RoundButton(buttons, "停止", "stop", self._stop,
                           kind="danger", scale=parent.scale, bg=CARD,
@@ -7623,7 +8022,7 @@ class DebugStepDialog(BaseDialog):
         self._remaining = self.AUTO_STOP_SECONDS
         self._tick_timeout()
         self.fit_content(width=parent.s(520))
-        self.center()
+        self.center(on_screen=self._standalone)
 
     @staticmethod
     def _options_summary(step: Step) -> str:
@@ -7642,6 +8041,60 @@ class DebugStepDialog(BaseDialog):
         if step.grayscale:
             parts.append("灰度匹配")
         return " · ".join(i18n.tr(part) for part in parts)
+
+    @staticmethod
+    def _context_text(snapshot: dict, target_title: str = "") -> str:
+        """把现场信息压成几行短句：目标窗口 / 数据行 / 运行变量。
+
+        每行都截断长度，防止一条超长数据把确认框顶得没法看。
+        """
+        def clip(text: object, limit: int) -> str:
+            value = str(text)
+            return value if len(value) <= limit else value[:limit] + "…"
+
+        lines: list[str] = []
+        title = (target_title or "").strip()
+        lines.append(i18n.tr("目标窗口") + "："
+                     + (clip(title, 40) if title else i18n.tr("未识别")))
+        row = snapshot.get("row") or {}
+        if row:
+            pairs = [f"{clip(key, 10)}={clip(value, 16)}"
+                     for key, value in list(row.items())[:4]]
+            if len(row) > 4:
+                pairs.append(i18n.tr("共 {n} 列").format(n=len(row)))
+            lines.append(f"{i18n.tr('数据行')} {snapshot.get('row_no') or 1}："
+                         + "；".join(pairs))
+        variables = snapshot.get("vars") or {}
+        pairs = [f"{clip(key, 10)}={clip(value, 24)}"
+                 for key, value in list(variables.items())[:5]]
+        if len(variables) > 5:
+            pairs.append(i18n.tr("共 {n} 个").format(n=len(variables)))
+        lines.append(i18n.tr("运行变量") + "："
+                     + ("；".join(pairs) if pairs else i18n.tr("（还没有）")))
+        return "\n".join(lines)
+
+    def _write_var(self) -> None:
+        """把确认框里临时填的值写进本程运行的变量表（不落盘）。"""
+        name = self.var_name.get().strip()
+        if not name:
+            self.var_note_label.configure(
+                text=i18n.tr("请先在左侧填变量名"), fg=WARNING)
+            return
+        value = self.var_value_var.get()
+        preview = value if len(value) <= 40 else value[:40] + "…"
+        self.app.executor.vars[name] = value
+        values = list(self.var_name["values"] or [])
+        if name not in values:
+            self.var_name.configure(values=values + [name])
+        fresh = self.app.executor.debug_snapshot()
+        self.context_label.configure(text=self._context_text(
+            fresh, self._target_title))
+        self.var_note_label.configure(
+            text=i18n.tr("已写入 {name} = {value}").format(name=name,
+                                                          value=preview),
+            fg=SUCCESS)
+        self.app._log("info", i18n.tr("单步调试：变量 {name} 已改为 {value}")
+                      .format(name=name, value=preview))
 
     def _tick_timeout(self) -> None:
         if self._remaining <= 0:

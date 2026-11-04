@@ -395,9 +395,9 @@ EN: dict[str, str] = {
     "（还要填终点）": " (end point required)",
     "检查失败": "Test failed",
     "找不到图片文件：": "Image file not found: ",
-    "当前屏幕未找到匹配图像（请确认目标窗口已打开且缩放比例一致）":
+    "当前屏幕未找到匹配图像（请确认目标窗口已打开、图片未过期）":
         "No matching image was found on screen. Confirm the target window is open "
-        "and the display scaling matches.",
+        "and the template is still up to date.",
     "找到 1 处匹配 ✓": "1 match found ✓",
     "检查失败：": "Test failed: ",
     "先填写图片名": "Enter an image name first.",
@@ -1003,8 +1003,10 @@ EN: dict[str, str] = {
         "· Reuse: add a Call group step and enter the target group name.",
     "【指令类型】": "Step types",
     "【快捷键】": "Shortcuts",
-    "Ctrl+G 新建执行组　Ctrl+Enter 新增步骤　F2 编辑步骤　Delete 删除步骤":
-        "Ctrl+G New group   Ctrl+Enter Add step   F2 Edit step   Delete Delete step",
+    "Ctrl+G 新建执行组　Ctrl+Enter 新增步骤　"
+    "Ctrl+E 启用/禁用步骤　F2 编辑步骤　Delete 删除步骤":
+        "Ctrl+G New group   Ctrl+Enter Add step   Ctrl+E Enable/disable   "
+        "F2 Edit step   Delete Delete step",
     "F5 运行当前组（全局）　F9 停止（全局，任何时候均有效）":
         "F5 Run current group (global)   F9 Stop (global, always available)",
     "【安全】将鼠标快速移至屏幕左上角，可立即中断执行。":
@@ -1064,6 +1066,46 @@ EN: dict[str, str] = {
     "失败后执行组：": "Group to run after failure: ",
     "匹配": "matches",
     "无匹配": "no match",
+    # 步骤启用 / 禁用
+    "启用步骤": "Enable step(s)",
+    "禁用步骤": "Disable step(s)",
+    "启用此步骤（禁用后运行时跳过）":
+        "Enable this step (disabled steps are skipped when running)",
+    # 诊断信息
+    "导出诊断信息…": "Export diagnostics…",
+    "导出诊断信息": "Export diagnostics",
+    "打开日志目录": "Open log folder",
+    "诊断信息已导出": "Diagnostics exported",
+    "已保存到：": "Saved to:",
+    "是否打开所在文件夹？": "Open the containing folder?",
+    # Webhook 测试
+    "测试": "Test",
+    "向当前地址发送一条测试消息":
+        "Send a test message to the current URL",
+    "请先填写地址": "Enter a URL first",
+    "地址需以 http(s):// 开头": "The URL must start with http(s)://",
+    "发送中…": "Sending…",
+    "发送失败": "Send failed",
+    "发送成功 ✓": "Sent ✓",
+    "Webhook 测试失败": "Webhook test failed",
+    # 单步调试：现场信息 + 临时改变量
+    "目标窗口": "Target window",
+    "未识别": "not identified",
+    "数据行": "Data row",
+    "运行变量": "Run variables",
+    "共 {n} 列": "{n} columns total",
+    "共 {n} 个": "{n} total",
+    "（还没有）": "(none yet)",
+    "（选中的变量会被替换）": "(the selected variable gets replaced)",
+    "写入": "Apply",
+    "调试期间临时改变量（{变量名} 将使用新值）":
+        "Set a variable for this run only ({name} uses the new value)",
+    "请先在左侧填变量名": "Enter a variable name on the left first",
+    "已写入 {name} = {value}": "Set {name} = {value}",
+    "单步调试：变量 {name} 已改为 {value}":
+        "Debug: variable {name} set to {value}",
+    "运行到这一步": "Run to this step",
+    "到它才单步确认": "Confirm step-by-step once reached",
 }
 
 
