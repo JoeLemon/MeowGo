@@ -7963,7 +7963,7 @@ class DebugStepDialog(BaseDialog):
                         pady=(parent.s(6), 0))
         self.var_name = ttk.Combobox(
             editor_row, values=sorted(self._snapshot.get("vars") or {}),
-            width=12, font=FONT_NOTE)  # type: ignore[arg-type]
+            width=12, font=FONT_NOTE)
         self.var_name.pack(side="left")
         self.var_value_var = tk.StringVar()
         self.var_value = uikit.TextField(
@@ -7980,11 +7980,14 @@ class DebugStepDialog(BaseDialog):
             editor_row, text="（选中的变量会被替换）", bg=CARD, fg=MUTED,
             font=FONT_CAPTION)
         self.var_note_label.pack(side="left", padx=(parent.s(6), 0))
-        # 输入框里按空格 / 回车不能触发「跳过 / 运行」
+        # 输入框里按空格 / 回车不能触发「跳过 / 运行」；回车 = 写入变量
+        def on_write(_event: object) -> object:
+            self._write_var()
+            return "break"
+
         for widget in (self.var_name, self.var_value):
             widget.bind("<space>", lambda _event: "break")
-            widget.bind("<Return>", lambda _event: self._write_var()
-                        or "break")
+            widget.bind("<Return>", on_write)
 
         # 快捷键提示 + 自动停止倒计时：让“没人管”的情况也可预期
         hint_row = tk.Frame(self, bg=CARD)

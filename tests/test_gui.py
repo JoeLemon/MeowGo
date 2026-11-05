@@ -2545,7 +2545,8 @@ def test_run_to_step_menu_passes_breakpoint():
     saved_once = app._debug_once
     started = {}
 
-    def fake_start(entry, **kwargs):
+    def fake_start(*args, **kwargs):
+        started["args"] = args
         started.update(kwargs)
 
     app.project.groups = [Group("甲组", [Step("wait", "0.1"),
@@ -2561,7 +2562,7 @@ def test_run_to_step_menu_passes_breakpoint():
         app._start = saved_start
         app._debug_once = saved_once
         app._refresh_all()
-    assert started.get("entry") == "甲组", started
+    assert started["args"][0] == "甲组", started
     assert started.get("debug_breakpoint") == ("甲组", 1), started
     mark("运行到这一步 · 菜单项传断点")
 
@@ -2626,8 +2627,12 @@ def test_debug_dialog_write_var():
         try:
             dialog2.var_name.set("Enter键专用")
             dialog2.var_value_var.set("行内写值")
-            dialog2.var_value.entry.generate_event("<Return>")
-            dialog2.var_value.entry.generate_event("<space>")
+            # 键盘事件会派发给焦点窗：先把焦点放进输入框，事件才不会
+            # 落到确认框顶层上误触「运行」
+            dialog2.var_value.entry.focus_set()
+            dialog2.update()
+            dialog2.var_value.entry.event_generate("<Return>")
+            dialog2.var_value.entry.event_generate("<space>")
             dialog2.update()
             assert app.executor.vars.get("Enter键专用") == "行内写值", \
                 "输入框里的 Enter 应写变量"
