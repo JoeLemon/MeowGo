@@ -32,7 +32,8 @@ def test_platform_capabilities_are_consistent():
 
     status = ps.permission_status()
     assert set(status) == {"screen_recording", "accessibility"}
-    assert ps.available("system_tray") == ps.IS_WINDOWS
+    assert ps.available("system_tray") == (ps.IS_WINDOWS or ps.IS_MACOS)
+    assert ps.available("global_hotkey") == (ps.IS_WINDOWS or ps.IS_MACOS)
     assert ps.available("applescript") == ps.IS_MACOS
     if not ps.IS_MACOS:
         assert ps.missing_permissions() == []

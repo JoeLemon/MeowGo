@@ -23,7 +23,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: python -m ruff check rpa start-app.py build.py
+        run: python -m ruff check rpa start-app.py build.py tests
 
       - name: Type check (mypy)
         run: python -m mypy
@@ -51,10 +51,13 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: python -m ruff check rpa start-app.py build.py
+        run: python -m ruff check rpa start-app.py build.py tests
 
-      - name: Type check (mypy)
-        run: python -m mypy
-
+      # mypy 的 ctypes 类型桩来自 Windows，macOS 上会让 windll / WINFUNCTYPE
+      # 误报，因此不做静态类型检查。
       - name: Engine tests (pytest)
-        run: python -m pytest -m "engine"
+        run: python -m pytest -m "not slow and not gui"
+
+      # macOS 单独跑一次主窗口冒烟（完整 GUI 套件只适合 Windows）
+      - name: GUI smoke (macOS)
+        run: python -m pytest tests/test_gui_mac_smoke.py -q

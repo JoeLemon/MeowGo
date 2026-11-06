@@ -60,9 +60,11 @@ a = Analysis(
         'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.i18n',
         'rpa.lock', 'rpa.dialogs', 'rpa.recorder', 'rpa.logs', 'rpa.theme',
         'rpa.tray', 'rpa.autostart', 'rpa.ocr', 'rpa.uia', 'rpa.pixel_cat',
+        'rpa.mac_native',
         'pyautogui', 'pyperclip', 'PIL', 'PIL.ImageGrab', 'PIL.ImageTk',
         'cv2', 'xlrd', 'openpyxl',
-    ],
+    ] + (['AppKit', 'Quartz', 'Foundation', 'objc', 'ApplicationServices']
+         if IS_MAC else []),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

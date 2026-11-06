@@ -13,6 +13,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -203,6 +204,12 @@ LOOP_TYPES = {"for_each", "while_var"}
 # 界面上「截图替换」等图片相关操作适用的步骤类型
 IMAGE_STEP_TYPES = IMAGE_TYPES | {"if_image", "if_not_image", "if_else",
                                   "drag"}
+# macOS 需要「辅助功能」：模拟键鼠 / 读取窗口与控件
+MAC_ACCESSIBILITY_TYPES = (IMAGE_TYPES | TEXT_STEP_TYPES | UIA_STEP_TYPES
+                           | {"drag", "scroll", "input", "hotkey",
+                              "click_xy", "move_xy", "window", "if_window"})
+# macOS 需要「屏幕录制」：截图 / 找图 / 文字识别
+MAC_SCREEN_TYPES = IMAGE_STEP_TYPES | TEXT_STEP_TYPES
 
 
 Point = namedtuple("Point", "x y")
@@ -364,8 +371,34 @@ SCREEN_CACHE_TTL = 0.08
 SESSION_CHECK_INTERVAL = 1.0
 
 
+def _mac_display_bounds() -> list[tuple[float, float, float, float]]:
+    """活跃显示器的逻辑矩形；取不到返回空列表。"""
+    try:
+        import Quartz
+
+        _err, displays, count = Quartz.CGGetActiveDisplayList(16, None, None)
+        rects: list[tuple[float, float, float, float]] = []
+        for display in list(displays)[:int(count)]:
+            box = Quartz.CGDisplayBounds(display)
+            rects.append((float(box.origin.x), float(box.origin.y),
+                          float(box.size.width), float(box.size.height)))
+        return rects
+    except Exception:  # noqa: BLE001 - 取不到就退回主屏逻辑尺寸
+        return []
+
+
 def virtual_screen_rect() -> tuple[int, int, int, int]:
     """整个虚拟桌面的 (left, top, width, height)；副屏在左侧时 left 为负。"""
+    if platform_support.IS_MACOS:
+        rects = _mac_display_bounds()
+        if rects:
+            left = min(rect[0] for rect in rects)
+            top = min(rect[1] for rect in rects)
+            right = max(rect[0] + rect[2] for rect in rects)
+            bottom = max(rect[1] + rect[3] for rect in rects)
+            if right > left and bottom > top:
+                return (int(left), int(top), int(right - left),
+                        int(bottom - top))
     if os.name == "nt":
         try:
             user32 = _win_user32()
@@ -390,7 +423,17 @@ def session_locked() -> bool:
     """当前输入桌面是否不可用（锁屏 / UAC 安全桌面 / RDP 断开）。
 
     锁屏时截图是全黑的，继续找图只会白等——调用方应暂停并提示。
+    macOS 上用 CGSessionCopyCurrentDictionary 的 ScreenIsLocked 标记；
+    取不到状态时一律按未锁屏处理，避免误暂停。
     """
+    if platform_support.IS_MACOS:
+        try:
+            import Quartz
+
+            info = Quartz.CGSessionCopyCurrentDictionary() or {}
+            return bool(info.get("CGSSessionScreenIsLocked"))
+        except Exception:  # noqa: BLE001
+            return False
     if os.name != "nt":
         return False
     try:
@@ -404,10 +447,56 @@ def session_locked() -> bool:
         return False
 
 
-def capture_screen():
-    """采集一帧整个虚拟桌面，返回 (BGR ndarray, (left, top))。
+def display_scale() -> float:
+    """截图像素与屏幕逻辑坐标的比例（Retina 屏为 2，普通屏为 1）。"""
+    if not platform_support.IS_MACOS:
+        return 1.0
+    try:
+        import Quartz
 
-    副屏在主屏左侧时 left/top 为负。单独一层便于测试注入假屏幕。
+        display = Quartz.CGMainDisplayID()
+        points_w = float(Quartz.CGDisplayBounds(display).size.width)
+        pixels_w = float(Quartz.CGDisplayPixelsWide(display))
+        if points_w > 0 and pixels_w > 0:
+            return max(1.0, pixels_w / points_w)
+    except Exception:  # noqa: BLE001 - 取不到就按普通屏处理
+        pass
+    return 1.0
+
+
+def _split_capture(result):
+    """兼容 capture_screen 的 2 元组（旧测试替身）与 3 元组（带缩放）。"""
+    try:
+        frame, origin, scale = result
+    except (TypeError, ValueError):
+        frame, origin = result
+        scale = 1.0
+    return frame, origin, float(scale)
+
+
+def _search_bounds(region, origin, scale, shape) -> tuple[int, int, int, int]:
+    """把逻辑坐标的识别区域换算成截图里的像素范围。"""
+    rx, ry, rw, rh = region
+    x0 = max(0, int(round((rx - origin[0]) * scale)))
+    y0 = max(0, int(round((ry - origin[1]) * scale)))
+    x1 = min(shape[1], x0 + int(round(rw * scale)))
+    y1 = min(shape[0], y0 + int(round(rh * scale)))
+    return x0, y0, x1, y1
+
+
+def _match_point(base_x: float, base_y: float, scale: float,
+                 box: tuple[float, int, int, int, int]) -> "Point":
+    """把截图里的命中框中心换算回屏幕逻辑坐标。"""
+    _score, x, y, width, height = box
+    return Point(base_x + (x + width / 2) / scale,
+                 base_y + (y + height / 2) / scale)
+
+
+def capture_screen():
+    """采集一帧整个虚拟桌面，返回 (BGR ndarray, (left, top), scale)。
+
+    副屏在主屏左侧时 left/top 为负；scale 是截图相对逻辑坐标的倍数
+    （macOS Retina 下为 2，其它情况为 1），供找图结果换算点击坐标。
     """
     import numpy as np
 
@@ -424,7 +513,7 @@ def capture_screen():
 
         frame = np.asarray(pyautogui.screenshot())[:, :, ::-1]
         origin = (0, 0)
-    return frame, origin
+    return frame, origin, display_scale()
 
 
 MAX_CALL_DEPTH = 20
@@ -480,7 +569,7 @@ def find_images(text: str, base_dir: str = "",
         import numpy as np
 
         if frame is None:
-            frame, origin = capture_screen()
+            frame, origin, scale = _split_capture(capture_screen())
             if frame.size == 0:
                 result.append(item)
                 continue
@@ -498,16 +587,14 @@ def find_images(text: str, base_dir: str = "",
 
         use_region = target.region or region
         if use_region:
-            rx, ry, rw, rh = use_region
-            x0 = max(0, rx - origin[0])
-            y0 = max(0, ry - origin[1])
-            x1 = min(frame.shape[1], x0 + rw)
-            y1 = min(frame.shape[0], y0 + rh)
+            x0, y0, x1, y1 = _search_bounds(
+                use_region, origin, scale, frame.shape)
             if x1 <= x0 or y1 <= y0:
                 result.append(item)
                 continue
             search = frame[y0:y1, x0:x1]
-            base_x, base_y = origin[0] + x0, origin[1] + y0
+            base_x = origin[0] + x0 / scale
+            base_y = origin[1] + y0 / scale
         else:
             search = frame
             base_x, base_y = origin
@@ -522,9 +609,10 @@ def find_images(text: str, base_dir: str = "",
             if factor is not None:
                 boxes = _match_at_scale(search, template,
                                         scaled_confidence, factor)
-        item["points"] = [(base_x + x + width / 2,
-                           base_y + y + height / 2)
-                          for _score, x, y, width, height in boxes]
+        item["points"] = [
+            (point.x, point.y)
+            for point in (_match_point(base_x, base_y, scale, box)
+                          for box in boxes)]
         result.append(item)
     return result
 
@@ -821,6 +909,16 @@ def _read_temp_text(handle) -> str:
     return data.strip()
 
 
+def _command_error_hint(text: str) -> str:
+    """系统命令失败时补一句平台相关的说明（目前只处理 macOS 上的 start）。"""
+    if not platform_support.IS_MACOS:
+        return ""
+    if re.match(r"\s*start(\s|$)", text or ""):
+        return ('\n这是 Windows 的 start 命令；macOS 请改用 '
+                'open -a "Google Chrome" 或 open "https://example.com"。')
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # 变量表达式求值：set 步骤里「变量名=表达式」。表达式**只支持纯算术**
 # （+ - * / // % ** 和括号），其余一律当作字符串原样保存——既避免 eval
@@ -968,7 +1066,9 @@ class Step:
                 errors.append(f"{where}：热键里存在空项，请检查逗号")
             if len(keys) > 10:
                 errors.append(f"{where}：热键最多 10 个按键")
-            if any(k.isdigit() for k in keys):
+            # Windows 沿用旧版限制（顶层数字键不识别）；macOS 可正常使用
+            if (not platform_support.IS_MACOS
+                    and any(k.isdigit() for k in keys)):
                 errors.append(f"{where}：单个数字键无法识别，请改用 num0 这类写法")
 
         # 图片类、拖拽、条件、命令、文字/控件、文件等待都可以「最多等 N 秒」
@@ -1345,6 +1445,8 @@ def validate_environment(groups: Iterable[Group]) -> list[str]:
     needs_opencv = False
     needs_ocr = False
     needs_uia = False
+    needs_accessibility = False
+    needs_screen_recording = False
     for group in groups:
         for step in group.steps:
             if not step.enabled:
@@ -1361,6 +1463,10 @@ def validate_environment(groups: Iterable[Group]) -> list[str]:
                 needs_ocr = True
             elif step.type in UIA_STEP_TYPES:
                 needs_uia = True
+            if step.type in MAC_ACCESSIBILITY_TYPES:
+                needs_accessibility = True
+            if step.type in MAC_SCREEN_TYPES:
+                needs_screen_recording = True
 
     problems: list[str] = []
     if needs_opencv and not opencv_available():
@@ -1375,6 +1481,18 @@ def validate_environment(groups: Iterable[Group]) -> list[str]:
 
         if not uia.available():
             problems.append(uia.UIA_INSTALL_HINT)
+    if platform_support.IS_MACOS:
+        missing = set(platform_support.missing_permissions())
+        if needs_accessibility and "accessibility" in missing:
+            problems.append(
+                "缺少「辅助功能」权限，鼠标键盘模拟 / 窗口操作 / 控件点击会失败。"
+                "请到 系统设置 → 隐私与安全性 → 辅助功能 中勾选运行 MeowGo "
+                "的终端 / Python，然后重启 MeowGo。")
+        if needs_screen_recording and "screen_recording" in missing:
+            problems.append(
+                "缺少「屏幕录制」权限，截图 / 找图 / 文字识别步骤会失败。"
+                "请到 系统设置 → 隐私与安全性 → 屏幕录制 中勾选运行 MeowGo "
+                "的终端 / Python，然后重启 MeowGo。")
     return problems
 
 
@@ -1579,15 +1697,38 @@ RESULT_SUFFIX = ".result.csv"
 
 
 def result_path(data_path: str) -> str:
-    """数据文件对应的结果文件：同目录下 <文件名>.result.csv。"""
-    stem, _ = os.path.splitext(os.path.abspath(data_path))
-    return stem + RESULT_SUFFIX
+    """数据文件对应的结果文件。
+
+    CSV / XLS 输入写 .result.csv；XLSX 输入写 .result.xlsx，
+    保留原表格格式，用户在 Excel 里直接续用。
+    """
+    stem, ext = os.path.splitext(os.path.abspath(data_path))
+    suffix = (".result.xlsx" if ext.lower() in (".xlsx", ".xlsm")
+              else RESULT_SUFFIX)
+    return stem + suffix
 
 
 def read_results(path: str) -> list[dict]:
     """读回结果文件（断点续跑 / 合并用）；不存在返回空列表。"""
     if not path or not os.path.exists(path):
         return []
+    if path.lower().endswith((".xlsx", ".xlsm")):
+        import openpyxl
+
+        book = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            rows = list(book.active.iter_rows(values_only=True))
+        finally:
+            book.close()
+        if not rows:
+            return []
+        headers = ["" if value is None else str(value) for value in rows[0]]
+        return [
+            {headers[i]: ("" if i >= len(row) or row[i] is None
+                         else str(row[i]))
+             for i in range(len(headers))}
+            for row in rows[1:]
+        ]
     with open(path, "r", encoding="utf-8-sig", newline="") as fh:
         return list(csv.DictReader(fh))
 
@@ -1655,6 +1796,20 @@ def write_results(data: list[dict], results: list[dict], path: str,
 
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
+    if path.lower().endswith((".xlsx", ".xlsm")):
+        import openpyxl
+
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "结果"
+        sheet.append(fieldnames)
+        for row_no in sorted(merged):
+            record = merged[row_no]
+            sheet.append([record.get(name, "") for name in fieldnames])
+        sheet.column_dimensions["A"].width = 24
+        book.save(path)
+        return path
+
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8-sig", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames,
@@ -1716,8 +1871,104 @@ def estimate_steps(groups: dict[str, list[Step]], order: list[str],
 
 
 # ---------------------------------------------------------------------------
-# 窗口操作（Windows）
+# 窗口操作（Windows / macOS）
 # ---------------------------------------------------------------------------
+
+_MAC_WINDOW_SCRIPT = """
+tell application "System Events"
+    set out to {}
+    repeat with proc in (application processes whose background only is false)
+        try
+            repeat with win in windows of proc
+                try
+                    set end of out to (name of win) & "\\t" & (name of proc)
+                end try
+            end repeat
+        end try
+    end repeat
+    return out
+end tell
+"""
+
+
+def _osascript(script: str, timeout: float = 10) -> str:
+    """执行 AppleScript；失败 / 无权限 / 非 macOS 时返回空串。"""
+    if not platform_support.IS_MACOS:
+        return ""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True,
+            text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _mac_windows() -> list[tuple[str, str]]:
+    """[(窗口标题, 进程名)]；读不到（未授权辅助功能）时返回空列表。"""
+    pairs: list[tuple[str, str]] = []
+    for line in _osascript(_MAC_WINDOW_SCRIPT).splitlines():
+        title, sep, process = line.partition("\t")
+        if sep and title.strip():
+            pairs.append((title.strip(), process.strip()))
+    return pairs
+
+
+def _mac_window_pair(title: str) -> Optional[tuple[str, str]]:
+    """按标题子串找 (窗口标题, 进程名)。"""
+    needle = (title or "").strip().lower()
+    if not needle:
+        return None
+    for window_title_text, process in _mac_windows():
+        if needle in window_title_text.lower():
+            return window_title_text, process
+    return None
+
+
+def _mac_window_action(action: str, title: str) -> str:
+    """macOS 窗口操作：activate / close（wait 由调用方轮询）。"""
+    pair = _mac_window_pair(title)
+    if pair is None:
+        raise StepError(f"找不到标题包含「{title}」的窗口")
+    window_text, process = pair
+    process_literal = json.dumps(process, ensure_ascii=False)
+    window_literal = json.dumps(window_text, ensure_ascii=False)
+    if action == "activate":
+        script = (
+            f'tell application "System Events"\n'
+            f'  tell process {process_literal}\n'
+            f'    set frontmost to true\n'
+            f'    try\n'
+            f'      perform action "AXRaise" of window {window_literal}\n'
+            f'    end try\n'
+            f'  end tell\n'
+            f'end tell')
+        _osascript(script)
+        return f"已激活窗口「{title}」"
+    if action == "close":
+        script = (
+            f'tell application "System Events"\n'
+            f'  tell process {process_literal}\n'
+            f'    set frontmost to true\n'
+            f'    try\n'
+            f'      click button 1 of window {window_literal}\n'
+            f'    on error\n'
+            f'      delay 0.2\n'
+            f'      keystroke "w" using command down\n'
+            f'    end try\n'
+            f'  end tell\n'
+            f'end tell')
+        _osascript(script)
+        return f"已关闭窗口「{title}」"
+    raise StepError(f"未知窗口操作：{action}")
+
+
+def _window_exists(title: str) -> bool:
+    """窗口是否存在（Windows 枚举句柄，macOS 走 AppleScript）。"""
+    if platform_support.IS_MACOS:
+        return _mac_window_pair(title) is not None
+    return _find_window(title) is not None
+
 
 def _enum_windows() -> list[tuple[int, str]]:
     """返回 [(hwnd, 标题), ...]，只收可见、有标题的窗口。"""
@@ -1780,10 +2031,26 @@ def _force_foreground(hwnd: int) -> None:
     user32.BringWindowToTop(hwnd)
 
 
+def _mac_permission_hint(kind: str) -> str:
+    """macOS 缺少某项权限时，返回一句可直接照做的提示（其它平台为空串）。"""
+    if not platform_support.IS_MACOS:
+        return ""
+    if kind not in platform_support.missing_permissions():
+        return ""
+    names = {
+        "accessibility": "辅助功能",
+        "screen_recording": "屏幕录制",
+    }
+    if kind not in names:
+        return ""
+    return (f"缺少「{names[kind]}」权限：请到 系统设置 → 隐私与安全性 → "
+            f"{names[kind]} 勾选 MeowGo（或运行它的终端），然后重启 MeowGo。")
+
+
 def _window_action(text: str) -> str:
     """执行 activate:标题 / wait:标题|秒 / close:标题，返回结果描述。"""
-    if ctypes is None:
-        raise StepError("窗口操作只支持 Windows")
+    if ctypes is None and not platform_support.IS_MACOS:
+        raise StepError("窗口操作只支持 Windows 和 macOS")
     action, _, rest = (text or "").partition(":")
     action = action.strip().lower()
     if action == "wait":
@@ -1795,15 +2062,24 @@ def _window_action(text: str) -> str:
             limit = 5.0
         deadline = time.time() + max(0.0, limit)
         while True:
-            hwnd = _find_window(title)
-            if hwnd is not None:
-                _force_foreground(hwnd)
-                return f"窗口「{title}」已出现并激活"
+            if platform_support.IS_MACOS:
+                if _mac_window_pair(title) is not None:
+                    _mac_window_action("activate", title)
+                    return f"窗口「{title}」已出现并激活"
+            else:
+                hwnd = _find_window(title)
+                if hwnd is not None:
+                    _force_foreground(hwnd)
+                    return f"窗口「{title}」已出现并激活"
             if time.time() >= deadline:
-                raise StepError(f"等待窗口「{title}」超时（{limit:g} 秒）")
+                hint = _mac_permission_hint("accessibility")
+                detail = f"：{hint}" if hint else ""
+                raise StepError(f"等待窗口「{title}」超时（{limit:g} 秒）{detail}")
             time.sleep(POLL_INTERVAL)
 
     title = rest.strip()
+    if platform_support.IS_MACOS:
+        return _mac_window_action(action, title)
     hwnd = _find_window(title)
     if hwnd is None:
         raise StepError(f"找不到标题包含「{title}」的窗口")
@@ -1838,6 +2114,8 @@ def render_content(text: str, row: Optional[dict] = None,
       {random}  4 位随机数字
       {列名}    当前数据行里该列的值（数据驱动）
       {变量名}  「设置变量 / 复制到变量」步骤存下的值
+      {变量.字段} 变量里存的是 JSON 时按字段路径取值，
+                 支持 user.name、items[0].id
     数据列、变量不存在时保留原样，方便用户发现拼写问题。
     """
     if not text or "{" not in text:
@@ -1860,6 +2138,18 @@ def render_content(text: str, row: Optional[dict] = None,
             return "" if value is None else str(value)
         if vars and name in vars:
             return str(vars[name])
+        # {变量.字段}：变量里存的是 JSON 时按路径取值（支持 items[0].id）
+        root, sep, path = name.partition(".")
+        if sep and vars and root in vars:
+            raw = vars[root]
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                value = _json_path(data, path)
+            except (KeyError, IndexError, TypeError, ValueError):
+                return match.group(0)
+            if isinstance(value, str):
+                return value
+            return json.dumps(value, ensure_ascii=False)
         return match.group(0)   # 列/变量不存在：保留原样，方便发现拼写问题
 
     return re.sub(r"\{([^{}]+)\}", replace, text)
@@ -1906,6 +2196,8 @@ class Executor:
     _screen_frame: object = None
     _screen_origin: tuple[int, int] = (0, 0)
     _screen_at: float = 0.0
+    # 截图相对屏幕逻辑坐标的倍数（macOS Retina 为 2）
+    _screen_scale: float = 1.0
     # 模板图缓存：path -> (mtime, ndarray)
     _template_cache: dict[str, tuple[float, object]] = field(
         default_factory=dict)
@@ -1941,6 +2233,7 @@ class Executor:
         self._progress_done = 0
         self._screen_frame = None
         self._screen_at = 0.0
+        self._screen_scale = 1.0
         self._scale_notices.clear()
         self._scale_sweep_at.clear()
         self._session_locked = False
@@ -2065,10 +2358,11 @@ class Executor:
         if (self._screen_frame is not None
                 and now - self._screen_at <= SCREEN_CACHE_TTL):
             return self._screen_frame, self._screen_origin
-        frame, origin = self._capture_screen()
+        frame, origin, scale = _split_capture(self._capture_screen())
         frame = np.ascontiguousarray(frame)
         self._screen_frame = frame
         self._screen_origin = origin
+        self._screen_scale = scale
         self._screen_at = now
         return frame, self._screen_origin
 
@@ -2139,16 +2433,15 @@ class Executor:
         frame, (origin_x, origin_y) = self._grab_screen()
         if frame.size == 0:
             return None
+        scale = self._screen_scale
         if region:
-            rx, ry, rw, rh = region
-            x0 = max(0, rx - origin_x)
-            y0 = max(0, ry - origin_y)
-            x1 = min(frame.shape[1], x0 + rw)
-            y1 = min(frame.shape[0], y0 + rh)
+            x0, y0, x1, y1 = _search_bounds(
+                region, (origin_x, origin_y), scale, frame.shape)
             if x1 <= x0 or y1 <= y0:
                 return None
             search = frame[y0:y1, x0:x1]
-            base_x, base_y = origin_x + x0, origin_y + y0
+            base_x = origin_x + x0 / scale
+            base_y = origin_y + y0 / scale
         else:
             search = frame
             base_x, base_y = origin_x, origin_y
@@ -2170,9 +2463,7 @@ class Executor:
             index = nth if nth and nth > 0 else 0
             if index >= len(boxes):
                 return None
-            _score, x, y, width, height = boxes[index]
-            return Point(base_x + x + width / 2,
-                         base_y + y + height / 2)
+            return _match_point(base_x, base_y, scale, boxes[index])
 
         # 1. 上次验证成功的比例优先（DPI 通常整场运行都不变）
         if hint is not None:
@@ -2424,6 +2715,9 @@ class Executor:
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NO_WINDOW", 0)
+        else:
+            # 独立进程组：停止 / 超时时能把命令拉起的子进程一起结束
+            kwargs["start_new_session"] = True
         out_file = tempfile.TemporaryFile()
         err_file = tempfile.TemporaryFile()
         try:
@@ -2466,12 +2760,13 @@ class Executor:
         if proc.returncode:
             self._step_ok = False
             self._emit("error", f"命令返回 {proc.returncode}："
-                                f"{(error or output)[:300]}")
+                                f"{(error or output)[:300]}"
+                                f"{_command_error_hint(text)}")
         self._sleep(0.2)
 
     @staticmethod
     def _kill_process(proc) -> None:
-        """结束命令及其子进程（Windows 下 taskkill /T 才管得到子进程）。"""
+        """结束命令及其子进程（Windows 用 taskkill /T，POSIX 杀整个进程组）。"""
         try:
             if os.name == "nt":
                 subprocess.run(
@@ -2479,7 +2774,16 @@ class Executor:
                     capture_output=True, timeout=10,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             else:
-                proc.kill()
+                killpg = getattr(os, "killpg", None)
+                getpgid = getattr(os, "getpgid", None)
+                sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                if killpg and getpgid:
+                    try:
+                        killpg(getpgid(proc.pid), sigkill)
+                    except (OSError, ProcessLookupError):
+                        proc.kill()
+                else:                       # 理论上不会走到：没有进程组 API
+                    proc.kill()
         except Exception:  # noqa: BLE001 - 进程可能已经自己退出
             pass
         try:
@@ -2500,16 +2804,15 @@ class Executor:
         frame, (origin_x, origin_y) = self._grab_screen()
         if frame.size == 0:
             return None
+        scale = self._screen_scale
         if region:
-            rx, ry, rw, rh = region
-            x0 = max(0, rx - origin_x)
-            y0 = max(0, ry - origin_y)
-            x1 = min(frame.shape[1], x0 + rw)
-            y1 = min(frame.shape[0], y0 + rh)
+            x0, y0, x1, y1 = _search_bounds(
+                region, (origin_x, origin_y), scale, frame.shape)
             if x1 <= x0 or y1 <= y0:
                 return None
             crop = frame[y0:y1, x0:x1]
-            base_x, base_y = origin_x + x0, origin_y + y0
+            base_x = origin_x + x0 / scale
+            base_y = origin_y + y0 / scale
         else:
             crop = frame
             base_x, base_y = origin_x, origin_y
@@ -2519,7 +2822,7 @@ class Executor:
             raise StepError(str(exc)) from exc
         if point is None:
             return None
-        return Point(base_x + point[0], base_y + point[1])
+        return Point(base_x + point[0] / scale, base_y + point[1] / scale)
 
     def _wait_text(self, text: str, step: Step, click: bool = False) -> bool:
         """等文字出现（click=True 时顺便点一下），超时按 on_fail 处理。"""
@@ -2645,13 +2948,12 @@ class Executor:
         deadline = (time.time() + timeout
                     if timeout and timeout > 0 else None)
         while True:
-            window = _find_window(title)
-            if window is not None:
-                return window
+            if _window_exists(title):
+                return True
             if deadline is None or time.time() >= deadline:
-                return None
+                return False
             if not self._sleep(POLL_INTERVAL):
-                return None
+                return False
 
     def _run_if_image(self, text: str, step: Step, depth: int = 0) -> None:
         """条件步骤：屏幕上出现指定图片，就调用对应的执行组。"""
@@ -2701,13 +3003,11 @@ class Executor:
 
     def _run_if_window(self, text: str, step: Step, depth: int = 0) -> None:
         """条件步骤：存在标题包含指定文字的窗口，才调用对应的执行组。"""
-        if ctypes is None:
-            raise StepError("窗口条件只支持 Windows")
         title, _, target = text.partition("|")
         title, target = title.strip(), target.strip()
         if not title or not target:
             raise StepError("窗口条件要写成 窗口标题|组名")
-        if self._wait_window(title, step.timeout) is None:
+        if not self._wait_window(title, step.timeout):
             self._emit("info", f"条件不满足：找不到窗口「{title}」，跳过")
             return
         self._emit("info", f"条件满足：窗口「{title}」存在，执行「{target}」")
@@ -3219,7 +3519,9 @@ class Executor:
             self._emit("info", f"已保存失败截图：{path}")
             return path
         except Exception as exc:  # noqa: BLE001 - 截图失败不能影响主流程
-            self._emit("warn", f"失败截图保存失败：{exc}")
+            hint = _mac_permission_hint("screen_recording")
+            suffix = f"（{hint}）" if hint else ""
+            self._emit("warn", f"失败截图保存失败：{exc}{suffix}")
             return ""
 
     def _call_group(self, step: Step, depth: int) -> None:

@@ -8,11 +8,22 @@ from __future__ import annotations
 
 from typing import Optional
 
-OCR_INSTALL_HINT = (
-    "未安装 OCR 组件，文字识别步骤无法运行。请执行："
-    "pip install pytesseract，并安装 Tesseract-OCR"
-    "（https://github.com/UB-Mannheim/tesseract/wiki，"
-    "安装时勾选中文语言包）")
+from . import platform_support
+
+# 安装方式按平台给：Windows 的官方安装包链接在 macOS 上没用，
+# 直接写 brew 命令，用户复制就能执行。
+if platform_support.IS_MACOS:
+    OCR_INSTALL_HINT = (
+        "未安装 OCR 组件，文字识别步骤无法运行。请执行："
+        "pip install pytesseract，并安装 Tesseract："
+        "brew install tesseract tesseract-lang"
+        "（tesseract-lang 内含中文语言包 chi_sim）")
+else:
+    OCR_INSTALL_HINT = (
+        "未安装 OCR 组件，文字识别步骤无法运行。请执行："
+        "pip install pytesseract，并安装 Tesseract-OCR"
+        "（https://github.com/UB-Mannheim/tesseract/wiki，"
+        "安装时勾选中文语言包）")
 
 
 class OcrUnavailable(RuntimeError):

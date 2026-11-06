@@ -43,7 +43,14 @@ EN: dict[str, str] = {
     "新增": "Add",
     "复制": "Copy",
     "清空": "Clear",
+    "关于 ": "About ",
+    "退出 ": "Quit ",
     "浏览": "Browse…",
+    "打开": "Open",
+    "打开项目": "Open project",
+    "另存为项目": "Save project as",
+    "最近项目": "Recent projects",
+    "双击一行打开项目": "Double-click a row to open a project",
     "开始运行": "Start",
     "运行这一步": "Run step",
     "跳过": "Skip",
@@ -87,6 +94,7 @@ EN: dict[str, str] = {
     "宏录制鼠标操作…": "Record mouse actions…",
     "录成坐标步骤": "Save as coordinate steps",
     "运行当前组": "Run current group",
+    "停止运行": "Stop run",
     "运行全部组": "Run all groups",
     "带数据运行…": "Run with data…",
     "单步调试运行这个组": "Debug this group",
@@ -257,6 +265,7 @@ EN: dict[str, str] = {
     " · 最近 ": " · latest ",
     "还没有定时执行记录": "No scheduled runs yet",
     "运行中": "Running",
+    "空闲": "Idle",
     "成功": "Succeeded",
     "已停止": "Stopped",
     "出错": "Failed",
@@ -315,6 +324,7 @@ EN: dict[str, str] = {
     "开机自启开启失败": "Failed to enable startup",
     "开机自启已开启：": "Startup enabled: ",
     "开机自启关闭失败": "Failed to disable startup",
+    "开机自启已关闭": "Startup disabled",
     "开机自启已关闭（已移除注册表启动项）":
         "Startup disabled (Run entry removed from the registry)",
     "启动倒计时": "Start countdown",
@@ -704,6 +714,11 @@ EN: dict[str, str] = {
         "Double-click the icon to open it.",
     "已按设置启动并隐藏到托盘": "Started and hidden to the system tray as configured",
     "按键录入只支持 Windows": "Key capture is only supported on Windows.",
+    "按键录入只支持 Windows / macOS":
+        "Key capture is only supported on Windows and macOS.",
+    "按键录入需要 macOS「辅助功能」权限：系统设置 → 隐私与安全性 → 辅助功能":
+        "Key capture requires macOS Accessibility permission: System Settings → "
+        "Privacy & Security → Accessibility.",
     "录制中：直接按组合键，全部松开自动录入；单独按 Esc 取消":
         "Recording: press the key combination and release all keys to capture it. "
         "Press Esc alone to cancel.",
@@ -711,6 +726,11 @@ EN: dict[str, str] = {
         "⚠ The engine does not recognize top-row number keys (legacy limitation). "
         "Use the numeric keypad keys num0–num9 instead.",
     "宏录制只支持 Windows": "Macro recording is only supported on Windows.",
+    "宏录制只支持 Windows / macOS":
+        "Macro recording is only supported on Windows and macOS.",
+    "宏录制需要 macOS「辅助功能」权限：系统设置 → 隐私与安全性 → 辅助功能":
+        "Macro recording requires macOS Accessibility permission: System Settings → "
+        "Privacy & Security → Accessibility.",
     "录制中：正常操作鼠标，点本窗口的「停止」结束":
         "Recording: use the mouse normally, then click Stop in this window to finish.",
     "点「开始录制」后正常操作鼠标；\n录的是绝对坐标，适合界面固定的场景。\n停止时请用本窗口的按钮。":
@@ -938,6 +958,20 @@ EN: dict[str, str] = {
         "e.g. OK|Button.",
     "控件识别依赖 uiautomation 组件。":
         "Control detection requires the uiautomation component.",
+    "按键录制只支持 Windows 和 macOS。":
+        "Key capture is supported on Windows and macOS only.",
+    "控件点击只支持 Windows 和 macOS。":
+        "Control clicking is supported on Windows and macOS only.",
+    "未获得 macOS「辅助功能」权限，控件点击无法运行。请在 系统设置 → "
+    "隐私与安全性 → 辅助功能 中勾选运行 MeowGo 的终端 / Python，"
+    "然后重新启动 MeowGo。":
+        "macOS Accessibility permission is required for control clicking. "
+        "Enable the terminal / Python running MeowGo under System Settings → "
+        "Privacy & Security → Accessibility, then restart MeowGo.",
+    "未安装 macOS 控件访问组件，控件操作步骤无法运行。请执行："
+    "pip install pyobjc-framework-ApplicationServices":
+        "The macOS control access component is missing. Run: "
+        "pip install pyobjc-framework-ApplicationServices",
     "左侧填写比较条件，右侧填写满足后执行的执行组。":
         "Enter the comparison on the left and the group to run on match on the right.",
     "运算符：== != > < >= <= contains notcontains，如 计数>3。":
@@ -1036,9 +1070,10 @@ EN: dict[str, str] = {
     "现在打开系统设置？": "Open System Settings now?",
     "可稍后在「帮助 → 检查 macOS 权限…」重新检查。":
         "You can check again later via Help → Check macOS permissions….",
-    "macOS 上不支持全局 F5 / F9，请使用窗口内按钮或快捷键。":
-        "Global F5 / F9 are unavailable on macOS. Use the in-window buttons or "
-        "shortcuts instead.",
+    "macOS 首次使用全局 F5 / F9 需在「系统设置 → 隐私与安全性 → 辅助功能」中授权；未授权时只有窗口内快捷键生效。":
+        "Global F5 / F9 require Accessibility permission (System Settings → "
+        "Privacy & Security → Accessibility) on first use; without it only the "
+        "in-window shortcuts work.",
     "该步骤类型只支持 Windows，macOS 上执行会报错":
         "This step type is Windows-only and will fail on macOS.",
 
@@ -1046,12 +1081,24 @@ EN: dict[str, str] = {
     "通用": "General",
     "系统集成": "System integration",
     "系统集成（仅 Windows）": "System integration (Windows only)",
+    "系统集成（暂不可用）": "System integration (unavailable)",
     "界面缩放（重启后生效）": "UI scale (applies after restart)",
+    "当前系统不支持开机自启与系统托盘，相关开关已停用。":
+        "Autostart and the system tray are unavailable on this platform; "
+        "these switches are disabled.",
     "当前系统不支持开机自启与系统托盘，相关开关已停用。"
     "macOS 可在「系统设置 → 通用 → 登录项」里添加 MeowGo.app。":
         "Startup and system tray are unavailable on this platform, so these "
         "switches are disabled. On macOS, add MeowGo.app under System Settings → "
         "General → Login Items.",
+    "开机自启通过 LaunchAgent（~/Library/LaunchAgents）实现，登录后仅启动客户端，不自动执行流程。菜单栏托盘图标点按后可显示主窗口或退出；「启动后最小化」适合配合开机自启使用。":
+        "Autostart uses a LaunchAgent (~/Library/LaunchAgents). It only launches "
+        "the client after login and does not run any flow. Click the menu bar "
+        "tray icon to show the main window or quit; Start minimized works well "
+        "together with autostart.",
+    "全局热键已启用：F5 运行 / F9 停止":
+        "Global hotkeys enabled: F5 run / F9 stop",
+    "全局热键未启用": "Global hotkeys are not enabled",
     "已恢复默认值，点「保存」生效":
         "Defaults restored. Click Save to apply.",
     "恢复默认设置": "Restore defaults",

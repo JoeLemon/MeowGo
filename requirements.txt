@@ -6,3 +6,5 @@ pillow
 opencv-python
 xlrd
 openpyxl
+# macOS 控件点击（AXUIElement）；Windows 对应 uiautomation 为可选安装
+pyobjc-framework-ApplicationServices>=10; sys_platform == "darwin"

@@ -22,7 +22,22 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Optional
 
 from . import __version__ as APP_VERSION
-from . import assets, autostart, dialogs, i18n, logs, platform_support, theme, tray, uikit
+from . import (
+    assets,
+    autostart,
+    dialogs,
+    i18n,
+    launchd,
+    logs,
+    platform_support,
+    project_io,
+    report_dialogs,
+    secrets,
+    theme,
+    tray,
+    uikit,
+    updater,
+)
 from .dialogs import BaseDialog, GroupDialog, ShortcutsDialog
 from .engine import (
     CONDITION_TYPES,
@@ -41,10 +56,8 @@ from .engine import (
     export_excel,
     find_images,
     import_excel,
-    list_run_reports,
     opencv_available,
     parse_region,
-    parse_report_table,
     validate_environment,
     validate_project,
     window_title,
@@ -54,6 +67,12 @@ from .recorder import (
     KeyRecorder,
     MacroRecorder,
     vk_to_key_name,  # noqa: F401 - 保持旧的 gui.vk_to_key_name 导入路径
+)
+from .report_dialogs import (
+    BackupDialog,
+    RecentProjectsDialog,
+    RunHistoryDialog,
+    RunReportDialog,  # noqa: F401 - 保持旧的 gui.RunReportDialog 导入路径
 )
 from .schedule import (
     _valid_schedule_time,
@@ -118,7 +137,17 @@ BACKUPS_DIR = os.path.join(APP_DIR, "backups")
 MAX_CONFIG_BACKUPS = 10
 MAX_LOG_LINES = 2000              # 日志上限：超出后从最早的行开始丢弃
 DEFAULT_GROUPS_KEY = "default_groups_version"   # 状态文件里的预置组版本
-DEFAULT_GROUPS_VERSION = 2
+DEFAULT_GROUPS_VERSION = 3
+
+
+def image_dir_path(value: object) -> str:
+    """把图片目录规范成绝对路径。
+
+    旧配置 / 项目文件里可能存的是相对路径；GUI 从 Finder 启动、定时任务
+    由 launchd 启动时工作目录都不是程序目录，相对路径会解析到错误位置。
+    """
+    path = str(value or "").strip() or DEFAULT_IMAGE_DIR
+    return path if os.path.isabs(path) else os.path.join(APP_DIR, path)
 
 
 def _post_webhook(url: str, text: str, timeout: float = 10) -> None:
@@ -592,18 +621,71 @@ def enable_dpi_awareness() -> None:
         pass
 
 
-def build_default_groups() -> list[Group]:
+# 预置模板里的启动命令 / 默认程序按平台生成：Windows 用 start，macOS 用
+# open -a。以前把 start 写死在模板里，macOS 上必然报 127（start 不存在），
+# 浏览器起不来，后面的等窗口步骤就只剩超时。
+_TEMPLATE_VALUES = {
+    "windows": {
+        "browser": "chrome",
+        "browser_note": "chrome / msedge / 完整 exe 路径",
+        "browser_cmd": 'start "" "{浏览器}"',
+        "browser_url_cmd": 'start "" "{浏览器}" "{网址}"',
+        "software": "notepad",
+        "software_note": "exe 名称或完整路径，如 notepad / calc。",
+        "software_first_note": "首先打开的程序，如 notepad / calc / 完整路径。",
+        "software_cmd": 'start "" "{软件}"',
+        "software_group_note": "预置模板：请将「软件」变量修改为要打开的程序"
+                               "名称或完整 exe 路径。",
+        "file_path": "C:\\Users\\Public\\Documents\\示例.txt",
+        "file_hotkey": "alt,n",
+        "file_hotkey_note": "将焦点切换至文件名输入框。",
+    },
+    "macos": {
+        "browser": "Google Chrome",
+        "browser_note": "Google Chrome / Safari / Firefox，或完整 .app 名称",
+        "browser_cmd": 'open -a "{浏览器}"',
+        "browser_url_cmd": 'open -a "{浏览器}" "{网址}"',
+        "software": "TextEdit",
+        "software_note": "应用名称或完整 .app 路径，如 TextEdit / Safari。",
+        "software_first_note": "首先打开的应用，如 TextEdit / Safari / 完整 .app 路径。",
+        "software_cmd": 'open -a "{软件}"',
+        "software_group_note": "预置模板：请将「软件」变量修改为要打开的应用"
+                               "名称或完整 .app 路径。",
+        "file_path": "/Users/Shared/示例.txt",
+        "file_hotkey": "command,shift,g",
+        "file_hotkey_note": "Cmd+Shift+G 打开「前往文件夹」，输入完整路径。",
+    },
+}
+# 旧版 Windows 模板里的启动命令 → 当前平台写法。升级时只替换这些 cmd 步骤，
+# 用户改过的变量 / 备注 / 步骤顺序都不动。
+_LAUNCH_COMMANDS = {
+    "windows": {},
+    "macos": {
+        'start "" "{浏览器}"': 'open -a "{浏览器}"',
+        'start "" "{软件}"': 'open -a "{软件}"',
+        'start "" "{浏览器}" "{网址}"': 'open -a "{浏览器}" "{网址}"',
+    },
+}
+
+
+def template_platform() -> str:
+    """当前系统的预置模板分支（模板只区分 Windows / macOS）。"""
+    return "macos" if platform_support.IS_MACOS else "windows"
+
+
+def build_default_groups(platform: str = "") -> list[Group]:
     """首次启动时预置的常用执行组（每次返回新对象，避免共享状态）。"""
+    v = _TEMPLATE_VALUES.get(platform or template_platform(),
+                             _TEMPLATE_VALUES["windows"])
     browser = Group(
         "打开浏览器",
         [
-            Step("set", "浏览器=chrome",
-                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", f"浏览器={v['browser']}", note=v["browser_note"]),
             Step("set", "窗口标题=Chrome",
                  note="窗口标题关键词；Edge 填写 Edge，Firefox 填写 Firefox。"),
             Step("set", "网址=https://www.baidu.com",
                  note="要打开的链接。"),
-            Step("cmd", 'start "" "{浏览器}"',
+            Step("cmd", v["browser_cmd"],
                  note="按变量启动浏览器。"),
             Step("window", "wait:{窗口标题}|10",
                  note="等待窗口出现并激活；若等待时间不足，请适当增大。"),
@@ -617,21 +699,19 @@ def build_default_groups() -> list[Group]:
     software = Group(
         "打开软件",
         [
-            Step("set", "软件=notepad",
-                 note="exe 名称或完整路径，如 notepad / calc。"),
-            Step("cmd", 'start "" "{软件}"',
+            Step("set", f"软件={v['software']}", note=v["software_note"]),
+            Step("cmd", v["software_cmd"],
                  note="按变量启动软件；若无法找到，请填写完整路径。"),
         ],
-        note="预置模板：请将「软件」变量修改为要打开的程序名称或完整 exe 路径。",
+        note=v["software_group_note"],
     )
     batch_urls = Group(
         "批量打开网址",
         [
-            Step("set", "浏览器=chrome",
-                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", f"浏览器={v['browser']}", note=v["browser_note"]),
             Step("set", "网址=https://www.baidu.com",
                  note="默认网址；带数据运行时由「网址」列覆盖。"),
-            Step("cmd", 'start "" "{浏览器}" "{网址}"',
+            Step("cmd", v["browser_url_cmd"],
                  note="每个数据行打开一个链接。"),
             Step("wait", "1",
                  note="间隔 1 秒，避免一次打开过多页面。"),
@@ -642,14 +722,14 @@ def build_default_groups() -> list[Group]:
     upload = Group(
         "上传文件",
         [
-            Step("set", "文件路径=C:\\Users\\Public\\Documents\\示例.txt",
+            Step("set", f"文件路径={v['file_path']}",
                  note="要上传文件的完整路径。"),
             Step("click", "上传按钮.png",
                  note="请先将页面上的上传按钮截图保存为该文件名。"),
             Step("wait", "0.8",
                  note="等待文件选择框出现。"),
-            Step("hotkey", "alt,n",
-                 note="将焦点切换至文件名输入框。"),
+            Step("hotkey", v["file_hotkey"],
+                 note=v["file_hotkey_note"]),
             Step("input", "{文件路径}",
                  note="粘贴完整路径；也可在数据中提供「文件路径」列。"),
             Step("hotkey", "enter", note="确认上传。"),
@@ -660,17 +740,16 @@ def build_default_groups() -> list[Group]:
     workspace = Group(
         "打开工作环境",
         [
-            Step("set", "软件=notepad",
-                 note="首先打开的程序，如 notepad / calc / 完整路径。"),
-            Step("set", "浏览器=chrome",
-                 note="chrome / msedge / 完整 exe 路径"),
+            Step("set", f"软件={v['software']}",
+                 note=v["software_first_note"]),
+            Step("set", f"浏览器={v['browser']}", note=v["browser_note"]),
             Step("set", "网址=https://www.baidu.com",
                  note="要打开的链接。"),
-            Step("cmd", 'start "" "{软件}"',
+            Step("cmd", v["software_cmd"],
                  note="启动常用软件。"),
             Step("wait", "0.5",
                  note="为软件预留启动时间。"),
-            Step("cmd", 'start "" "{浏览器}" "{网址}"',
+            Step("cmd", v["browser_url_cmd"],
                  note="启动浏览器并打开网址。"),
         ],
         note="预置模板：修改「软件」「浏览器」「网址」变量，一键进入工作状态；"
@@ -695,6 +774,51 @@ def _matches_legacy_browser(group: Group) -> bool:
     return signature == LEGACY_BROWSER_SIGNATURE
 
 
+def _upgrade_template_groups(project: Project) -> bool:
+    """v2 → v3：把仍是旧 Windows 模板的步骤换成当前平台的写法。
+
+    只替换与旧模板完全一致的步骤，用户改过的变量值、备注、步骤顺序都不动；
+    自定义组里照抄的 Windows 启动命令也一并换成 open -a。
+    """
+    platform = template_platform()
+    if platform == "windows":
+        return False
+    old = {g.name: g for g in build_default_groups("windows")}
+    new = {g.name: g for g in build_default_groups(platform)}
+    changed = False
+    for name, old_group in old.items():
+        group = project.get(name)
+        new_group = new.get(name)
+        if group is None or new_group is None:
+            continue
+        if len(group.steps) == len(old_group.steps):
+            for step, old_step, new_step in zip(
+                    group.steps, old_group.steps, new_group.steps):
+                if (step.type, step.content, step.repeat) != (
+                        old_step.type, old_step.content, old_step.repeat):
+                    continue
+                if step.content != new_step.content:
+                    step.content = new_step.content
+                    changed = True
+                if step.note == old_step.note and step.note != new_step.note:
+                    step.note = new_step.note
+                    changed = True
+        if group.note == old_group.note and group.note != new_group.note:
+            group.note = new_group.note
+            changed = True
+
+    for group in project.groups:
+        for step in group.steps:
+            if step.type != "cmd":
+                continue
+            replacement = _LAUNCH_COMMANDS[platform].get(
+                (step.content or "").strip())
+            if replacement:
+                step.content = replacement
+                changed = True
+    return changed
+
+
 def seed_default_groups(project: Project, settings: dict) -> bool:
     """按版本补充预置执行组，返回是否改动了组。
 
@@ -714,7 +838,7 @@ def seed_default_groups(project: Project, settings: dict) -> bool:
         project.groups.clear()
 
     templates = build_default_groups()
-    changed = False
+    changed = _upgrade_template_groups(project)
     if seeded == 1:
         # v1 → v2：只升级没改过的浏览器模板，并补 v2 新增的模板；
         # 不把用户已删掉的「打开浏览器 / 打开软件」加回来。
@@ -738,9 +862,25 @@ def seed_default_groups(project: Project, settings: dict) -> bool:
     return changed
 
 
+def _native_accelerator(text: str) -> str:
+    """把 Ctrl+Z / F5 这类提示转成 macOS 菜单栏右侧的快捷键。
+
+    像「从当前行继续」「CSV/Excel」这样的说明文字不是快捷键，返回空串，
+    避免系统菜单里出现一长串伪快捷键。
+    """
+    shortcut = platform_support.hotkey_label(str(text or "").strip())
+    if not shortcut:
+        return ""
+    if "+" in shortcut or re.fullmatch(r"F\d+|\?", shortcut):
+        return shortcut.replace("Enter", "Return")
+    return ""
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        # 测试 / 重复建根窗口时，旧的 PhotoImage 属于已销毁的根，必须清掉
+        uikit.clear_icon_cache()
         self.title(APP_TITLE)
         # 先读设置：界面缩放（ui_scale）要在计算 scale / 字体前生效
         self.settings = self._load_settings()
@@ -751,14 +891,31 @@ class App(tk.Tk):
         # 界面语言：在创建任何控件之前安装翻译层，后面新建的对话框也会自动生效
         i18n.install()
         i18n.set_language(str(self.settings.get("language", "zh")))
-        # 不再有“项目”概念：执行组直接自动保存到程序目录的状态文件
+        # 执行组默认保存在状态文件；打开 .mgproj 时以项目文件为准
         self.project = Project.from_dict(self.settings)
-        self.image_dir = str(self.settings.get("image_dir", DEFAULT_IMAGE_DIR))
+        self.image_dir = image_dir_path(
+            self.settings.get("image_dir", DEFAULT_IMAGE_DIR))
         self.project.image_dir = self.image_dir
+        # 项目文件：启动时恢复上次打开的项目；文件丢失就退回状态文件里的流程
+        self.project_path = ""
+        saved_project = str(self.settings.get("project_path") or "")
+        if saved_project:
+            try:
+                project, meta = project_io.load_project(saved_project)
+            except ValueError:
+                pass
+            else:
+                self.project = project
+                self.image_dir = image_dir_path(
+                    meta.get("image_dir") or self.image_dir)
+                self.project.image_dir = self.image_dir
+                self.project_path = saved_project
         self.group_index = 0          # 当前编辑的组
         self.log_visible = bool(self.settings.get("log_visible", True))
         # 主题：light / dark（_apply_theme 在界面建好后整组换色）
-        self.dark = str(self.settings.get("theme", "light")) == "dark"
+        self.dark = str(self.settings.get(
+            "theme",
+            "dark" if platform_support.system_dark_mode() else "light")) == "dark"
         self._last_palette = dict(LIGHT_PALETTE)
         # 单步调试：每步执行前弹窗确认（运行 / 跳过 / 停止）
         self.debug_mode = bool(self.settings.get("debug_mode", False))
@@ -790,7 +947,7 @@ class App(tk.Tk):
         self._progress_pulse = False
         self._mini_bar: Optional[RunMiniBar] = None
         # 系统托盘：设置里开了任一托盘开关才创建图标（见 _init_tray）
-        self.tray: Optional[tray.TrayIcon] = None
+        self.tray: Any = None
         self._tray_window_visible = True
         self._session_ending = False       # 注销 / 关机中：不再躲托盘
         self._session_hook = None
@@ -829,6 +986,7 @@ class App(tk.Tk):
         self._inline_record_btn: Optional[uikit.RoundButton] = None
         self._inline_previous = ""
         self._win_hwnd: Optional[int] = None
+        self._global_hotkeys: Any = None   # macOS 全局 F5/F9 监听器
         self._capture_callback: Optional[Callable[[str], None]] = None
         self._capture_coords_callback: Optional[Callable[[int, int, int, int], None]] = None
         self._inline_recording = False
@@ -1178,6 +1336,13 @@ class App(tk.Tk):
     def _file_items(self) -> list:
         MI = uikit.MenuItem
         return [
+            MI("新建项目…", "add", self.new_project),
+            MI("打开项目…", "open", self.open_project_dialog),
+            MI("另存为项目…", "save", self.save_project_as),
+            MI("最近项目…", "folder", self.open_recent_projects,
+               project_io.project_name(self.project_path)
+               if self.project_path else ""),
+            "-",
             MI("导入 Excel（单个组）…", "import",
                lambda: self.import_excel(single=True), "第一个工作表"),
             MI("导入 Excel（全部工作表）…", "table",
@@ -1292,6 +1457,7 @@ class App(tk.Tk):
         items = [MI("使用说明", "info", self.show_help),
                  MI("快捷键速查", "question", self.show_shortcuts, "?")]
         items.append(MI("导出诊断信息…", "save", self.export_diagnostics))
+        items.append(MI("检查更新…", "refresh", self.check_updates))
         items.append(MI("打开日志目录", "folder", self.open_logs_dir))
         if platform_support.IS_MACOS:
             items.append(MI("检查 macOS 权限…", "check",
@@ -1300,8 +1466,15 @@ class App(tk.Tk):
         return items
 
     def _build_menubar(self, parent) -> None:
-        """自绘菜单栏：一排扁平按钮，点开后是与右键同款的下拉菜单。"""
+        """自绘菜单栏：一排扁平按钮，点开后是与右键同款的下拉菜单。
+
+        macOS 上改用系统菜单栏：菜单显示在屏幕顶部，释放窗口内的横向空间，
+        也更符合 macOS 的操作习惯；Windows / Linux 保留自绘菜单栏。
+        """
         self._top_buttons: dict[str, uikit.RoundButton] = {}
+        if platform_support.IS_MACOS:
+            self._build_native_menubar()
+            return
         for name, _builder in self._menu_defs():
             button = uikit.RoundButton(parent, name, None,
                                        lambda n=name: self._open_top_menu(n),
@@ -1310,6 +1483,61 @@ class App(tk.Tk):
                                        font_size=FONT_SIZE_BODY)
             button.pack(side="left", padx=self.s(1))
             self._top_buttons[name] = button
+
+    def _build_native_menubar(self) -> None:
+        """macOS 系统菜单栏；状态变化后按需重建，不打断正在打开的菜单。"""
+        self._native_menubar = tk.Menu(self)
+        self.configure(menu=self._native_menubar)
+        self._native_menu_job: Optional[str] = None
+        # 菜单项依赖步骤表 / 选中状态，等界面建完再生成第一版
+        self.after_idle(self._refresh_native_menubar)
+        self.bind("<ButtonRelease-1>", self._schedule_native_menubar, add="+")
+
+    def _schedule_native_menubar(self, _event=None) -> None:
+        job = getattr(self, "_native_menu_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._native_menu_job = self.after(120, self._refresh_native_menubar)
+
+    def _refresh_native_menubar(self) -> None:
+        self._native_menu_job = None
+        menu = getattr(self, "_native_menubar", None)
+        if menu is None:
+            return
+        try:
+            menu.delete(0, "end")
+        except tk.TclError:
+            return
+        app_menu = tk.Menu(menu, tearoff=0)
+        app_menu.add_command(label=i18n.tr("关于 ") + APP_TITLE,
+                             command=self.show_about)
+        app_menu.add_command(label=i18n.tr("运行设置…"),
+                             command=self.open_settings,
+                             accelerator="Command+,")
+        app_menu.add_separator()
+        app_menu.add_command(label=i18n.tr("退出 ") + APP_TITLE,
+                             command=self.on_close, accelerator="Command+Q")
+        menu.add_cascade(label=APP_TITLE, menu=app_menu)
+        for name, builder in self._menu_defs():
+            sub = tk.Menu(menu, tearoff=0)
+            for item in builder():
+                if isinstance(item, str):
+                    if item.strip() in ("-", "---"):
+                        sub.add_separator()
+                    continue
+                if item.is_separator:
+                    sub.add_separator()
+                    continue
+                if not item.label:
+                    continue
+                sub.add_command(
+                    label=i18n.tr(item.label), command=item.command,
+                    accelerator=_native_accelerator(item.shortcut),
+                    state="normal" if item.enabled else "disabled")
+            menu.add_cascade(label=i18n.tr(name), menu=sub)
 
     def _open_top_menu(self, name: str) -> None:
         builder = dict(self._menu_defs())[name]
@@ -1806,16 +2034,17 @@ class App(tk.Tk):
     def _load_settings(self) -> dict:
         try:
             with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+                return secrets.restore_settings(json.load(fh))
         except (OSError, ValueError):
             return {}
 
     def _state_dict(self) -> dict:
-        data = dict(self.settings)
+        data = secrets.protect_settings(dict(self.settings))
         data.pop("last_path", None)        # 旧版遗留键，界面上已无“项目”
         data.update(self._ui_state())
         data.update({"version": 2, "image_dir": self.image_dir,
                      "groups": [group.to_dict() for group in self.project.groups]})
+        data["project_path"] = self.project_path
         return data
 
     def _ui_state(self) -> dict:
@@ -1884,6 +2113,11 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
 
+    @property
+    def reports_dir(self) -> str:
+        """运行报告目录；跟随模块级 REPORTS_DIR（测试里可替换）。"""
+        return REPORTS_DIR
+
     # ------------------------------------------------------------- 主题
     def _apply_theme(self, dark: bool) -> None:
         """切换明/暗主题：换色板、重建 ttk 样式、重染控件树、重画图标。
@@ -1897,6 +2131,7 @@ class App(tk.Tk):
         theme.set_dark(dark)
         _apply_palette(palette)
         dialogs.apply_palette(palette)
+        report_dialogs.apply_palette(palette)
         TYPE_COLORS.clear()
         TYPE_COLORS.update(TYPE_COLORS_DARK if dark else LIGHT_TYPE_COLORS)
         uikit.set_dark_mode(dark)
@@ -2050,6 +2285,20 @@ class App(tk.Tk):
         self._last_save_error = ""
         self._dirty = False
         self._set_saved_label()
+        self._save_project_file()
+        return True
+
+    def _save_project_file(self) -> bool:
+        """把当前流程同步写回已打开的 .mgproj；没有项目文件就跳过。"""
+        if not self.project_path:
+            return True
+        try:
+            project_io.save_project(
+                self.project_path, self.project, self.image_dir,
+                project_io.project_name(self.project_path))
+        except (OSError, ValueError) as exc:
+            self._log("warn", f"项目文件保存失败：{exc}")
+            return False
         return True
 
     def _on_save_failed(self, reason: str) -> None:
@@ -2112,12 +2361,95 @@ class App(tk.Tk):
         self._push_undo("恢复配置备份")
         self.settings = data
         self.project = Project.from_dict(data)
-        self.image_dir = str(data.get("image_dir", DEFAULT_IMAGE_DIR))
+        self.image_dir = image_dir_path(
+            data.get("image_dir", DEFAULT_IMAGE_DIR))
         self.project.image_dir = self.image_dir
         self.group_index = 0
         self._refresh_all(select_group=0)
         self._save_state()
         self._log("info", f"已恢复配置备份：{choice}")
+
+    # ------------------------------------------------------------- 项目文件
+    def new_project(self) -> None:
+        """清空当前流程，开始一个新的空项目。"""
+        if not messagebox.askyesno(
+                "新建项目",
+                "将清空当前执行组并开始一个新项目。\n"
+                "当前流程仍会保存在程序目录的状态文件里。",
+                parent=self):
+            return
+        self._push_undo("新建项目")
+        self.project = Project(groups=[], image_dir=self.image_dir)
+        self.project_path = ""
+        self.group_index = 0
+        self._refresh_all(select_group=0)
+        self._mark_dirty()
+        self._save_state()
+        self._log("info", "已新建空项目")
+        self._set_status("已新建空项目")
+
+    def open_project_dialog(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self, title="打开项目",
+            filetypes=list(project_io.FILE_TYPES))
+        if path:
+            self.load_project_file(path, remember=True)
+
+    def load_project_file(self, path: str, remember: bool = True) -> bool:
+        """打开 .mgproj：用文件里的执行组替换当前流程。"""
+        try:
+            project, meta = project_io.load_project(path)
+        except ValueError as exc:
+            messagebox.showerror("打开项目失败", str(exc), parent=self)
+            return False
+        self._push_undo("打开项目")
+        self.project = project
+        self.image_dir = image_dir_path(
+            meta.get("image_dir") or self.image_dir)
+        self.project.image_dir = self.image_dir
+        self.project_path = os.path.abspath(path)
+        if remember:
+            project_io.remember_project(self.settings, self.project_path)
+        self.settings["project_path"] = self.project_path
+        self.group_index = 0
+        self._refresh_all(select_group=0)
+        self._dirty = True
+        self._save_state()
+        self._log("info", f"已打开项目：{project_io.project_name(path)}")
+        self._set_status(f"已打开项目：{project_io.project_name(path)}")
+        return True
+
+    def save_project_as(self) -> None:
+        initial = (project_io.project_name(self.project_path)
+                   if self.project_path else "MeowGo 项目")
+        path = filedialog.asksaveasfilename(
+            parent=self, title="另存为项目",
+            defaultextension=project_io.PROJECT_EXT,
+            initialfile=initial,
+            filetypes=list(project_io.FILE_TYPES))
+        if not path:
+            return
+        try:
+            saved = project_io.save_project(path, self.project, self.image_dir)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("保存项目失败", str(exc), parent=self)
+            return
+        self.project_path = saved
+        self.settings["project_path"] = saved
+        project_io.remember_project(self.settings, saved)
+        self._save_state()
+        self._log("info", f"项目已保存：{saved}")
+        self._set_status(f"项目已保存：{os.path.basename(saved)}")
+
+    def open_recent_projects(self) -> None:
+        paths = project_io.recent_projects(self.settings)
+        if not paths:
+            messagebox.showinfo("最近项目", "还没有打开过项目文件。", parent=self)
+            return
+        dialog = RecentProjectsDialog(self, paths)
+        choice = dialog.wait()
+        if choice:
+            self.load_project_file(choice, remember=False)
 
     def _autosave_tick(self) -> None:
         if self._dirty:
@@ -2133,7 +2465,7 @@ class App(tk.Tk):
         """在文件管理器里打开图片目录。"""
         try:
             os.makedirs(self.image_dir, exist_ok=True)
-            os.startfile(self.image_dir)          # noqa: S606 (Windows)
+            platform_support.open_path(self.image_dir)
         except (OSError, AttributeError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
@@ -2999,7 +3331,8 @@ class App(tk.Tk):
         """变更前调用：记下当前 project 快照，供 Ctrl+Z 恢复。"""
         self._undo_stack.append(
             (action, {"project": self.project.to_dict(),
-                      "group_index": self.group_index}))
+                      "group_index": self.group_index,
+                      "project_path": self.project_path}))
         if len(self._undo_stack) > 50:      # 防止无限增长
             self._undo_stack.pop(0)
         self._redo_stack.clear()
@@ -3014,6 +3347,7 @@ class App(tk.Tk):
     def _restore(self, snapshot: dict) -> None:
         self.project = Project.from_dict(snapshot["project"])
         self.project.image_dir = self.image_dir
+        self.project_path = snapshot.get("project_path", self.project_path)
         self.group_index = min(snapshot.get("group_index", 0),
                                max(0, len(self.project.groups) - 1))
         self._refresh_all(select_group=self.group_index)
@@ -3026,7 +3360,8 @@ class App(tk.Tk):
         action, snapshot = self._undo_stack.pop()
         self._redo_stack.append(
             (action, {"project": self.project.to_dict(),
-                      "group_index": self.group_index}))
+                      "group_index": self.group_index,
+                      "project_path": self.project_path}))
         self._restore(snapshot)
         self._sync_undo_buttons()
         self._set_status(f"已撤销：{action}")
@@ -3038,7 +3373,8 @@ class App(tk.Tk):
         action, snapshot = self._redo_stack.pop()
         self._undo_stack.append(
             (action, {"project": self.project.to_dict(),
-                      "group_index": self.group_index}))
+                      "group_index": self.group_index,
+                      "project_path": self.project_path}))
         self._restore(snapshot)
         self._sync_undo_buttons()
         self._set_status(f"已重做：{action}")
@@ -3437,7 +3773,8 @@ class App(tk.Tk):
                 elif kind == "run":
                     # 确认框打开时 F5 = 继续运行（对话框内绑定），别再起一程；
                     # 全局热键和窗口内按键会同时到达，这里挡掉后者。
-                    if self._debug_dialog is None:
+                    if (self._debug_dialog is None
+                            and not self._app_is_frontmost()):
                         self.run_group()
         except queue.Empty:
             pass
@@ -3625,8 +3962,8 @@ class App(tk.Tk):
         self._debug_once = True
         self._start(group.name, debug_breakpoint=(group.name, index))
 
-    def run_all(self) -> None:
-        self._start(None)
+    def run_all(self) -> bool:
+        return self._start(None)
 
     def run_with_data(self) -> None:
         """选一个 CSV/Excel，按行带数据跑当前组。"""
@@ -3816,6 +4153,7 @@ class App(tk.Tk):
             return
         self._run_lock = lock
         self.running = True
+        self._refresh_tray_menu()
         self.paused = False
         self._debug_once = False        # 一次性开关跑完即弃
         self._debug_continue = False    # 每次运行都重新逐步骤确认
@@ -3876,6 +4214,7 @@ class App(tk.Tk):
         finally:
             self._close_debug_dialog("stop")   # 运行结束时别把确认框留在屏幕上
             self.running = False
+            self._refresh_tray_menu()
             self.paused = False
             self._schedule_pending = False
             self._debug_continue = False
@@ -4289,7 +4628,7 @@ class App(tk.Tk):
             dialog.lift()
             dialog.focus_force()
             return
-        dialog = RunHistoryDialog(self)
+        dialog = RunHistoryDialog(self, REPORTS_DIR)
         self._run_history_dialog = dialog
         dialog.wait()
 
@@ -4349,12 +4688,7 @@ class App(tk.Tk):
     def _open_folder(self, path: str) -> None:
         """跨平台打开文件夹（资源管理器 / Finder / xdg-open）。"""
         try:
-            if os.name == "nt":
-                os.startfile(path)                 # noqa: S606 (Windows)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
+            platform_support.open_path(path)
         except (OSError, AttributeError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
@@ -4394,11 +4728,36 @@ class App(tk.Tk):
                 parent=self):
             self._open_folder(os.path.dirname(path) or ".")
 
+    def check_updates(self) -> None:
+        """查询最新版本并提示下载页（不自动安装）。"""
+        try:
+            info = updater.fetch_latest(
+                str(self.settings.get("update_url") or ""))
+        except Exception as exc:  # noqa: BLE001 - 网络 / 接口异常统一提示
+            messagebox.showwarning(
+                "检查更新失败", f"无法获取版本信息：{exc}", parent=self)
+            return
+        latest = info["version"]
+        if not updater.is_newer(APP_VERSION, latest):
+            messagebox.showinfo(
+                "已是最新版本", f"当前版本 {APP_VERSION}。", parent=self)
+            return
+        if messagebox.askyesno(
+                "发现新版本",
+                f"当前版本 {APP_VERSION}，最新版本 {latest}。\n\n"
+                "是否打开下载页面？",
+                parent=self):
+            if info["url"]:
+                try:
+                    platform_support.open_path(info["url"])
+                except OSError as exc:
+                    messagebox.showerror("打开失败", str(exc), parent=self)
+
     def open_reports_dir(self) -> None:
         """打开运行报告所在目录。"""
         try:
             os.makedirs(REPORTS_DIR, exist_ok=True)
-            os.startfile(REPORTS_DIR)              # noqa: S606 (Windows)
+            platform_support.open_path(REPORTS_DIR)
         except (OSError, AttributeError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
@@ -4408,7 +4767,7 @@ class App(tk.Tk):
             from rpa.engine import write_report_index
 
             path = write_report_index(REPORTS_DIR)
-            os.startfile(path)                     # noqa: S606 (Windows)
+            platform_support.open_path(path)
         except (OSError, AttributeError, ValueError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
@@ -4570,6 +4929,9 @@ class App(tk.Tk):
 
     # ------------------------------------------------------- 全局停止热键
     def _start_global_hotkey(self) -> None:
+        if platform_support.IS_MACOS:
+            self._start_macos_hotkeys()
+            return
         if os.name != "nt":
             return
         # 主窗的 Win32 句柄：全局 F5 触发时判断主窗是否在前台——在前台就
@@ -4625,6 +4987,33 @@ class App(tk.Tk):
 
         threading.Thread(target=loop, daemon=True).start()
 
+    def _start_macos_hotkeys(self) -> None:
+        """macOS：用 Quartz 事件监听实现全局 F5 运行 / F9 停止。"""
+        from . import mac_native
+
+        listener = mac_native.GlobalHotkeyListener(
+            on_run=lambda: self.ui_queue.put(("run", None)),
+            on_stop=lambda: self.ui_queue.put(("stop", None)),
+            log=self._log)
+        if listener.start():
+            self._global_hotkeys = listener
+            self._log("info", "全局热键已启用：F5 运行 / F9 停止")
+        else:
+            self._log("warn", "全局热键未启用")
+            if listener.error:
+                self._log("muted", listener.error)
+
+    def _app_is_frontmost(self) -> bool:
+        """主窗口是否在前台（全局 F5 与窗口内快捷键只响应一次）。"""
+        if platform_support.IS_MACOS:
+            from . import mac_native
+
+            return mac_native.app_is_frontmost()
+        if platform_support.IS_WINDOWS:
+            return bool(self._win_hwnd
+                        and _win_foreground_window() == self._win_hwnd)
+        return False
+
     # --------------------------------------------------------- 设置 / 帮助
     def open_settings(self) -> None:
         dialog = SettingsDialog(self, self.settings, self.image_dir)
@@ -4632,7 +5021,8 @@ class App(tk.Tk):
             return
         old_scale = self.settings.get("ui_scale", 1.0)
         self.settings = dialog.result
-        self.image_dir = dialog.result["image_dir"]
+        self.image_dir = image_dir_path(dialog.result["image_dir"])
+        secrets.clear_marker(self.settings)
         if self.settings.get("ui_scale", 1.0) != old_scale:
             self._log("info", "界面缩放将在下次启动后生效")
         self.project.image_dir = self.image_dir
@@ -4791,12 +5181,31 @@ class App(tk.Tk):
         self._quitting = True
         if self.running:
             self.executor.stop()
-        self._inline_recorder.stop()   # 卸载可能装着的键盘钩子
         self.project.image_dir = self.image_dir
         self._save_state()
-        if self.tray:
-            self.tray.stop()
         self.destroy()
+
+    def destroy(self) -> None:
+        """关闭窗口：顺带停掉全局热键监听 / 托盘图标，避免测试反复建窗时残留线程。"""
+        hotkeys = getattr(self, "_global_hotkeys", None)
+        if hotkeys is not None:
+            try:
+                hotkeys.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._global_hotkeys = None
+        icon = getattr(self, "tray", None)
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.tray = None
+        try:
+            self._inline_recorder.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        super().destroy()
 
     # --------------------------------------------------------------- 托盘
     def _tray_wanted(self) -> bool:
@@ -4808,19 +5217,34 @@ class App(tk.Tk):
         """按当前设置创建托盘图标；已创建 / 不需要 / 失败都不重复建。"""
         if self.tray is not None:
             return True
-        if os.name != "nt" or not self._tray_wanted():
+        if not platform_support.available("system_tray"):
             return False
-        icon = tray.TrayIcon(
-            tip=APP_TITLE,
-            on_activate=self._tray_show_window,
-            menu_items=[("显示主窗口", self._tray_show_window),
-                        None,
-                        ("退出", self._tray_quit)],
-            invoke=lambda fn: self.after(0, fn))
+        if not self._tray_wanted():
+            return False
+        menu_items = [(i18n.tr("显示主窗口"), self._tray_show_window),
+                      None,
+                      (i18n.tr("运行当前组"), self.run_group),
+                      (i18n.tr("停止运行"), self.stop_run),
+                      None,
+                      (i18n.tr("退出"), self._tray_quit)]
+        if platform_support.IS_MACOS:
+            from . import mac_native
+
+            icon: Any = mac_native.MacTrayIcon(
+                tip=APP_TITLE, on_activate=self._tray_show_window,
+                menu_items=menu_items, invoke=lambda fn: self.after(0, fn))
+        else:
+            icon = tray.TrayIcon(
+                tip=APP_TITLE, on_activate=self._tray_show_window,
+                menu_items=menu_items, invoke=lambda fn: self.after(0, fn))
         if icon.start(dark=self.dark):
             self.tray = icon
+            self._refresh_tray_menu()
             return True
+        detail = getattr(icon, "error", "")
         self._log("warn", "托盘图标启动失败，窗口会保持可见")
+        if detail:
+            self._log("muted", detail)
         return False
 
     def _apply_tray_settings(self) -> None:
@@ -4868,6 +5292,15 @@ class App(tk.Tk):
             self.focus_force()
         except tk.TclError:
             pass
+        if platform_support.IS_MACOS:
+            # macOS 上 deiconify/lift 不一定能把整个 App 带到前台
+            try:
+                from AppKit import NSApplication
+
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(
+                    True)
+            except Exception:  # noqa: BLE001 - 没有 AppKit 时退回普通置顶
+                pass
         self._tray_window_visible = True
 
     def _tray_quit(self) -> None:
@@ -4879,6 +5312,22 @@ class App(tk.Tk):
     def _refresh_tray(self) -> None:
         if self.tray:
             self.tray.set_icon(self.dark)
+
+    def _refresh_tray_menu(self) -> None:
+        """运行状态变化时同步托盘菜单可用项与悬停提示。"""
+        tray_icon = self.tray
+        if tray_icon is None:
+            return
+        running = bool(getattr(self, "running", False))
+        status = i18n.tr("运行中") if running else i18n.tr("空闲")
+        try:
+            tray_icon.set_menu_enabled({
+                i18n.tr("运行当前组"): not running,
+                i18n.tr("停止运行"): running,
+            })
+            tray_icon.set_tip(f"{APP_TITLE} · {status}")
+        except Exception:  # noqa: BLE001 - 托盘状态更新失败不影响运行
+            pass
 
     def _on_session_query(self) -> None:
         self._session_ending = True        # 可能要关机：先记住，别躲托盘
@@ -6168,11 +6617,16 @@ class ScheduleDialog(BaseDialog):
         tk.Frame(right, bg=BORDER, height=1).grid(
             row=8, column=0, columnspan=2, sticky="ew", pady=app.s(9))
         row_label("无人值守运行", 9)
-        task_hint = ("由 Windows 任务计划程序执行，客户端关闭后仍会按时运行。"
-                     "\n无需管理员权限；创建后可在「任务计划程序」中查看。"
-                     if platform_support.available("scheduled_task") else
-                     "当前系统不支持 Windows 计划任务。软件内定时运行在"
-                     "界面打开时仍会生效，关掉界面则不会触发。")
+        if platform_support.IS_MACOS:
+            task_hint = ("由 macOS launchd 执行，客户端关闭后仍会按时运行。"
+                         "\n无需管理员权限；任务文件位于 "
+                         "~/Library/LaunchAgents。")
+        elif platform_support.available("scheduled_task"):
+            task_hint = ("由 Windows 任务计划程序执行，客户端关闭后仍会按时运行。"
+                         "\n无需管理员权限；创建后可在「任务计划程序」中查看。")
+        else:
+            task_hint = ("当前系统不支持系统计划任务。软件内定时运行在"
+                         "界面打开时仍会生效，关掉界面则不会触发。")
         tk.Label(right, text=i18n.tr(task_hint),
                  bg=CARD, fg=MUTED, font=FONT_CAPTION,
                  wraplength=app.s(300), justify="left", anchor="w").grid(
@@ -6359,6 +6813,13 @@ class ScheduleDialog(BaseDialog):
         program, arguments = self._task_parts(group)
         return f'"{program}" {arguments}'
 
+    def _task_arguments(self, group: str) -> list[str]:
+        """macOS LaunchAgent 用的参数列表（不经过 shell，无需引号）。"""
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--run", group]
+        return [sys.executable, os.path.join(APP_DIR, "start-app.py"),
+                "--run", group]
+
     @staticmethod
     def _powershell(script: str, timeout: float = 20):
         """跑一段 PowerShell（用于读取任务状态 / 修改任务设置）。"""
@@ -6378,6 +6839,12 @@ class ScheduleDialog(BaseDialog):
 
     def _query_task_info(self, name: str):
         """返回 {last, result, next}；任务不存在 / 查询失败返回 None。"""
+        if platform_support.IS_MACOS:
+            if not launchd.installed(name):
+                return None
+            hour, minute = self._task_time()
+            return {"last": "", "result": 267011,
+                    "next": launchd.next_run(hour, minute)}
         if os.name != "nt":
             return None
         quoted = self._ps_quote(name)
@@ -6475,6 +6942,9 @@ class ScheduleDialog(BaseDialog):
             return
         hour, minute = self._task_time()
         name = self._task_name(group)
+        if platform_support.IS_MACOS:
+            self._create_launchd_task(name, group, hour, minute)
+            return
         command = self._task_command(group)
         args = [
             "/Create", "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
@@ -6506,14 +6976,45 @@ class ScheduleDialog(BaseDialog):
             messagebox.showerror("创建失败", detail or "schtasks 返回错误",
                                  parent=self)
 
+    def _create_launchd_task(self, name: str, group: str, hour: int,
+                             minute: int) -> None:
+        """macOS：写 LaunchAgent，到点由 launchd 启动无头运行。"""
+        try:
+            # 计划任务启动时读磁盘上的配置，先确保当前项目已保存
+            self.app._save_state()
+            ok, error = launchd.install(
+                name, self._task_arguments(group), hour, minute)
+        except (OSError, ValueError) as exc:
+            ok, error = False, str(exc)
+        if ok:
+            self.app._log("info", f"macOS 定时任务已创建：{name}")
+            self._refresh_task_status()
+            if not self.lbl_task.cget("text"):
+                self.lbl_task.configure(
+                    text=f"已创建：{name}（每天 {hour:02d}:{minute:02d}"
+                         f" → {group}）", fg=SUCCESS)
+            self.app._set_status(f"已创建 macOS 定时任务：{name}")
+            return
+        self.lbl_task.configure(text="创建失败：" + error, fg=DANGER)
+        messagebox.showerror("创建失败", error, parent=self)
+
     def _delete_task_plan(self) -> None:
         group = self._task_group()
         name = self._task_name(group)
         if not messagebox.askyesno(
                 "删除计划任务",
-                f"确定删除 Windows 计划任务「{name}」？\n\n"
+                f"确定删除系统计划任务「{name}」？\n\n"
                 "只删除系统计划任务，不影响软件里的定时设置。",
                 parent=self):
+            return
+        if platform_support.IS_MACOS:
+            ok, error = launchd.uninstall(name)
+            if ok:
+                self.lbl_task.configure(text=f"已删除：{name}", fg=SUCCESS)
+                self.app._log("info", f"macOS 定时任务已删除：{name}")
+            else:
+                self.lbl_task.configure(text="删除失败：" + error, fg=DANGER)
+                messagebox.showerror("删除失败", error, parent=self)
             return
         try:
             proc = self._schtasks(["/Delete", "/TN", name, "/F"])
@@ -6817,323 +7318,6 @@ class ScheduleHistoryDialog(BaseDialog):
         self.center()
 
 
-REPORT_RESULT_TEXT = {
-    "finished": "成功",
-    "error": "失败",
-    "stopped": "已停止",
-}
-
-REPORT_RESULT_TAG = {
-    "finished": "ok",
-    "error": "danger",
-    "stopped": "muted",
-}
-
-
-class RunReportDialog(BaseDialog):
-    """运行报告详情：弹窗直接浏览 markdown 报告。"""
-
-    def __init__(self, parent: App, report: dict):
-        super().__init__(parent, "运行报告详情", width=900, height=560)
-        self.report = report
-        self._links: dict[tuple[int, int], str] = {}
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
-
-        head = tk.Frame(self, bg=CARD)
-        head.grid(row=0, column=0, columnspan=2, sticky="ew",
-                  padx=parent.s(16), pady=(parent.s(14), parent.s(2)))
-        tk.Label(head, text="运行报告", bg=CARD, fg=TEXT,
-                 font=FONT_SECTION).pack(side="left")
-        self._result_pill(head, report.get("result", ""))
-
-        stamp = time.strftime("%Y-%m-%d %H:%M:%S",
-                              time.localtime(report.get("mtime") or time.time()))
-        parts = [stamp]
-        if report.get("rows"):
-            parts.append(f"{report['rows']} {i18n.tr('行数据')}")
-        parts.append(f"{report.get('steps', 0)} {i18n.tr('步')}")
-        parts.append(f"{i18n.tr('失败')} {report.get('failed', 0)}")
-        parts.append(
-            f"{i18n.tr('耗时')} {float(report.get('seconds') or 0):g} "
-            f"{i18n.tr('秒')}")
-        tk.Label(self, text=" · ".join(parts), bg=CARD, fg=MUTED,
-                 font=FONT_CAPTION, anchor="w").grid(
-            row=1, column=0, columnspan=2, sticky="ew",
-            padx=parent.s(16), pady=(0, parent.s(8)))
-
-        text = report.get("text", "")
-        headers, rows = parse_report_table(text)
-        if headers:
-            self._build_table(headers, rows)
-        else:
-            self._build_raw(text)
-
-        footer = tk.Frame(self, bg=CARD)
-        footer.grid(row=3, column=0, columnspan=2, sticky="ew",
-                    padx=parent.s(16), pady=(parent.s(8), parent.s(14)))
-        if self._links:
-            tk.Label(footer, text="双击「查看」打开截图", bg=CARD, fg=MUTED,
-                     font=FONT_CAPTION).pack(side="left")
-        uikit.RoundButton(footer, "关闭", "close", self.cancel,
-                          kind="accent", scale=parent.scale, bg=CARD,
-                          height=CONTROL_MD).pack(side="right")
-        uikit.RoundButton(footer, "打开所在文件夹", "folder_open",
-                          self._open_folder, kind="ghost",
-                          scale=parent.scale, bg=CARD,
-                          height=CONTROL_MD).pack(
-            side="right", padx=(0, parent.s(8)))
-        self.center()
-
-    def _result_pill(self, parent, result: str) -> None:
-        label = REPORT_RESULT_TEXT.get(result, result or "未知")
-        tag = REPORT_RESULT_TAG.get(result, "muted")
-        colors = {
-            "ok": (MARK_DONE, SUCCESS_TEXT),
-            "danger": (MARK_FAILED, DANGER_TEXT),
-            "muted": (HEADING_BG, MUTED),
-        }
-        bg, fg = colors.get(tag, colors["muted"])
-        tk.Label(parent, text=i18n.tr(label), bg=bg, fg=fg,
-                 font=FONT_CAPTION_BOLD, padx=self.app.s(10),
-                 pady=self.app.s(2)).pack(
-            side="left", padx=(self.app.s(10), 0))
-
-    def _build_table(self, headers: list[str],
-                     rows: list[list[str]]) -> None:
-        columns = [f"c{index}" for index in range(len(headers))]
-        self.tree = ttk.Treeview(self, columns=columns, show="headings",
-                                 selectmode="browse")
-        for index, title in enumerate(headers):
-            self.tree.heading(columns[index], text=title)
-            self.tree.column(
-                columns[index], width=self.app.s(self._col_width(title)),
-                anchor="w", stretch=(title == "内容"))
-        self.tree.grid(row=2, column=0, sticky="nsew",
-                       padx=(self.app.s(16), 0))
-        scroll = uikit.SlimScrollbar(
-            self, orient="vertical", command=self.tree.yview,
-            scale=self.app.scale, bg=CARD)
-        scroll.grid(row=2, column=1, sticky="ns",
-                    padx=(self.app.s(2), self.app.s(16)))
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.tag_configure("zebra", background=ZEBRA)
-        self.tree.tag_configure("failed", background=MARK_FAILED)
-
-        for row_index, cells in enumerate(rows):
-            values = []
-            for col_index in range(len(columns)):
-                cell = cells[col_index] if col_index < len(cells) else ""
-                label, target = self._split_link(cell)
-                values.append(label)
-                if target:
-                    self._links[(row_index, col_index)] = target
-            tags: tuple[str, ...]
-            if "失败" in cells:
-                tags = ("failed",)
-            elif row_index % 2:
-                tags = ("zebra",)
-            else:
-                tags = ()
-            self.tree.insert("", "end", iid=str(row_index),
-                             values=values, tags=tags)
-        self.tree.bind("<Double-1>", self._open_link)
-
-    def _build_raw(self, text: str) -> None:
-        """没有表格的异常报告：直接按原文显示。"""
-        self.raw = tk.Text(self, bg=LOG_BG, fg=LOG_FG, bd=0,
-                           highlightthickness=0, wrap="word",
-                           font=FONT_MONO)
-        self.raw.insert("1.0", text)
-        self.raw.configure(state="disabled")
-        self.raw.grid(row=2, column=0, sticky="nsew",
-                      padx=(self.app.s(16), 0))
-        scroll = uikit.SlimScrollbar(
-            self, orient="vertical", command=self.raw.yview,
-            scale=self.app.scale, bg=CARD)
-        scroll.grid(row=2, column=1, sticky="ns",
-                    padx=(self.app.s(2), self.app.s(16)))
-        self.raw.configure(yscrollcommand=scroll.set)
-
-    def _col_width(self, title: str) -> int:
-        return {"执行组": 110, "行号": 56, "步骤": 56, "类型": 90,
-                "内容": 300, "耗时(秒)": 80, "结果": 64,
-                "重试": 56, "截图": 64}.get(title, 100)
-
-    @staticmethod
-    def _split_link(cell: str) -> tuple[str, str]:
-        match = re.fullmatch(r"\[([^\]]*)\]\(([^)]+)\)", cell.strip())
-        if match:
-            return i18n.tr(match.group(1) or "查看"), match.group(2)
-        return cell, ""
-
-    def _open_link(self, event) -> None:
-        tree = getattr(self, "tree", None)
-        if tree is None:
-            return
-        row = tree.identify_row(event.y)
-        column = tree.identify_column(event.x)
-        if not row or not column or not column.startswith("#"):
-            return
-        index = int(column[1:]) - 1
-        target = self._links.get((int(row), index))
-        if not target:
-            return
-        path = target
-        if not os.path.isabs(path):
-            path = os.path.join(
-                os.path.dirname(self.report.get("path", "")), path)
-        if not os.path.exists(path):
-            messagebox.showwarning("文件不存在", path, parent=self)
-            return
-        try:
-            os.startfile(path)                  # noqa: S606 (Windows)
-        except (OSError, AttributeError) as exc:
-            messagebox.showerror("打开失败", str(exc), parent=self)
-
-    def _open_folder(self) -> None:
-        path = self.report.get("path") or ""
-        folder = os.path.dirname(path) or REPORTS_DIR
-        try:
-            os.startfile(folder)                # noqa: S606 (Windows)
-        except (OSError, AttributeError) as exc:
-            messagebox.showerror("打开失败", str(exc), parent=self)
-
-
-class RunHistoryDialog(BaseDialog):
-    """运行历史：列出 reports/run_*.md，可查看详情、清空历史。"""
-
-    def __init__(self, parent: App):
-        super().__init__(parent, "运行历史", width=780, height=480)
-        self._reports: list[dict] = []
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
-
-        head = tk.Frame(self, bg=CARD)
-        head.grid(row=0, column=0, columnspan=2, sticky="ew",
-                  padx=parent.s(16), pady=(parent.s(14), parent.s(6)))
-        tk.Label(head, text="运行历史", bg=CARD, fg=TEXT,
-                 font=FONT_SECTION).pack(side="left")
-        self.count_label = tk.Label(head, text="", bg=CARD, fg=MUTED,
-                                    font=FONT_CAPTION)
-        self.count_label.pack(side="right")
-
-        columns = ("at", "result", "steps", "failed", "seconds", "file")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings",
-                                 selectmode="browse")
-        for key, text, width in (
-                ("at", "时间", 150), ("result", "结果", 80),
-                ("steps", "步骤", 70), ("failed", "失败", 70),
-                ("seconds", "耗时(秒)", 90), ("file", "报告", 250)):
-            self.tree.heading(key, text=text)
-            self.tree.column(key, width=parent.s(width), anchor="w")
-        self.tree.grid(row=1, column=0, sticky="nsew",
-                       padx=(parent.s(16), 0))
-        scroll = uikit.SlimScrollbar(
-            self, orient="vertical", command=self.tree.yview,
-            scale=parent.scale, bg=CARD)
-        scroll.grid(row=1, column=1, sticky="ns",
-                    padx=(parent.s(2), parent.s(16)))
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.tag_configure("ok", foreground=SUCCESS)
-        self.tree.tag_configure("danger", foreground=DANGER)
-        self.tree.tag_configure("muted", foreground=MUTED)
-        self.tree.bind("<Double-1>", lambda e: self._open_selected())
-        self.tree.bind("<Return>", lambda e: self._open_selected())
-
-        self.summary = tk.Label(self, text="", bg=CARD, fg=MUTED,
-                                font=FONT_CAPTION, anchor="w")
-        self.summary.grid(row=2, column=0, columnspan=2, sticky="ew",
-                          padx=parent.s(16), pady=(parent.s(4), 0))
-
-        footer = tk.Frame(self, bg=CARD)
-        footer.grid(row=3, column=0, columnspan=2, sticky="ew",
-                    padx=parent.s(16), pady=(parent.s(10), parent.s(12)))
-        self.btn_detail = uikit.RoundButton(
-            footer, "查看详情", "note", self._open_selected, kind="accent",
-            scale=parent.scale, bg=CARD, height=CONTROL_MD)
-        self.btn_detail.pack(side="right")
-        uikit.RoundButton(footer, "关闭", "close", self.cancel, kind="ghost",
-                          scale=parent.scale, bg=CARD,
-                          height=CONTROL_MD).pack(
-            side="right", padx=(0, parent.s(8)))
-        self.btn_clear = uikit.RoundButton(
-            footer, "清空历史", "trash", self._clear, kind="outline",
-            scale=parent.scale, bg=CARD, height=CONTROL_MD)
-        self.btn_clear.pack(side="left")
-
-        self._reload()
-        self.center()
-
-    def _reload(self) -> None:
-        self._reports = list_run_reports(REPORTS_DIR)
-        self.tree.delete(*self.tree.get_children())
-        for index, report in enumerate(self._reports):
-            result = report.get("result", "")
-            label = REPORT_RESULT_TEXT.get(result, result or "未知")
-            tag = REPORT_RESULT_TAG.get(result, "muted")
-            stamp = time.strftime("%Y-%m-%d %H:%M",
-                                  time.localtime(report["mtime"]))
-            self.tree.insert(
-                "", "end", iid=str(index), tags=(tag,),
-                values=(stamp, i18n.tr(label), report["steps"],
-                        report["failed"], f"{report['seconds']:g}",
-                        report["name"]))
-        self.count_label.configure(
-            text=f"{len(self._reports)}{i18n.tr('份报告')}")
-        self.summary.configure(
-            text=("双击一行查看报告详情" if self._reports
-                  else "还没有运行报告，跑一次后会自动生成"))
-        enabled = bool(self._reports)
-        self.btn_detail.set_enabled(enabled)
-        self.btn_clear.set_enabled(enabled)
-
-    def _open_selected(self) -> None:
-        selection = self.tree.selection()
-        if not selection:
-            self.app._set_status("请先选择一份运行报告")
-            return
-        try:
-            index = int(selection[0])
-        except ValueError:
-            return
-        if not 0 <= index < len(self._reports):
-            return
-        self.grab_release()
-        try:
-            RunReportDialog(self.app, self._reports[index]).wait()
-        finally:
-            try:
-                self.grab_set()
-            except tk.TclError:
-                pass
-
-    def _clear(self) -> None:
-        if not self._reports:
-            return
-        if not messagebox.askyesno(
-                i18n.tr("清空运行历史"),
-                i18n.tr("确定删除全部 ") + str(len(self._reports))
-                + i18n.tr(" 份运行报告？\n此操作不可撤销。"),
-                parent=self):
-            return
-        removed = 0
-        for report in self._reports:
-            try:
-                os.remove(report["path"])
-                removed += 1
-            except OSError:
-                pass
-        try:
-            from .engine import write_report_index
-            write_report_index(REPORTS_DIR)
-        except Exception:  # noqa: BLE001 — 索引刷新失败不影响清理
-            pass
-        self._reload()
-        self.app._set_status(
-            i18n.tr("已清空 ") + str(removed) + i18n.tr(" 份运行报告"))
-
-
 class MacroBar(BaseDialog):
     """宏录制控制条：开始 / 停止并生成步骤 / 取消。
 
@@ -7413,7 +7597,7 @@ class ImageManagerDialog(BaseDialog):
     def _open_dir(self) -> None:
         try:
             os.makedirs(self.image_dir, exist_ok=True)
-            os.startfile(self.image_dir)              # noqa: S606 (Windows)
+            platform_support.open_path(self.image_dir)
         except (OSError, AttributeError) as exc:
             messagebox.showerror("打开失败", str(exc), parent=self)
 
@@ -7483,51 +7667,6 @@ class ImageManagerDialog(BaseDialog):
             self.app._set_status(f"已清理 {len(unused)} 张未引用图片")
 
 
-class BackupDialog(BaseDialog):
-    """列出一阵阵配置备份，选一个恢复。"""
-
-    def __init__(self, parent: App, names: list[str]):
-        super().__init__(parent, "恢复配置备份", width=420, height=430)
-        self.names = names
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-
-        self.listbox = tk.Listbox(
-            self, font=FONT_NOTE, bg=ENTRY_BG, fg=TEXT,
-            selectbackground=SELECT_BG, selectforeground=TEXT,
-            relief="flat", highlightthickness=1,
-            highlightbackground=BORDER, highlightcolor=FIELD_FOCUS,
-            activestyle="none")
-        self.listbox.grid(row=0, column=0, sticky="nsew",
-                          padx=(parent.s(12), 0), pady=(parent.s(12), 0))
-        scroll = uikit.SlimScrollbar(
-            self, orient="vertical", command=self.listbox.yview,
-            scale=parent.scale, bg=CARD)
-        scroll.grid(row=0, column=1, sticky="ns", pady=(parent.s(12), 0),
-                    padx=(parent.s(2), 0))
-        self.listbox.configure(yscrollcommand=scroll.set)
-        for name in names:
-            # rpa_settings_20261020_121500.json → 2026-10-20 12:15:00
-            stamp = name[len("rpa_settings_"):-len(".json")]
-            pretty = f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} " \
-                     f"{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}"
-            self.listbox.insert("end", pretty)
-        if names:
-            self.listbox.selection_set(0)
-
-        self.footer(1, "恢复选中", "check", self.ok,
-                    pad_top=6, pad_bottom=12)
-        self.listbox.bind("<Double-1>", lambda e: self.ok())
-        self.center()
-
-    def ok(self) -> None:
-        selection = self.listbox.curselection()
-        if not selection:
-            return
-        self.result = self.names[selection[0]]
-        self.destroy()
-
-
 class OnboardingDialog(BaseDialog):
     """首次启动的三步引导（可勾选不再显示）。"""
 
@@ -7577,6 +7716,8 @@ class SettingsDialog(BaseDialog):
         # 用传进来的设置做底稿，保存时只改本对话框的键，别冲掉定时等配置
         self._base_settings = dict(settings)
         self._is_windows = platform_support.IS_WINDOWS
+        self._can_autostart = platform_support.available("autostart")
+        self._can_tray = platform_support.available("system_tray")
 
         def section(text: str, row: int) -> None:
             tk.Label(self, text=i18n.tr(text), bg=CARD, fg=TEXT,
@@ -7669,8 +7810,8 @@ class SettingsDialog(BaseDialog):
             row=9, column=1, sticky="e", padx=(0, parent.s(16)),
             pady=parent.s(3))
 
-        section("系统集成（仅 Windows）" if not self._is_windows else "系统集成",
-                10)
+        section("系统集成" if (self._can_autostart or self._can_tray)
+                else "系统集成（暂不可用）", 10)
         # 开机自启：开关状态直接反映注册表实况（Run 项在不在），
         # 不在 settings 里另存一份“真相”，避免两边不一致
         self.label("开机时自动启动客户端", 11)
@@ -7697,17 +7838,21 @@ class SettingsDialog(BaseDialog):
         self.sw_tray_close.grid(row=13, column=1, sticky="e",
                                 padx=(0, parent.s(16)), pady=parent.s(3))
 
-        if not self._is_windows:
-            for switch in (self.sw_autostart, self.sw_tray_min,
-                           self.sw_tray_close):
-                switch.set_enabled(False)
-            note("当前系统不支持开机自启与系统托盘，相关开关已停用。"
-                 "macOS 可在「系统设置 → 通用 → 登录项」里添加 MeowGo.app。",
+        if not self._can_autostart:
+            self.sw_autostart.set_enabled(False)
+        if not self._can_tray:
+            self.sw_tray_min.set_enabled(False)
+            self.sw_tray_close.set_enabled(False)
+
+        if platform_support.IS_MACOS:
+            note("开机自启通过 LaunchAgent（~/Library/LaunchAgents）实现，"
+                 "登录后仅启动客户端，不自动执行流程。菜单栏托盘图标点按后"
+                 "可显示主窗口或退出；「启动后最小化」适合配合开机自启使用。",
                  14)
             note("相似度阈值越低，识别范围越宽，误匹配风险也越高。"
                  "失败截图保存于 reports/shots；数据结果写入数据文件所在目录。",
                  15)
-        else:
+        elif self._is_windows:
             note("开机自启通过当前用户注册表 Run 项实现，无需管理员权限。"
                  "登录 Windows 后仅启动客户端，不自动执行流程；如需定时无人"
                  "值守运行，请使用「定时运行 → 创建计划任务」。启动命令："
@@ -7718,6 +7863,11 @@ class SettingsDialog(BaseDialog):
             note("相似度阈值越低，识别范围越宽，误匹配风险也越高。"
                  "失败截图保存于 reports/shots；数据结果写入数据文件所在目录。",
                  16)
+        else:
+            note("当前系统不支持开机自启与系统托盘，相关开关已停用。", 14)
+            note("相似度阈值越低，识别范围越宽，误匹配风险也越高。"
+                 "失败截图保存于 reports/shots；数据结果写入数据文件所在目录。",
+                 15)
 
         actions = tk.Frame(self, bg=CARD)
         actions.grid(row=17, column=0, columnspan=2, sticky="ew",
@@ -7745,8 +7895,9 @@ class SettingsDialog(BaseDialog):
         self.var_mini.set(True)
         self.var_shot.set(True)
         self.var_results.set(True)
-        if self._is_windows:
+        if self._can_autostart:
             self.var_autostart.set(False)
+        if self._can_tray:
             self.var_tray_min.set(False)
             self.var_tray_close.set(False)
         self.lbl_defaults.configure(text="已恢复默认值，点「保存」生效")
@@ -7788,26 +7939,28 @@ class SettingsDialog(BaseDialog):
             "shot_on_fail": bool(self.var_shot.get()),
             "save_results": bool(self.var_results.get()),
             "autostart": (bool(self.var_autostart.get())
-                          if self._is_windows else False),
+                          if self._can_autostart else False),
             "tray_start_minimized": (bool(self.var_tray_min.get())
-                                     if self._is_windows else False),
+                                     if self._can_tray else False),
             "tray_on_close": (bool(self.var_tray_close.get())
-                              if self._is_windows else False),
+                              if self._can_tray else False),
         })
         self.destroy()
 
     def _apply_autostart(self) -> bool:
-        """把「开机自动启动」开关同步到注册表 Run 项。
+        """把「开机自动启动」开关同步到系统的自启项。
 
         返回 False 表示失败（已弹错误框），调用方应保持对话框不关闭。
         程序被整体搬家后，已注册的命令会过期——重新注册一次即可自愈。
-        非 Windows 平台没有注册表 Run 项，直接跳过。
+        不支持的平台（Linux）直接跳过。
         """
-        if not self._is_windows:
+        if not platform_support.available("autostart"):
             return True
         want = bool(self.var_autostart.get())
         have = autostart.is_enabled()
-        stale = (have
+        # macOS 的 current_command 是参数列表拼成的，格式与 launch_command
+        # 不同，不能直接比较；只有 Windows 注册表需要检测命令是否过期。
+        stale = (have and platform_support.IS_WINDOWS
                  and autostart.current_command() != autostart.launch_command())
         if want and (not have or stale):
             ok, error = autostart.enable()
@@ -7820,7 +7973,7 @@ class SettingsDialog(BaseDialog):
             if not ok:
                 messagebox.showerror("开机自启关闭失败", error, parent=self)
                 return False
-            self.app._log("info", "开机自启已关闭（已移除注册表启动项）")
+            self.app._log("info", "开机自启已关闭")
         return True
 
 

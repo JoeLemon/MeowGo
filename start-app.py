@@ -151,6 +151,10 @@ def _run_headless(args) -> int:
             return 1
 
     image_dir = state.get("image_dir", "images")
+    # 定时任务（launchd / 计划任务）的工作目录不是程序目录，
+    # 旧配置里的相对图片目录要按程序目录解析，否则找不到图片。
+    if not os.path.isabs(image_dir):
+        image_dir = os.path.join(_app_dir(), image_dir)
     problems = (validate_environment(project.groups) +
                 validate_project(project.groups, base_dir=image_dir,
                                  check_images=True))

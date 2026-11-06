@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """引擎自检：执行组、Excel 读写往返、校验、调用与停止。"""
+import json
 import os
 import shutil
 import sys
@@ -11,6 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from rpa import platform_support  # noqa: E402
 from rpa.engine import (  # noqa: E402
     STEP_TYPES,
     TYPE_TO_CODE,
@@ -231,7 +233,10 @@ def test_step_validate():
     assert not Step("scroll", "-200").validate()
     assert Step("input", "   ").validate()
     assert not Step("input", "hello").validate()
-    assert Step("hotkey", "1").validate(), "单数字键应报错"
+    if platform_support.IS_MACOS:
+        assert not Step("hotkey", "1").validate(), "macOS 支持顶层数字键"
+    else:
+        assert Step("hotkey", "1").validate(), "Windows 单数字键应报错"
     assert not Step("hotkey", "ctrl,s").validate()
     assert Step("hotkey", ",".join(["a"] * 11)).validate(), "超过10个应报错"
     assert Step("click", "a.png", repeat=-5).validate(), "负重复应报错"
@@ -528,6 +533,24 @@ def test_render_content_placeholders():
     # 没有占位符或列不存在时原样返回
     assert render_content("ctrl,s", {"a": 1}) == "ctrl,s"
     assert render_content("{缺失}", {"a": 1}) == "{缺失}"
+
+
+def test_render_content_json_path_from_vars():
+    """{变量.字段}：变量里是 JSON 时按路径取值。"""
+    data = json.dumps({"user": {"name": "张三"},
+                       "items": [{"id": 7}]}, ensure_ascii=False)
+    assert render_content("{data.user.name}", {},
+                          vars={"data": data}) == "张三"
+    assert render_content("{data.items[0].id}", {},
+                          vars={"data": data}) == "7"
+    # 已经是 dict 的变量也支持
+    assert render_content("{data.user.name}", {},
+                          vars={"data": json.loads(data)}) == "张三"
+    # 路径不存在 / 不是 JSON：保留原样，方便发现拼写问题
+    assert render_content("{data.missing}", {},
+                          vars={"data": data}) == "{data.missing}"
+    assert render_content("{data.user}", {},
+                          vars={"data": "纯文本"}) == "{data.user}"
 
 
 def test_data_driven_run():
@@ -1318,6 +1341,35 @@ def test_write_results_roundtrip():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_write_results_xlsx_roundtrip():
+    """XLSX 数据源回写为同名 .result.xlsx，并支持断点合并。"""
+    from rpa.engine import read_results, result_path, write_results
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_result_xlsx_")
+    try:
+        source = os.path.join(tmp, "data.xlsx")
+        path = result_path(source)
+        assert path.endswith("data.result.xlsx")
+        data = [{"订单": "A"}, {"订单": "B"}]
+        write_results(data, [{"row": 1, "ok": True, "failed_step": "",
+                              "vars": {"金额": "10"}}], path)
+        assert os.path.exists(path)
+        rows = read_results(path)
+        assert rows[0]["订单"] == "A"
+        assert rows[0]["__结果"] == "成功"
+        assert rows[0]["金额"] == "10"
+
+        write_results(data, [{"row": 2, "ok": False,
+                              "failed_step": "第 2 步 等待",
+                              "vars": {}}], path)
+        rows = read_results(path)
+        assert len(rows) == 2
+        assert rows[1]["__结果"] == "失败"
+        assert rows[1]["__失败步骤"].startswith("第 2")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_run_row_offset_and_row_results():
     """从第 N 行继续，并按行记录结果。"""
     with _fake_input_modules([]):
@@ -1614,11 +1666,57 @@ def test_screen_cache_reuses_frame_and_env_checks():
         assert any("OCR" in p.upper() for p in problems), problems
         problems = validate_environment(
             [Group("主", [Step("ui_click", "确定")])])
-        assert any("uiautomation" in p for p in problems), problems
+        assert any("uiautomation" in p or "辅助功能" in p
+                   for p in problems), problems
         assert validate_environment(
             [Group("主", [Step("wait", "1")])]) == []
     finally:
         ocr.available, uia.available = saved
+
+
+def test_retina_scale_converts_match_points(tmp_path):
+    """Retina 截图像素是逻辑坐标的 2 倍：命中点与识别区域都要换算。"""
+    import cv2
+    import numpy as np
+
+    screen = np.zeros((200, 200, 3), dtype=np.uint8)
+    pattern = np.zeros((20, 20, 3), dtype=np.uint8)
+    pattern[:, :10] = (0, 0, 255)
+    pattern[:, 10:] = (0, 255, 0)
+    screen[20:40, 20:40] = pattern
+    template_path = str(tmp_path / "red.png")
+    cv2.imwrite(template_path, pattern)
+
+    ex = Executor(base_dir=str(tmp_path))
+    ex._grab_screen = lambda: (screen, (0, 0))
+    ex._screen_scale = 2.0
+    point = ex._locate_one(template_path, None, 0, False)
+    assert point is not None
+    assert (round(point.x, 1), round(point.y, 1)) == (15.0, 15.0)
+
+    # 逻辑区域 0,0,50,50 = 像素 0,0,100,100，仍包含目标
+    point = ex._locate_one(template_path, (0, 0, 50, 50), 0, False)
+    assert point is not None and round(point.x, 1) == 15.0
+
+    # 逻辑区域 40,0,60,50 = 像素 80..200，目标在像素 20..40，不在区域内
+    assert ex._locate_one(template_path, (40, 0, 60, 50), 0, False) is None
+
+
+def test_ocr_locate_uses_logical_coordinates(monkeypatch):
+    """OCR 返回的是截图像素坐标，同样要按 Retina 比例换算。"""
+    import numpy as np
+
+    from rpa import ocr
+
+    screen = np.zeros((200, 200, 3), dtype=np.uint8)
+    ex = Executor()
+    ex._grab_screen = lambda: (screen, (0, 0))
+    ex._screen_scale = 2.0
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(ocr, "find_text", lambda _crop, _name: (20.0, 40.0))
+    point = ex._locate_text("巡检", Step("click_text", "巡检"))
+    assert point is not None
+    assert (point.x, point.y) == (10.0, 20.0)
 
 
 def test_screen_helpers_smoke():

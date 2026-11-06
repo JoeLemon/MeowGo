@@ -47,6 +47,7 @@ os.environ["MEOWGO_NO_PERMISSION_PROMPT"] = "1"
 gui_module.SETTINGS_PATH = os.path.join(_TMP, "settings.json")
 gui_module.REPORTS_DIR = os.path.join(_TMP, "reports")
 gui_module.SHOTS_DIR = os.path.join(gui_module.REPORTS_DIR, "shots")
+gui_module.BACKUPS_DIR = os.path.join(_TMP, "backups")
 gui_module.enable_dpi_awareness()
 
 app = gui_module.App()
@@ -3228,7 +3229,8 @@ def test_default_groups():
     assert [step.type for step in new_browser.steps] == [
         "set", "set", "set", "cmd", "window", "hotkey", "input", "hotkey"]
     assert new_browser.steps[1].content == "窗口标题=Chrome"
-    assert v1_settings[gui_module.DEFAULT_GROUPS_KEY] == 2
+    assert v1_settings[gui_module.DEFAULT_GROUPS_KEY] == \
+        gui_module.DEFAULT_GROUPS_VERSION
 
     # v1 用户删掉的旧组不加回；只补 v2 新增的三个模板
     only_software = Project(groups=[Group("打开软件", [Step("wait", "1")])])

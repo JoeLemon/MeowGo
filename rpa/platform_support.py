@@ -21,25 +21,25 @@ IS_LINUX = sys.platform.startswith("linux")
 
 # 与系统交互的能力名 → 当前平台是否支持
 CAPABILITIES = {
-    "system_tray": IS_WINDOWS,
-    "autostart": IS_WINDOWS,
-    "scheduled_task": IS_WINDOWS,
-    "window_ops": IS_WINDOWS,
-    "global_hotkey": IS_WINDOWS,
-    "keyboard_hook": IS_WINDOWS,
-    "ui_automation": IS_WINDOWS,
+    "system_tray": IS_WINDOWS or IS_MACOS,
+    "autostart": IS_WINDOWS or IS_MACOS,
+    "scheduled_task": IS_WINDOWS or IS_MACOS,
+    "window_ops": IS_WINDOWS or IS_MACOS,
+    "global_hotkey": IS_WINDOWS or IS_MACOS,
+    "keyboard_hook": IS_WINDOWS or IS_MACOS,
+    "ui_automation": IS_WINDOWS or IS_MACOS,
     "applescript": IS_MACOS,
 }
 
 # 非 Windows 上不可用能力的替代方案说明
 _ALTERNATIVES = {
-    "system_tray": "macOS / Linux 上关闭窗口即退出，可用 Dock 重新打开。",
-    "autostart": "macOS 可在「系统设置 → 通用 → 登录项」里添加 MeowGo.app。",
-    "scheduled_task": "macOS 可用 launchd / crontab；软件内的定时运行不需要它。",
-    "window_ops": "macOS 暂不支持窗口操作步骤，可用坐标点击或 AppleScript 命令替代。",
-    "global_hotkey": "macOS 暂不支持全局 F5/F9，请使用窗口内的快捷键。",
-    "keyboard_hook": "macOS 暂不支持按键录制，可手动填写热键。",
-    "ui_automation": "macOS 暂不支持控件点击，可改用「点击文字」（需要 OCR）。",
+    "system_tray": "Linux 可把启动命令加入桌面环境的自动启动项。",
+    "autostart": "Linux 可把启动命令加入桌面环境的自动启动项。",
+    "scheduled_task": "Linux 可用 cron / systemd timer；软件内的定时运行不需要它。",
+    "window_ops": "Linux 可用 wmctrl / xdotool 命令替代窗口操作。",
+    "global_hotkey": "Linux 暂不支持全局 F5/F9，请使用窗口内的快捷键。",
+    "keyboard_hook": "Linux 暂不支持按键录制，可手动填写热键。",
+    "ui_automation": "Linux 暂不支持控件点击，可改用「点击文字」（需要 OCR）。",
 }
 
 
@@ -48,16 +48,55 @@ def available(name: str) -> bool:
     return bool(CAPABILITIES.get(name, False))
 
 
+def open_path(path: str) -> None:
+    """用系统文件管理器打开文件 / 目录，失败时抛 OSError。"""
+    try:
+        if IS_WINDOWS:
+            os.startfile(path)                      # noqa: S606
+        elif IS_MACOS:
+            subprocess.run(["open", path], check=True, timeout=10)
+        else:
+            subprocess.run(["xdg-open", path], check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"无法打开：{path}") from exc
+
+
+def system_dark_mode() -> bool:
+    """macOS 当前是否处于深色外观（非 macOS 一律视为浅色）。"""
+    if not IS_MACOS:
+        return False
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "dark" in (result.stdout or "").lower()
+
+
+def reduce_motion() -> bool:
+    """系统是否开启了「减少动态效果」。"""
+    if not IS_MACOS:
+        return False
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "com.apple.universalaccess", "reduceMotion"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (result.stdout or "").strip().lower() in ("1", "true", "yes")
+
+
 def unavailable_text(name: str) -> str:
     """不可用能力的说明（含替代方案），可直接显示在界面上。"""
     base = {
-        "system_tray": "系统托盘只支持 Windows。",
-        "autostart": "开机自启只支持 Windows。",
-        "scheduled_task": "系统计划任务只支持 Windows。",
-        "window_ops": "窗口操作只支持 Windows。",
-        "global_hotkey": "全局热键只支持 Windows。",
-        "keyboard_hook": "按键录制只支持 Windows。",
-        "ui_automation": "控件点击只支持 Windows。",
+        "system_tray": "系统托盘只支持 Windows 和 macOS。",
+        "autostart": "开机自启只支持 Windows 和 macOS。",
+        "scheduled_task": "系统计划任务只支持 Windows 和 macOS。",
+        "window_ops": "窗口操作只支持 Windows 和 macOS。",
+        "global_hotkey": "全局热键只支持 Windows 和 macOS。",
+        "keyboard_hook": "按键录制只支持 Windows 和 macOS。",
+        "ui_automation": "控件点击只支持 Windows 和 macOS。",
         "applescript": "AppleScript 只支持 macOS。",
     }.get(name, "当前系统不支持该功能。")
     hint = _ALTERNATIVES.get(name, "")

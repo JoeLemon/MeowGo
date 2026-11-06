@@ -37,10 +37,11 @@ def test_non_windows_start_degrades(monkeypatch):
     hints = []
     rec = recorder.KeyRecorder(None, _noop, _noop, _noop, _noop, hints.append)
     macro = recorder.MacroRecorder(None, _noop, _noop, _noop, hints.append)
-    monkeypatch.setattr(recorder.sys, "platform", "darwin")
+    monkeypatch.setattr(recorder.sys, "platform", "linux")
     assert rec.start() is False
     assert macro.start() is False
-    assert hints == ["按键录入只支持 Windows", "宏录制只支持 Windows"]
+    assert hints == ["按键录入只支持 Windows / macOS",
+                     "宏录制只支持 Windows / macOS"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="仅 Windows 有 Win32 钩子 API")

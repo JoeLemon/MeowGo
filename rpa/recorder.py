@@ -58,6 +58,37 @@ _VK_OEM_US = {0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".",
 
 # 定稿时修饰键统一排在前头的顺序
 _MODIFIER_ORDER = ("ctrl", "alt", "shift", "win")
+# macOS 的 Command 也当修饰键，排在组合键最前面
+_MAC_MODIFIER_ORDER = ("command", "ctrl", "alt", "shift")
+
+# macOS 虚拟键码 → 引擎键名（键码与键盘布局无关，字母区按 ANSI 布局）
+_MAC_KEYMAP = {
+    0: "a", 1: "s", 2: "d", 3: "f", 4: "h", 5: "g", 6: "z", 7: "x", 8: "c",
+    9: "v", 11: "b", 12: "q", 13: "w", 14: "e", 15: "r", 16: "y", 17: "t",
+    18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 25: "9", 26: "7",
+    28: "8", 29: "0",
+    24: "=", 27: "-", 30: "]", 33: "[", 39: "'", 41: ";", 42: "\\",
+    43: ",", 44: "/", 47: ".", 50: "`",
+    36: "enter", 48: "tab", 49: "space", 51: "backspace", 53: "esc",
+    54: "command", 55: "command", 56: "shift", 57: "capslock",
+    58: "alt", 59: "ctrl", 60: "shift", 61: "alt", 62: "ctrl", 63: "fn",
+    64: "f17", 65: "decimal", 67: "multiply", 69: "add", 71: "clear",
+    75: "divide", 76: "enter", 78: "subtract", 79: "f18", 80: "f19",
+    81: "=", 82: "num0", 83: "num1", 84: "num2", 85: "num3", 86: "num4",
+    87: "num5", 88: "num6", 89: "num7", 91: "num8", 92: "num9",
+    96: "f5", 97: "f6", 98: "f7", 99: "f3", 100: "f8", 101: "f9",
+    103: "f11", 105: "f13", 106: "f16", 107: "f14", 109: "f10",
+    111: "f12", 113: "f15", 115: "home", 116: "pageup", 117: "delete",
+    118: "f4", 119: "end", 120: "f2", 121: "pagedown", 122: "f1",
+    123: "left", 124: "right", 125: "down", 126: "up",
+}
+_MAC_ESC_KEYCODE = 53
+
+
+def mac_key_name(keycode: int) -> Optional[str]:
+    """把 macOS 虚拟键码翻译成引擎（pyautogui）认识的键名。"""
+    return _MAC_KEYMAP.get(int(keycode))
+
 
 _user32: Optional[ctypes.WinDLL] = None
 
@@ -165,16 +196,21 @@ class KeyRecorder:
         self._poll_id = None
         self._hook = None
         self._proc = None               # 持有 CFUNCTYPE 引用，防止被回收
+        self._mac_hook = None           # macOS 的 CGEventTap
 
     # ------------------------------------------------------------ 安装/卸载
     def start(self, previous: str = "") -> bool:
         """开始录制。previous 是取消时要恢复的内容；装不上钩子返回 False。"""
         if self.active:
             return True
-        if sys.platform != "win32":
-            self.on_hint("按键录入只支持 Windows")
-            return False
-        if not self._install_hook():
+        if sys.platform == "win32":
+            if not self._install_hook():
+                return False
+        elif sys.platform == "darwin":
+            if not self._install_mac_hook():
+                return False
+        else:
+            self.on_hint("按键录入只支持 Windows / macOS")
             return False
         self._held = []
         self._last = []
@@ -212,7 +248,30 @@ class KeyRecorder:
         self._pending = []
         self._uninstall()
 
+    def _install_mac_hook(self) -> bool:
+        """macOS：装 CGEventTap（录制期间吞掉按键）。"""
+        from . import mac_native
+
+        tap = mac_native.KeyboardEventTap(self._on_mac_key)
+        if not tap.start():
+            self._mac_hook = None
+            self.on_hint("按键录入需要 macOS「辅助功能」权限："
+                         "系统设置 → 隐私与安全性 → 辅助功能")
+            return False
+        self._mac_hook = tap
+        return True
+
+    def _on_mac_key(self, keycode: int, down: bool) -> None:
+        """事件回调（后台线程）：只攒原始事件，不碰 Tk。"""
+        self._pending.append((keycode, 0, down))
+
     def _uninstall(self) -> None:
+        if self._mac_hook is not None:
+            try:
+                self._mac_hook.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._mac_hook = None
         if self._hook is not None:
             try:
                 _win_user32().UnhookWindowsHookEx(self._hook)
@@ -255,13 +314,20 @@ class KeyRecorder:
     def _track(self, vk: int, scan: int, down: bool) -> None:
         if not self.active:
             return
+        mac = sys.platform == "darwin"
+
+        def key_name(code: int) -> Optional[str]:
+            return mac_key_name(code) if mac else vk_to_key_name(code, scan)
+
         if down:
-            if vk == 0x1B and not self._held:
+            if (mac and vk == _MAC_ESC_KEYCODE and not self._held) or (
+                    not mac and vk == 0x1B and not self._held):
                 self._cancel()           # 单独 Esc = 取消
                 return
-            name = vk_to_key_name(vk, scan)
+            name = key_name(vk)
             if name is None:
-                if 0x30 <= vk <= 0x39:   # 顶层数字键：引擎不识别，给提示
+                if not mac and 0x30 <= vk <= 0x39:
+                    # Windows 顶层数字键受旧版引擎限制；macOS 可直接录
                     self.on_hint("⚠ 引擎不识别顶层数字键（旧版限制），"
                                  "请改按小键盘数字 num0~num9")
                 return
@@ -270,7 +336,7 @@ class KeyRecorder:
             self._last = self._ordered()
             self.on_preview(self._ordered())
         else:
-            name = vk_to_key_name(vk, scan)
+            name = key_name(vk)
             if name is not None and name in self._held:
                 self._held.remove(name)
             if not self._held:
@@ -297,9 +363,11 @@ class KeyRecorder:
         self.on_state(False)
 
     def _ordered(self) -> list[str]:
-        """修饰键排在前（ctrl/alt/shift/win），其余保持按下顺序。"""
-        mods = [k for k in _MODIFIER_ORDER if k in self._held]
-        rest = [k for k in self._held if k not in _MODIFIER_ORDER]
+        """修饰键排在前（ctrl/alt/shift/win，macOS 再加 command），其余保持按下顺序。"""
+        order = (_MAC_MODIFIER_ORDER if sys.platform == "darwin"
+                 else _MODIFIER_ORDER)
+        mods = [k for k in order if k in self._held]
+        rest = [k for k in self._held if k not in order]
         return mods + rest
 
 
@@ -353,6 +421,7 @@ class MacroRecorder:
         self.active = False
         self._hook = None
         self._proc = None
+        self._mac_hook = None
         self._events: list[tuple] = []
         self._steps: list[Step] = []
         self._down: Optional[tuple] = None     # 按下中的 (x, y, ms, button)
@@ -366,10 +435,14 @@ class MacroRecorder:
         """开始录制；ignore_rect 内的事件忽略（控制条自己的按钮）。"""
         if self.active:
             return True
-        if sys.platform != "win32":
-            self.on_hint("宏录制只支持 Windows")
-            return False
-        if not self._install_hook():
+        if sys.platform == "win32":
+            if not self._install_hook():
+                return False
+        elif sys.platform == "darwin":
+            if not self._install_mac_hook():
+                return False
+        else:
+            self.on_hint("宏录制只支持 Windows / macOS")
             return False
         self._ignore_rect = ignore_rect
         self._events = []
@@ -420,7 +493,33 @@ class MacroRecorder:
         self.on_state(False)
         self.on_cancel()
 
+    def _install_mac_hook(self) -> bool:
+        """macOS：装只监听的鼠标事件 tap；记录期间不拦截点击。"""
+        from . import mac_native
+
+        tap = mac_native.MouseEventTap(self._on_mac_mouse)
+        if not tap.start():
+            self._mac_hook = None
+            self.on_hint("宏录制需要 macOS「辅助功能」权限："
+                         "系统设置 → 隐私与安全性 → 辅助功能")
+            return False
+        self._mac_hook = tap
+        return True
+
+    def _on_mac_mouse(self, kind: str, x: int, y: int, extra) -> None:
+        """事件回调（后台线程）：只攒原始事件，不碰 Tk。"""
+        rect = self._ignore_rect
+        if rect and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
+            return                       # 控制条区域内的操作不录
+        self._events.append((kind, x, y, extra))
+
     def _uninstall(self) -> None:
+        if self._mac_hook is not None:
+            try:
+                self._mac_hook.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._mac_hook = None
         if self._hook is not None:
             try:
                 _win_user32().UnhookWindowsHookEx(self._hook)

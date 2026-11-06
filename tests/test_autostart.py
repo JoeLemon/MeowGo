@@ -73,10 +73,26 @@ def test_launch_command_points_at_start_app():
         assert "pythonw.exe" in command or "python" in command, command
 
 
-def test_disabled_when_not_windows():
-    """非 Windows 平台上所有写操作都返回明确的“不支持”。"""
-    if os.name == "nt":
-        return                          # 这条只在非 Windows 上验证
+def test_macos_launch_agent_roundtrip(monkeypatch, tmp_path):
+    """macOS：写 / 查 / 删 LaunchAgent（HOME 指向临时目录，不碰真身）。"""
+    if sys.platform != "darwin":
+        return
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(autostart, "_launchctl", lambda *args: None)
+    assert autostart.is_enabled() is False
+    ok, error = autostart.enable()
+    assert ok, error
+    assert autostart.is_enabled() is True
+    assert "start-app.py" in autostart.current_command()
+    ok, error = autostart.disable()
+    assert ok, error
+    assert autostart.is_enabled() is False
+
+
+def test_disabled_on_unsupported_platforms():
+    """既不支持 Windows 注册表也不支持 launchd 时给出明确提示。"""
+    if os.name == "nt" or sys.platform == "darwin":
+        return
     assert autostart.is_enabled() is False
     assert autostart.current_command() == ""
     ok, error = autostart.enable()

@@ -82,6 +82,7 @@ class BaseDialog(tk.Toplevel):
             x = self.app.winfo_rootx() + (self.app.winfo_width() - self.winfo_width()) // 2
             y = self.app.winfo_rooty() + (self.app.winfo_height() - self.winfo_height()) // 3
             self.app.place_window(self, x, y, self.winfo_width(), self.winfo_height())
+        uikit.fade_in(self)
         self.wait_visibility(self)
         self.grab_set()
         self.focus_force()
@@ -195,8 +196,7 @@ class ShortcutsDialog(BaseDialog):
     def __init__(self, parent: App):
         super().__init__(parent, "快捷键速查", width=440, height=470)
         self.columnconfigure(1, weight=1)
-        rows = [row for row in self.ROWS
-                if not (platform_support.IS_MACOS and row[0] == "F9")]
+        rows = list(self.ROWS)
         for row, (key, text) in enumerate(rows):
             tk.Label(self, text=platform_support.hotkey_label(key),
                      bg=CARD, fg=ACCENT, font=FONT_MONO).grid(
@@ -207,8 +207,9 @@ class ShortcutsDialog(BaseDialog):
                 row=row, column=1, sticky="w")
         note_row = len(rows)
         if platform_support.IS_MACOS:
-            tk.Label(self, text="macOS 上不支持全局 F5 / F9，"
-                                "请使用窗口内按钮或快捷键。",
+            tk.Label(self, text="macOS 首次使用全局 F5 / F9 需在「系统设置 → "
+                                "隐私与安全性 → 辅助功能」中授权；未授权时"
+                                "只有窗口内快捷键生效。",
                      bg=CARD, fg=MUTED, font=FONT_CAPTION,
                      wraplength=parent.s(390), justify="left").grid(
                 row=note_row, column=0, columnspan=2, sticky="w",

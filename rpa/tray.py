@@ -52,7 +52,7 @@ WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU = 0x0204, 0x0205, 0x007B
 WM_QUERYENDSESSION, WM_ENDSESSION = 0x0011, 0x0016
 
 TPM_LEFTBUTTON, TPM_RIGHTBUTTON, TPM_RETURNCMD = 0x0000, 0x0002, 0x0100
-MF_STRING, MF_SEPARATOR = 0x0000, 0x0800
+MF_STRING, MF_SEPARATOR, MF_GRAYED = 0x0000, 0x0800, 0x0001
 IMAGE_ICON, LR_LOADFROMFILE = 1, 0x0010
 HWND_MESSAGE = -3               # 消息窗口的父窗口
 GWLP_WNDPROC = -4
@@ -332,6 +332,7 @@ class TrayIcon:
         self.tip = str(tip or "")
         self.on_activate = on_activate
         self.menu_items = list(menu_items or [])
+        self._enabled: dict[str, bool] = {}
         self._invoke = invoke
         self._thread: threading.Thread | None = None
         self._hwnd = None
@@ -467,6 +468,10 @@ class TrayIcon:
 
         self._post(job)
 
+    def set_menu_enabled(self, states: dict[str, bool]) -> None:
+        """按菜单标签启用 / 禁用项；菜单在右键弹出时才构建，改字典即生效。"""
+        self._enabled.update({str(k): bool(v) for k, v in states.items()})
+
     # ------------------------------------------------------------ 内部：线程
     def _run(self) -> None:
         try:
@@ -564,10 +569,14 @@ class TrayIcon:
                 if entry is None:
                     user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
                     continue
-                label, callback = entry
+                label, callback = entry[0], entry[1]
+                enabled = (self._enabled.get(str(label))
+                           if str(label) in self._enabled
+                           else (entry[2] if len(entry) >= 3 else True))
                 command = next_id
                 next_id += 1
-                if user32.AppendMenuW(menu, MF_STRING, command, str(label)):
+                flags = MF_STRING if enabled else MF_STRING | MF_GRAYED
+                if user32.AppendMenuW(menu, flags, command, str(label)):
                     commands[command] = callback
             point = POINT()
             user32.GetCursorPos(ctypes.byref(point))

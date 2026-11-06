@@ -55,6 +55,14 @@ FONT_SIZE_CAPTION = 8
 FONT_SIZE_NOTE = 9
 FONT_SIZE_BODY = 10
 
+if sys.platform == "darwin":
+    # macOS 的辅助文字 / 日志用小字号在 Retina 上偏细，各放大 1pt；
+    # 正文保持 10pt，避免表格与对话框内容溢出。
+    FONT_CAPTION = (FONT_FAMILY, 9)
+    FONT_CAPTION_BOLD = (FONT_FAMILY, 9, "bold")
+    FONT_MONO = (MONO_FAMILY, 10)
+    FONT_SIZE_CAPTION = 9
+
 # ---------------------------------------------------------------------------
 # 间距 / 圆角 / 控件尺寸（逻辑像素，统一乘 App.scale）
 # ---------------------------------------------------------------------------
@@ -89,6 +97,21 @@ HEADER_HEIGHT = 56
 TABLE_ROW_HEIGHT = 38
 DIALOG_PAD = 16
 DIALOG_ROW_GAP = 6
+
+if sys.platform == "darwin":
+    # macOS 的控件圆角更大、行高更松，贴近系统设置 / 表单的观感；
+    # 数值仍走 App.scale，所以 Retina 与外接屏都能等比缩放。
+    RADIUS_S = 10
+    RADIUS_M = 14
+    RADIUS_L = 18
+    RADIUS_XL = 26
+    CONTROL_SM = 32
+    CONTROL_MD = 38
+    CONTROL_LG = 42
+    HEADER_HEIGHT = 60
+    TABLE_ROW_HEIGHT = 36
+    DIALOG_PAD = 20
+    DIALOG_ROW_GAP = 8
 
 # ---------------------------------------------------------------------------
 # 色板

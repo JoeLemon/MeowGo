@@ -182,6 +182,19 @@ def test_tray_events_dispatch():
         icon.stop()
 
 
+def test_menu_enabled_state():
+    """运行状态联动：按标签记录启用状态，未知标签不报错。"""
+    icon = tray.TrayIcon(
+        menu_items=[("运行当前组", lambda: None),
+                   ("停止运行", lambda: None)])
+    icon.set_menu_enabled({"运行当前组": True, "停止运行": False})
+    check("禁用项记录", icon._enabled["停止运行"] is False)
+    check("启用项记录", icon._enabled["运行当前组"] is True)
+    icon.set_menu_enabled({"运行当前组": False, "不存在的项": True})
+    check("状态可更新", icon._enabled["运行当前组"] is False)
+    check("未知标签不报错", icon._enabled.get("不存在的项") is True)
+
+
 def test_invoke_marshalling():
     """invoke 存在时，回调被交给调用方（tk 的 after）而不是就地执行。"""
     received: list[object] = []
@@ -268,7 +281,8 @@ def main():
     for test in (test_icon_file, test_icon_missing_source,
                  test_win32_prototypes_compatible, test_start_stop_cycle,
                  test_start_twice, test_tip_and_theme_switch,
-                 test_tray_events_dispatch, test_invoke_marshalling,
+                 test_tray_events_dispatch, test_menu_enabled_state,
+                 test_invoke_marshalling,
                  test_balloon_click, test_session_hook, test_non_windows_paths):
         try:
             test()

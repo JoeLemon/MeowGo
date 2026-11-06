@@ -22,6 +22,11 @@ SUPER = 4          # 超采样倍数
 _cache: dict[tuple, ImageTk.PhotoImage] = {}
 
 
+def clear_icon_cache() -> None:
+    """清空 PhotoImage 缓存；Tk 根窗口重建后必须调用，避免引用旧图像。"""
+    _cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # 图标绘制
 # ---------------------------------------------------------------------------
@@ -533,6 +538,25 @@ def round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kwargs):
     return canvas.create_polygon(points, smooth=True, **kwargs)
 
 
+def _rounded_rect_photo(width: int, height: int, radius: int, fill: str,
+                        outline: str, outline_width: int) -> ImageTk.PhotoImage:
+    """用 4 倍超采样绘制圆角矩形，避免 Canvas 多边形在 Retina 上出毛边。"""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    factor = 4
+    image = Image.new("RGBA", (width * factor, height * factor), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    inset = max(1, int(round(outline_width * factor / 2)))
+    draw.rounded_rectangle(
+        (inset, inset, width * factor - inset - 1, height * factor - inset - 1),
+        radius=max(1, int(radius * factor)), fill=fill,
+        outline=outline or None, width=max(1, int(outline_width * factor)))
+    image = image.resize((width, height),
+                         getattr(getattr(Image, "Resampling", Image),
+                                 "LANCZOS", 1))
+    return ImageTk.PhotoImage(image)
+
+
 class RoundedCard(tk.Frame):
     """圆角卡片：外层用 Canvas 画圆角底与描边，内容放进 .body。
 
@@ -728,7 +752,20 @@ class TextField(tk.Frame):
 
 def style_window(window: tk.Misc, dark: bool | None = None,
                  rounded: bool = True) -> None:
-    """Windows 11 原生窗口圆角 + 深色标题栏（老系统静默忽略）。"""
+    """Windows 11 原生窗口圆角 + 深色标题栏（老系统静默忽略）。
+
+    macOS 上改为同步系统外观：浅色用 aqua、深色用 darkaqua，
+    这样标题栏、原生控件和弹窗都会跟界面主题保持一致。
+    """
+    if sys.platform == "darwin":
+        try:
+            appearance = ("auto" if dark is None
+                          else ("darkaqua" if dark else "aqua"))
+            window.tk.call("::tk::unsupported::MacWindowStyle",
+                           "appearance", window._w, appearance)
+        except tk.TclError:
+            pass
+        return
     if sys.platform != "win32":
         return
     try:
@@ -760,6 +797,44 @@ def style_window(window: tk.Misc, dark: bool | None = None,
         pass
 
 
+_REDUCE_MOTION: bool | None = None
+
+
+def _reduce_motion() -> bool:
+    """缓存系统的「减少动态效果」查询，避免每次弹窗都起一个子进程。"""
+    global _REDUCE_MOTION
+    if _REDUCE_MOTION is None:
+        _REDUCE_MOTION = platform_support.reduce_motion()
+    return _REDUCE_MOTION
+
+
+def fade_in(window: tk.Misc, length_ms: int = 160) -> None:
+    """窗口淡入；系统开启「减少动态效果」时直接跳过。"""
+    if _reduce_motion():
+        return
+    set_alpha = getattr(window, "attributes", None)
+    if set_alpha is None:              # 极少数嵌入窗口没有 alpha 支持
+        return
+    try:
+        set_alpha("-alpha", 0.86)
+    except tk.TclError:
+        return
+    steps = 8
+    interval = max(10, int(length_ms / steps))
+
+    def tick(step: int) -> None:
+        try:
+            if not window.winfo_exists():
+                return
+            set_alpha("-alpha", 0.86 + 0.14 * step / steps)
+            if step < steps:
+                window.after(interval, lambda: tick(step + 1))
+        except tk.TclError:
+            return
+
+    window.after(interval, lambda: tick(1))
+
+
 class SlimScrollbar(tk.Canvas):
     """参考图风格的细滚动条：浅色圆角轨道 + 深墨圆角滑块 + 白色猫爪。
 
@@ -769,12 +844,15 @@ class SlimScrollbar(tk.Canvas):
     """
 
     def __init__(self, master, orient: str = "vertical", command=None,
-                 *, width: int = 12, bg: str | None = None,
+                 *, width: int | None = None, bg: str | None = None,
                  variant: str = "default", scale: float = 1.0):
         self.orient = "horizontal" if str(orient).startswith("h") else "vertical"
         self.command = command
         self.variant = variant
         self._scale = scale
+        if width is None:
+            # macOS 的覆盖式滚动条更细，10px 逻辑宽度更贴近系统观感
+            width = 10 if platform_support.IS_MACOS else 12
         self.thickness = max(8, int(round(width * scale)))
         if bg is None:
             try:
@@ -1517,8 +1595,11 @@ class RoundButton(tk.Canvas):
         super().__init__(master, width=width, height=self.height, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2",
                          takefocus=1)
-        self._shape = round_rect(self, 0.5, 0.5, width - 0.5, self.height - 0.5,
-                                 self.radius, fill=self._palette()[0], outline="")
+        self._width = width
+        # 背景用超采样图片而不是 Canvas 多边形：多边形边角没有抗锯齿，
+        # 在 Retina / 深色底上尤其明显（橙色按钮的毛边问题）。
+        self._shape = self.create_image(0, 0, anchor="nw")
+        self._shape_photo: ImageTk.PhotoImage | None = None
         self._content: list[int] = []
         self._rebuild()
 
@@ -1547,8 +1628,9 @@ class RoundButton(tk.Canvas):
         width = 1
         if self._focused and self._enabled:
             outline, width = theme.token("ACCENT"), 2
-        self.itemconfigure(self._shape, fill=fill, outline=outline,
-                           width=width)
+        self._shape_photo = _rounded_rect_photo(
+            self._width, self.height, self.radius, fill, outline, width)
+        self.itemconfigure(self._shape, image=self._shape_photo)
         # 纯图标 ghost 按钮静默时用次级文字色，悬停再回到主文字色：
         # 顶栏一排黑色图标会抢标题的注意力，弱化后层级更清楚。
         icon_fg = self.icon_color or fg
@@ -1647,8 +1729,8 @@ class RoundButton(tk.Canvas):
         if self.icon_name:
             self.gap = int(round(6 * self._scale)) if self.text else 0
             width += self.icon_size + self.gap
+        self._width = width
         self.configure(width=width)
-        self.coords(self._shape, *self._shape_points(width))
         self._rebuild()
 
     def set_kind(self, kind: str) -> None:
@@ -1657,15 +1739,6 @@ class RoundButton(tk.Canvas):
             return
         self.kind = kind
         self._rebuild()
-
-    def _shape_points(self, width: int):
-        r = min(self.radius, self.height / 2, width / 2)
-        return [0.5 + r, 0.5, width - 0.5 - r, 0.5, width - 0.5, 0.5,
-                width - 0.5, 0.5 + r, width - 0.5, self.height - 0.5 - r,
-                width - 0.5, self.height - 0.5, width - 0.5 - r,
-                self.height - 0.5, 0.5 + r, self.height - 0.5, 0.5,
-                self.height - 0.5, 0.5, self.height - 0.5 - r, 0.5, 0.5 + r,
-                0.5, 0.5]
 
     def set_bg(self, color: str) -> None:
         self.configure(bg=color)
