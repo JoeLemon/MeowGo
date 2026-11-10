@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
 from . import platform_support, uikit
@@ -143,32 +144,75 @@ class BaseDialog(tk.Toplevel):
 
 
 class GroupDialog(BaseDialog):
-    """输入 / 修改执行组名称。"""
+    """输入 / 修改执行组名称；with_retry=True 时同时设置整组重试。"""
 
-    def __init__(self, parent: App, title: str, initial: str = ""):
-        super().__init__(parent, title, width=380, height=170)
-        self.label("执行组名称", 0)
+    def __init__(self, parent: App, title: str, initial: str = "",
+                 retry: int = 0, retry_delay: float = 0.5,
+                 with_retry: bool = False, show_name: bool = True):
+        super().__init__(parent, title, width=380,
+                         height=250 if with_retry else 170)
         self.var = tk.StringVar(value=initial)
-        entry = uikit.TextField(self, textvariable=self.var,
-                                scale=parent.scale, bg=CARD,
-                                font_size=FONT_SIZE_BODY)
-        entry.grid(row=0, column=1, sticky="ew", padx=(0, parent.s(16)),
-                   pady=parent.s(5))
-        self.columnconfigure(1, weight=1)
-        tk.Label(self, text="尽量简短，便于在「调用执行组」里引用",
-                 bg=CARD, fg=MUTED, font=FONT_CAPTION, justify="left",
-                 anchor="w", wraplength=parent.s(340)).grid(
-            row=1, column=0, columnspan=2, sticky="ew",
-            padx=(parent.s(16), parent.s(16)),
-            pady=(0, parent.s(2)))
-        self.footer(2, pad_top=6)
-        entry.bind("<Return>", lambda e: self.ok())
-        entry.focus_set()
-        entry.select_range(0, "end")
+        self.retry = max(0, int(retry or 0))
+        self.retry_delay = max(0.0, float(retry_delay or 0.5))
+        entry = None
+        if show_name:
+            self.label("执行组名称", 0)
+            entry = uikit.TextField(self, textvariable=self.var,
+                                    scale=parent.scale, bg=CARD,
+                                    font_size=FONT_SIZE_BODY)
+            entry.grid(row=0, column=1, sticky="ew", padx=(0, parent.s(16)),
+                       pady=parent.s(5))
+            self.columnconfigure(1, weight=1)
+            tk.Label(self, text="尽量简短，便于在「调用执行组」里引用",
+                     bg=CARD, fg=MUTED, font=FONT_CAPTION, justify="left",
+                     anchor="w", wraplength=parent.s(340)).grid(
+                row=1, column=0, columnspan=2, sticky="ew",
+                padx=(parent.s(16), parent.s(16)),
+                pady=(0, parent.s(2)))
+        row = 2 if show_name else 0
+        if with_retry:
+            self.label("整组重试", row)
+            box = tk.Frame(self, bg=CARD)
+            box.grid(row=row, column=1, sticky="w", padx=(0, parent.s(16)),
+                     pady=parent.s(5))
+            self.var_retry = tk.StringVar(value=str(self.retry))
+            ttk.Spinbox(box, from_=0, to=9, width=4,
+                        textvariable=self.var_retry).pack(side="left")
+            tk.Label(box, text="次，间隔", bg=CARD, fg=TEXT,
+                     font=FONT_NOTE).pack(side="left", padx=(parent.s(3), 0))
+            self.var_delay = tk.StringVar(value=f"{self.retry_delay:g}")
+            ttk.Spinbox(box, from_=0, to=60, increment=0.5, width=5,
+                        textvariable=self.var_delay).pack(
+                side="left", padx=(parent.s(3), 0))
+            tk.Label(box, text="秒", bg=CARD, fg=TEXT,
+                     font=FONT_NOTE).pack(side="left", padx=(parent.s(2), 0))
+            tk.Label(self,
+                     text="整组跑完仍有失败步骤时才重跑整组；"
+                          "设置了「停止执行」的错误不会重试。",
+                     bg=CARD, fg=MUTED, font=FONT_CAPTION, justify="left",
+                     anchor="w", wraplength=parent.s(340)).grid(
+                row=row + 1, column=0, columnspan=2, sticky="ew",
+                padx=(parent.s(16), parent.s(16)),
+                pady=(0, parent.s(4)))
+            row += 2
+        self.footer(row, pad_top=6)
+        if entry is not None:
+            entry.bind("<Return>", lambda e: self.ok())
+            entry.focus_set()
+            entry.select_range(0, "end")
         self.fit_content(width=parent.s(380))
         self.center()
 
     def ok(self) -> None:
+        if hasattr(self, "var_retry"):
+            try:
+                self.retry = max(0, int(self.var_retry.get() or 0))
+            except ValueError:
+                self.retry = 0
+            try:
+                self.retry_delay = max(0.0, float(self.var_delay.get() or 0.5))
+            except ValueError:
+                self.retry_delay = 0.5
         self.result = self.var.get().strip()
         self.destroy()
 

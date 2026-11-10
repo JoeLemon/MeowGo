@@ -60,7 +60,8 @@ a = Analysis(
         'rpa', 'rpa.gui', 'rpa.engine', 'rpa.assets', 'rpa.uikit', 'rpa.i18n',
         'rpa.lock', 'rpa.dialogs', 'rpa.recorder', 'rpa.logs', 'rpa.theme',
         'rpa.tray', 'rpa.autostart', 'rpa.ocr', 'rpa.uia', 'rpa.pixel_cat',
-        'rpa.mac_native',
+        'rpa.mac_native', 'rpa.file_assoc', 'rpa.schedule', 'rpa.launchd',
+        'rpa.project_io', 'rpa.report_dialogs', 'rpa.secrets',
         'pyautogui', 'pyperclip', 'PIL', 'PIL.ImageGrab', 'PIL.ImageTk',
         'cv2', 'xlrd', 'openpyxl',
     ] + (['AppKit', 'Quartz', 'Foundation', 'objc', 'ApplicationServices']

@@ -26,6 +26,7 @@ from . import (
     assets,
     autostart,
     dialogs,
+    file_assoc,
     i18n,
     launchd,
     logs,
@@ -48,6 +49,7 @@ from .engine import (
     STEP_TYPES,
     TEXT_STEP_TYPES,
     TIMEOUT_STEP_TYPES,
+    WAIT_IMAGE_TYPES,
     Executor,
     Group,
     Project,
@@ -80,7 +82,9 @@ from .schedule import (
     normalize_schedule_task,  # noqa: F401 - 兼容旧的 gui 导入路径
     schedule_countdown_text,
     schedule_day_text,
+    schedule_due,
     schedule_next_run,
+    schedule_task_label,
     schedule_tasks,
 )
 from .theme import (
@@ -314,6 +318,7 @@ TYPE_ICONS = {
     "continue": "next", "file": "folder_open", "json": "table",
     "regex": "search", "date": "calendar", "clipboard": "copy",
     "random_wait": "clock", "section": "note",
+    "wait_image": "eye", "wait_gone": "eye", "ocr_read": "text",
 }
 
 # 条件步骤里「图片 | 组名」两段式的类型（对话框用图形化双输入框）
@@ -344,6 +349,7 @@ TYPE_COLORS = {
     "break": TEXT_WEAK, "continue": TEXT_WEAK,
     "file": MUTED, "json": INFO, "regex": INFO, "date": INFO,
     "clipboard": MUTED, "random_wait": WARNING, "section": TEXT_WEAK,
+    "wait_image": WARNING, "wait_gone": WARNING, "ocr_read": INFO,
 }
 TYPE_ICON_COLOR = MUTED
 # 深色下把类型图标提亮一档，避免深底看不清（_apply_theme 时整组替换）
@@ -374,6 +380,9 @@ TYPE_COLORS_DARK.update({
     "clipboard": DARK_PALETTE["MUTED"],
     "random_wait": DARK_PALETTE["WARNING"],
     "section": DARK_PALETTE["TEXT_WEAK"],
+    "wait_image": DARK_PALETTE["WARNING"],
+    "wait_gone": DARK_PALETTE["WARNING"],
+    "ocr_read": DARK_PALETTE["INFO"],
 })
 
 # 步骤搜索框的占位文字（失焦为空时显示，不计入过滤条件）
@@ -967,6 +976,9 @@ class App(tk.Tk):
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.ui_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.executor = Executor(base_dir=APP_DIR, log=self._enqueue_log)
+        # 持久变量：跨运行保留，随配置文件一起保存（步骤里用 {持久:键} 读）
+        self.executor.persist = self.settings.setdefault("persistent_vars", {})
+        self.executor.on_persist = self._persist_var_from_worker
         self.worker: Optional[threading.Thread] = None
         self.running = False
         self.paused = False
@@ -1339,6 +1351,9 @@ class App(tk.Tk):
             MI("新建项目…", "add", self.new_project),
             MI("打开项目…", "open", self.open_project_dialog),
             MI("另存为项目…", "save", self.save_project_as),
+            MI("关联 .mgproj 文件…", "link",
+               self.register_project_file_assoc,
+               "双击项目文件直接打开"),
             MI("最近项目…", "folder", self.open_recent_projects,
                project_io.project_name(self.project_path)
                if self.project_path else ""),
@@ -1390,6 +1405,7 @@ class App(tk.Tk):
             MI("恢复预置执行组…", "add", self.restore_default_groups,
                "补回缺失模板"),
             MI("重命名执行组…", "pencil", self.rename_group),
+            MI("组级重试…", "redo", self.edit_group_retry, "整组失败后重跑"),
             MI("复制为副本", "copy", self.duplicate_group),
             MI("删除执行组", "trash", self.delete_group, danger=True),
             "-",
@@ -2388,6 +2404,41 @@ class App(tk.Tk):
         self._log("info", "已新建空项目")
         self._set_status("已新建空项目")
 
+    def register_project_file_assoc(self) -> None:
+        """把 .mgproj 关联到 MeowGo（只写当前用户，不动系统默认）。"""
+        if not platform_support.IS_WINDOWS:
+            messagebox.showinfo(
+                "文件关联",
+                "当前系统不支持自动关联。\n"
+                "macOS 需要打包成 .app，Linux 请在桌面环境的"
+                "「默认应用」里设置。", parent=self)
+            return
+        if file_assoc.is_registered():
+            if not messagebox.askyesno(
+                    "取消文件关联",
+                    "现在双击 .mgproj 会用 MeowGo 打开。\n\n"
+                    "要取消这个关联吗？", parent=self):
+                return
+            ok, error = file_assoc.unregister()
+            if ok:
+                self._log("info", "已取消 .mgproj 文件关联")
+                self._set_status("已取消 .mgproj 文件关联")
+            else:
+                messagebox.showerror("取消失败", error, parent=self)
+            return
+        if not messagebox.askyesno(
+                "关联 .mgproj 文件",
+                "把 .mgproj 项目文件关联到 MeowGo？\n\n"
+                "关联后双击项目文件就能直接打开，"
+                "只写入当前用户，不需要管理员权限。", parent=self):
+            return
+        ok, error = file_assoc.register()
+        if ok:
+            self._log("info", "已关联 .mgproj 文件")
+            self._set_status("已关联 .mgproj 文件：双击即可打开")
+        else:
+            messagebox.showerror("关联失败", error, parent=self)
+
     def open_project_dialog(self) -> None:
         path = filedialog.askopenfilename(
             parent=self, title="打开项目",
@@ -2947,6 +2998,31 @@ class App(tk.Tk):
         self._refresh_all()
         self._log("info", f"执行组「{old}」已重命名为「{name}」")
 
+    def edit_group_retry(self) -> None:
+        """设置整组重试：整组跑完仍有失败步骤时重跑几次、间隔多久。"""
+        group = self._current_group()
+        if group is None:
+            return
+        dialog = GroupDialog(self, "组级重试", group.name,
+                             retry=group.retry,
+                             retry_delay=group.retry_delay,
+                             with_retry=True, show_name=False)
+        if dialog.wait() is None:
+            return
+        if (dialog.retry, dialog.retry_delay) == (group.retry,
+                                                  group.retry_delay):
+            return
+        self._push_undo("组级重试设置")
+        group.retry = dialog.retry
+        group.retry_delay = dialog.retry_delay
+        self._refresh_all()
+        if group.retry:
+            self._log("info", f"执行组「{group.name}」整组重试："
+                              f"{group.retry} 次，间隔 "
+                              f"{group.retry_delay:g} 秒")
+        else:
+            self._log("info", f"执行组「{group.name}」已关闭整组重试")
+
     def duplicate_group(self) -> None:
         group = self._current_group()
         if group is None:
@@ -3498,6 +3574,8 @@ class App(tk.Tk):
             uikit.MenuItem("恢复预置执行组…", "add",
                            self.restore_default_groups, "补回缺失模板"),
             uikit.MenuItem("重命名执行组…", "pencil", self.rename_group),
+            uikit.MenuItem("组级重试…", "redo", self.edit_group_retry,
+                           "整组失败后重跑"),
             uikit.MenuItem("复制为副本", "copy", self.duplicate_group),
             "-",
             uikit.MenuItem("上移", "up", lambda: self.move_group(-1),
@@ -3766,6 +3844,8 @@ class App(tk.Tk):
                     self._apply_progress(*payload)  # type: ignore[misc]
                 elif kind == "confirm":
                     self._ask_debug(*payload)  # type: ignore[misc]
+                elif kind == "persist":
+                    self._apply_persist_var(*payload)  # type: ignore[misc]
                 elif kind == "end":
                     self._on_run_end(str(payload))
                 elif kind == "stop":
@@ -3779,6 +3859,19 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(120, self._drain_queue)
+
+    def _persist_var_from_worker(self, key: str, value: str) -> None:
+        """工作线程里写的持久变量：交回主线程落盘（Tk 不能跨线程）。"""
+        self.ui_queue.put(("persist", (key, value)))
+
+    def _apply_persist_var(self, key: str, value: str) -> None:
+        """主线程：把持久变量写进设置并保存（失败只影响下次运行时的初值）。"""
+        store = self.settings.setdefault("persistent_vars", {})
+        if not isinstance(store, dict):
+            store = {}
+            self.settings["persistent_vars"] = store
+        store[str(key)] = str(value)
+        self._save_state()
 
     def _insert_log_entry(self, entry) -> None:
         level, display, stamp, target = entry
@@ -4052,6 +4145,10 @@ class App(tk.Tk):
         self.executor.base_dir = self.image_dir    # 步骤里的图片名相对图片目录
         self.executor.groups = self._snapshot(names)
         self.executor.order = ([entry] if entry else self.project.names())
+        # 组级重试：整组跑完还有失败步骤就整组再来一次
+        self.executor.group_retry = {
+            group.name: (int(group.retry or 0), float(group.retry_delay or 0.5))
+            for group in self.project.groups}
         self.executor.confidence = float(self.settings.get("confidence", 0.9))
         # 显式设置（普通运行为 None）：避免上一次带数据运行影响这次
         self.executor.data = data  # type: ignore[assignment]  # None 表示清空
@@ -4479,7 +4576,7 @@ class App(tk.Tk):
             current = time.strftime("%H:%M")
             if not self.running and not self._schedule_pending:
                 for task in tasks:
-                    if not task.get("enabled") or task.get("time") != current:
+                    if not task.get("enabled") or not schedule_due(task):
                         continue
                     key = f"{today}|{task.get('id', '')}|{current}"
                     if key in self._schedule_fired:
@@ -5571,29 +5668,28 @@ class StepDialog(BaseDialog):
         self.lbl_gray = tk.Label(self.gray_box, text="灰度", bg=CARD, fg=TEXT,
                                  font=FONT_NOTE)
         self.lbl_gray.pack(side="left", padx=(parent.s(4), 0))
-        self.lbl_retry = tk.Label(row_match, text="失败重试", bg=CARD, fg=TEXT,
-                                  font=FONT_NOTE)
-        self.lbl_retry.grid(row=0, column=4, sticky="w")
+        # 失败重试装成一个小盒子：位置在 _layout_retry_row 里定，
+        # 图片步骤一行挤不下时整盒换到下一行，避免「间隔」被右边缘切掉
+        self.retry_box = tk.Frame(row_match, bg=CARD)
+        self.lbl_retry = tk.Label(self.retry_box, text="失败重试", bg=CARD,
+                                  fg=TEXT, font=FONT_NOTE)
+        self.lbl_retry.pack(side="left")
         self.var_retry = tk.StringVar(value=str(editing.retry or 0))
-        self.spin_retry = ttk.Spinbox(row_match, from_=0, to=9, width=4,
+        self.spin_retry = ttk.Spinbox(self.retry_box, from_=0, to=9, width=4,
                                       textvariable=self.var_retry)
-        self.spin_retry.grid(row=0, column=5, sticky="w", padx=(parent.s(3), 0))
-        self.lbl_retry_unit = tk.Label(row_match, text="次，间隔", bg=CARD,
-                                       fg=TEXT,
-                                       font=FONT_NOTE)
-        self.lbl_retry_unit.grid(row=0, column=6, sticky="w",
-                                 padx=(parent.s(3), 0))
+        self.spin_retry.pack(side="left", padx=(parent.s(3), 0))
+        self.lbl_retry_unit = tk.Label(self.retry_box, text="次，间隔", bg=CARD,
+                                       fg=TEXT, font=FONT_NOTE)
+        self.lbl_retry_unit.pack(side="left", padx=(parent.s(3), 0))
         self.var_retry_delay = tk.StringVar(
             value=f"{editing.retry_delay:g}")
         self.spin_retry_delay = ttk.Spinbox(
-            row_match, from_=0, to=60, increment=0.1, width=5,
+            self.retry_box, from_=0, to=60, increment=0.1, width=5,
             textvariable=self.var_retry_delay)
-        self.spin_retry_delay.grid(row=0, column=7, sticky="w",
-                                   padx=(parent.s(3), 0))
-        self.lbl_retry_sec = tk.Label(row_match, text="秒", bg=CARD, fg=TEXT,
-                                      font=FONT_NOTE)
-        self.lbl_retry_sec.grid(row=0, column=8, sticky="w",
-                                padx=(parent.s(2), 0))
+        self.spin_retry_delay.pack(side="left", padx=(parent.s(3), 0))
+        self.lbl_retry_sec = tk.Label(self.retry_box, text="秒", bg=CARD,
+                                      fg=TEXT, font=FONT_NOTE)
+        self.lbl_retry_sec.pack(side="left", padx=(parent.s(2), 0))
 
         # 输入方式 / 命中检查（同一行，按类型切换）
         self.lbl_other = self._adv_label("其他", 3)
@@ -5692,6 +5788,23 @@ class StepDialog(BaseDialog):
                          font=FONT_NOTE)
         label.grid(row=row, column=0, sticky="w", pady=self.app.s(3))
         return label
+
+    def _layout_retry_row(self, second_line: bool) -> None:
+        """「失败重试 N 次，间隔 S 秒」放哪一行。
+
+        图片步骤同一行已经有「第几个 + 灰度」，再挤进去会被窗口右边缘
+        切掉「间隔」和秒数输入框，所以换到下一行左对齐；其它类型一行
+        放得下，就跟在后面。
+        """
+        row = 1 if second_line else 0
+        info = self.retry_box.grid_info()
+        if info and int(info.get("row", 0)) == row:
+            return
+        if second_line:
+            self.retry_box.grid(row=1, column=0, columnspan=4, sticky="w",
+                                pady=(self.app.s(4), 0))
+        else:
+            self.retry_box.grid(row=0, column=4, sticky="w", pady=0)
 
     def _autosize(self) -> None:
         """按内容收缩高度，去掉表单底部的大块空白。"""
@@ -5844,8 +5957,10 @@ class StepDialog(BaseDialog):
         if key == "window":
             text += "\n窗口标题可只填写其中一部分，例如 activate:记事本。"
         if key == "file":
-            text += ("\nwait 不写秒数时使用「等待」值（留空按 10 秒）；"
-                     "copy/move 的目标目录不存在会自动创建。")
+            text += ("\ncopy / move / write / append 的目标目录不存在会自动创建。"
+                     "\nwrite 覆盖、append 追加（都自动补换行）；"
+                     "read 把文件内容读进变量。"
+                     "\nwait 不写秒数时使用「等待」值（留空按 10 秒）。")
         if key in ("click_xy", "move_xy"):
             text += "\n也可将鼠标移至目标位置，点击「拾取」自动填入坐标。"
         if key == "input":
@@ -5854,6 +5969,12 @@ class StepDialog(BaseDialog):
         if key in TEXT_STEP_TYPES:
             text += ("\n左侧填写屏幕上要识别的文字；可夹 @x,y,宽,高 限定范围。"
                      "\n文字识别依赖 OCR 组件（中文需安装 chi_sim 语言包）。")
+        if key in WAIT_IMAGE_TYPES:
+            text += ("\n只等待、不点击；「最多等 N 秒」留空表示一直等。"
+                     "\n超时按「失败后处理」执行（默认记为失败后继续）。")
+        if key == "ocr_read":
+            text += ("\n把指定区域里的文字整段读进变量（换行保留）。"
+                     "\n用「识别范围」框住目标区域，识别更快也更准。")
         if key == "ui_click":
             text += ("\n左侧填写控件名称，可用「名称|控件类型」限定，"
                      "如 确定|Button。\n控件识别依赖 uiautomation 组件。")
@@ -5945,6 +6066,7 @@ class StepDialog(BaseDialog):
         self.lbl_match.configure(text="匹配 / 重试" if needs_image else "重试")
         for widget in self._adv_match:
             widget.grid()
+        self._layout_retry_row(needs_image)
         # 输入方式 / 命中检查共用一行，按类型切换
         has_other = key == "input" or needs_image
         for widget in self._adv_other:
@@ -6316,6 +6438,14 @@ class ImagePreviewDialog(BaseDialog):
         super().destroy()
 
 
+# 定时频率：内部值 -> 界面文案（顺序即下拉顺序）
+SCHEDULE_MODE_CHOICES = (
+    ("daily", "每天"), ("weekly", "每周"),
+    ("weekday", "工作日"), ("hourly", "每 N 小时"),
+)
+SCHEDULE_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
 class ScheduleDialog(BaseDialog):
     """定时运行 + 结束通知。
 
@@ -6346,6 +6476,11 @@ class ScheduleDialog(BaseDialog):
         self.var_minute = tk.StringVar(value=minute or "00")
         self.var_group = tk.StringVar(
             value=current.get("group") or "（当前组）")
+        self.var_mode = tk.StringVar(
+            value=i18n.tr(SCHEDULE_MODE_CHOICES[0][1]))
+        self.var_weekday = tk.StringVar(value=i18n.tr(SCHEDULE_WEEKDAYS[0]))
+        self.var_interval = tk.StringVar(
+            value=str(current.get("interval", 1) or 1))
         self.var_sound = tk.BooleanVar(value=bool(settings.get("sound")))
         self.var_webhook = tk.StringVar(value=settings.get("webhook", ""))
 
@@ -6448,7 +6583,7 @@ class ScheduleDialog(BaseDialog):
                 "write",
                 lambda *_a, i=index, var=variable:
                 self._on_row_switch(i, var))
-            time_label = tk.Label(row, text=task.get("time", "09:00"),
+            time_label = tk.Label(row, text=schedule_task_label(task),
                                   bg=bg, fg=TEXT if task.get("enabled")
                                   else MUTED, font=FONT_NOTE_BOLD,
                                   anchor="w", cursor="hand2")
@@ -6507,7 +6642,7 @@ class ScheduleDialog(BaseDialog):
         if not (0 <= self._selected < len(self._tasks)):
             return
         task = self._tasks[self._selected]
-        name = (f"{task.get('time', '--:--')} · "
+        name = (f"{schedule_task_label(task)} · "
                 f"{task.get('group') or i18n.tr('当前组')}")
         if not messagebox.askyesno("删除定时任务",
                                    f"确定删除定时任务「{name}」？",
@@ -6557,21 +6692,43 @@ class ScheduleDialog(BaseDialog):
                        padx=(0, app.s(10)), pady=app.s(5))
             return label
 
-        row_label("每日运行时间", 2)
-        row_time = tk.Frame(right, bg=CARD)
-        row_time.grid(row=2, column=1, sticky="w", pady=app.s(5))
+        row_label("运行频率", 2)
+        self.row_time = tk.Frame(right, bg=CARD)
+        self.row_time.grid(row=2, column=1, sticky="ew", pady=app.s(5))
+        self.combo_mode = uikit.ReadonlySelect(
+            self.row_time,
+            values=[i18n.tr(label) for _mode, label in SCHEDULE_MODE_CHOICES],
+            variable=self.var_mode, scale=app.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE, width=9)
+        self.combo_weekday = uikit.ReadonlySelect(
+            self.row_time,
+            values=[i18n.tr(name) for name in SCHEDULE_WEEKDAYS],
+            variable=self.var_weekday, scale=app.scale, bg=CARD,
+            font_size=FONT_SIZE_NOTE, width=5)
         self.spin_hour = ttk.Spinbox(
-            row_time, from_=0, to=23, width=4, wrap=True, format="%02.0f",
-            textvariable=self.var_hour)
-        self.spin_hour.pack(side="left")
-        tk.Label(row_time, text=":", bg=CARD, fg=TEXT,
-                 font=FONT_NOTE).pack(side="left", padx=app.s(2))
+            self.row_time, from_=0, to=23, width=4, wrap=True,
+            format="%02.0f", textvariable=self.var_hour)
+        self.lbl_colon = tk.Label(self.row_time, text=":", bg=CARD, fg=TEXT,
+                                  font=FONT_NOTE)
         self.spin_minute = ttk.Spinbox(
-            row_time, from_=0, to=59, width=4, wrap=True, format="%02.0f",
-            textvariable=self.var_minute)
-        self.spin_minute.pack(side="left")
-        tk.Label(row_time, text="时 : 分", bg=CARD, fg=MUTED,
-                 font=FONT_NOTE).pack(side="left", padx=app.s(6))
+            self.row_time, from_=0, to=59, width=4, wrap=True,
+            format="%02.0f", textvariable=self.var_minute)
+        self.lbl_interval_prefix = tk.Label(
+            self.row_time, text="起，每", bg=CARD, fg=MUTED,
+            font=FONT_NOTE)
+        self.spin_interval = ttk.Spinbox(
+            self.row_time, from_=1, to=24, width=3,
+            textvariable=self.var_interval)
+        self.lbl_interval_unit = tk.Label(
+            self.row_time, text="小时", bg=CARD, fg=MUTED, font=FONT_NOTE)
+        self.var_mode.trace_add(
+            "write", lambda *_a: self._on_schedule_mode_change())
+        # 星期 / 间隔 / 时间改了立刻写回任务，左侧摘要同步
+        for variable in (self.var_weekday, self.var_interval,
+                         self.var_hour, self.var_minute):
+            variable.trace_add(
+                "write", lambda *_a: self._on_schedule_field_change())
+        self._layout_schedule_row()
 
         row_label("目标执行组", 3)
         self.group_combo = uikit.ReadonlySelect(
@@ -6661,6 +6818,67 @@ class ScheduleDialog(BaseDialog):
         self.lbl_task.grid(row=11, column=0, columnspan=2, sticky="ew",
                            pady=(app.s(4), 0))
 
+    def _schedule_mode(self) -> str:
+        """当前选中的频率内部值。"""
+        label = self.var_mode.get()
+        for mode, text in SCHEDULE_MODE_CHOICES:
+            if label in i18n.variants(text):
+                return mode
+        return "daily"
+
+    def _schedule_weekday(self) -> int:
+        label = self.var_weekday.get()
+        for index, name in enumerate(SCHEDULE_WEEKDAYS):
+            if label in i18n.variants(name):
+                return index
+        return 0
+
+    def _schedule_interval(self) -> int:
+        try:
+            return min(24, max(1, int(float(self.var_interval.get() or 1))))
+        except (TypeError, ValueError):
+            return 1
+
+    def _layout_schedule_row(self) -> None:
+        """按频率显示 / 隐藏「星期」和「每 N 小时」，其余控件保持顺序。"""
+        mode = self._schedule_mode()
+        for widget in (self.combo_mode, self.combo_weekday, self.spin_hour,
+                       self.lbl_colon, self.spin_minute,
+                       self.lbl_interval_prefix, self.spin_interval,
+                       self.lbl_interval_unit):
+            widget.pack_forget()
+        self.combo_mode.pack(side="left")
+        if mode == "weekly":
+            self.combo_weekday.pack(side="left", padx=(self.app.s(6), 0))
+        self.spin_hour.pack(side="left", padx=(self.app.s(6), 0))
+        self.lbl_colon.pack(side="left", padx=self.app.s(2))
+        self.spin_minute.pack(side="left")
+        if mode == "hourly":
+            self.lbl_interval_prefix.pack(side="left",
+                                          padx=(self.app.s(8), 0))
+            self.spin_interval.pack(side="left", padx=(self.app.s(3), 0))
+            self.lbl_interval_unit.pack(side="left", padx=(self.app.s(3), 0))
+
+    def _on_schedule_mode_change(self) -> None:
+        if self._loading:
+            return
+        self._layout_schedule_row()
+        self._commit_current()
+        self._refresh_selected_label()
+
+    def _on_schedule_field_change(self) -> None:
+        if self._loading:
+            return
+        self._commit_current()
+        self._refresh_selected_label()
+
+    def _refresh_selected_label(self) -> None:
+        """左侧列表的摘要跟着编辑结果一起变，不用等切走再切回来。"""
+        if 0 <= self._selected < len(self._task_rows):
+            task = self._tasks[self._selected]
+            self._task_rows[self._selected]["time"].configure(
+                text=schedule_task_label(task))
+
     def _load_task(self) -> None:
         task = (self._tasks[self._selected]
                 if 0 <= self._selected < len(self._tasks) else None)
@@ -6678,6 +6896,12 @@ class ScheduleDialog(BaseDialog):
                 self.var_minute.set(minute or "00")
                 self.var_group.set(task.get("group")
                                    or i18n.tr("（当前组）"))
+                mode = str(task.get("mode") or "daily")
+                mode_text = dict(SCHEDULE_MODE_CHOICES).get(mode, "每天")
+                self.var_mode.set(i18n.tr(mode_text))
+                weekday = int(task.get("weekday", 0) or 0) % 7
+                self.var_weekday.set(i18n.tr(SCHEDULE_WEEKDAYS[weekday]))
+                self.var_interval.set(str(task.get("interval", 1) or 1))
         finally:
             self._loading = False
         if task is None:
@@ -6690,13 +6914,16 @@ class ScheduleDialog(BaseDialog):
             self.editor_hint.configure(
                 text="修改后请点击底部「保存」；左侧开关可快速启用或停用任务。")
         self._set_editor_enabled(task is not None)
+        self._layout_schedule_row()
 
     def _set_editor_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         combo_state = "readonly" if enabled else "disabled"
-        for spin in (self.spin_hour, self.spin_minute):
+        for spin in (self.spin_hour, self.spin_minute, self.spin_interval):
             spin.configure(state=state)
-        self.group_combo.configure(state=combo_state)
+        for combo in (self.combo_mode, self.combo_weekday,
+                      self.group_combo):
+            combo.configure(state=combo_state)
         self.btn_task_create.set_enabled(enabled)
         self.btn_task_delete.set_enabled(enabled)
         self.btn_delete_task.set_enabled(enabled)
@@ -6753,6 +6980,9 @@ class ScheduleDialog(BaseDialog):
         minute = min(59, max(0, number(self.var_minute.get(), 0)))
         group = self.var_group.get()
         task["enabled"] = bool(self.var_enabled.get())
+        task["mode"] = self._schedule_mode()
+        task["weekday"] = self._schedule_weekday()
+        task["interval"] = self._schedule_interval()
         task["time"] = f"{hour:02d}:{minute:02d}"
         task["group"] = "" if group in i18n.variants("（当前组）") else group
 
@@ -6762,7 +6992,10 @@ class ScheduleDialog(BaseDialog):
         schedules = [{
             "id": str(task.get("id") or f"task-{index + 1}"),
             "enabled": bool(task.get("enabled")),
+            "mode": str(task.get("mode") or "daily"),
             "time": _valid_schedule_time(task.get("time")),
+            "weekday": int(task.get("weekday", 0) or 0),
+            "interval": int(task.get("interval", 1) or 1),
             "group": task.get("group") or "",
         } for index, task in enumerate(self._tasks)]
         legacy = ({key: schedules[0][key]
@@ -6786,6 +7019,30 @@ class ScheduleDialog(BaseDialog):
 
         return (min(23, max(0, number(self.var_hour.get(), 9))),
                 min(59, max(0, number(self.var_minute.get(), 0))))
+
+    def _task_schedule_args(self) -> list[str]:
+        """schtasks 的频率参数：每天 / 每周几 / 工作日 / 每 N 小时。"""
+        hour, minute = self._task_time()
+        stamp = f"{hour:02d}:{minute:02d}"
+        mode = self._schedule_mode()
+        if mode == "hourly":
+            return ["/SC", "HOURLY", "/MO", str(self._schedule_interval()),
+                    "/ST", stamp]
+        if mode == "weekly":
+            day = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")[
+                self._schedule_weekday()]
+            return ["/SC", "WEEKLY", "/D", day, "/ST", stamp]
+        if mode == "weekday":
+            return ["/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI", "/ST", stamp]
+        return ["/SC", "DAILY", "/ST", stamp]
+
+    def _task_schedule_label(self) -> str:
+        """当前编辑器里这条任务的摘要文字（用于成功提示）。"""
+        hour, minute = self._task_time()
+        return schedule_task_label({
+            "mode": self._schedule_mode(), "time": f"{hour:02d}:{minute:02d}",
+            "weekday": self._schedule_weekday(),
+            "interval": self._schedule_interval()})
 
     def _task_group(self) -> str:
         group = self.var_group.get()
@@ -6946,9 +7203,8 @@ class ScheduleDialog(BaseDialog):
             self._create_launchd_task(name, group, hour, minute)
             return
         command = self._task_command(group)
-        args = [
-            "/Create", "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
-            "/TN", name, "/TR", command, "/F"]
+        args = ["/Create", *self._task_schedule_args(),
+                "/TN", name, "/TR", command, "/F"]
         user = os.environ.get("USERNAME", "").strip()
         if user:
             # /IT：仅在当前用户登录时交互运行，无需保存密码
@@ -6967,7 +7223,7 @@ class ScheduleDialog(BaseDialog):
             self._refresh_task_status()
             if not self.lbl_task.cget("text"):
                 self.lbl_task.configure(
-                    text=f"已创建：{name}（每天 {hour:02d}:{minute:02d}"
+                    text=f"已创建：{name}（{self._task_schedule_label()}"
                          f" → {group}）", fg=SUCCESS)
         else:
             detail = (proc.stderr or proc.stdout or "").strip()[:500]
@@ -6982,8 +7238,19 @@ class ScheduleDialog(BaseDialog):
         try:
             # 计划任务启动时读磁盘上的配置，先确保当前项目已保存
             self.app._save_state()
+            mode = self._schedule_mode()
+            weekdays = None
+            interval = 0
+            if mode == "weekly":
+                # launchd：0 / 7 = 周日，1 = 周一
+                weekdays = [(self._schedule_weekday() + 1) % 7]
+            elif mode == "weekday":
+                weekdays = [1, 2, 3, 4, 5]
+            elif mode == "hourly":
+                interval = self._schedule_interval()
             ok, error = launchd.install(
-                name, self._task_arguments(group), hour, minute)
+                name, self._task_arguments(group), hour, minute,
+                weekdays=weekdays, interval_hours=interval)
         except (OSError, ValueError) as exc:
             ok, error = False, str(exc)
         if ok:
@@ -6991,7 +7258,7 @@ class ScheduleDialog(BaseDialog):
             self._refresh_task_status()
             if not self.lbl_task.cget("text"):
                 self.lbl_task.configure(
-                    text=f"已创建：{name}（每天 {hour:02d}:{minute:02d}"
+                    text=f"已创建：{name}（{self._task_schedule_label()}"
                          f" → {group}）", fg=SUCCESS)
             self.app._set_status(f"已创建 macOS 定时任务：{name}")
             return
@@ -8291,7 +8558,7 @@ class DebugStepDialog(BaseDialog):
         self.destroy()
 
 
-def main() -> None:
+def main(project_path: str = "") -> None:
     logs.setup()
     # 同时开两个界面会互相覆盖配置，也没必要
     lock = InstanceLock(make_lock_name(APP_DIR, "GUI"))
@@ -8308,6 +8575,9 @@ def main() -> None:
     try:
         app = App()
         logs.install_tk_handler(app)
+        if project_path:
+            # 双击 .mgproj 启动：等窗口建好再打开，失败也有界面提示
+            app.after(0, lambda: app.load_project_file(project_path))
         app.mainloop()
     finally:
         lock.release()

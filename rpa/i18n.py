@@ -83,6 +83,12 @@ EN: dict[str, str] = {
     "恢复预置执行组…": "Restore preset groups…",
     "补回缺失模板": "Restore missing templates",
     "重命名执行组…": "Rename group…",
+    "组级重试…": "Group retry…",
+    "整组重试": "Whole-group retry",
+    "组级重试设置": "Group retry settings",
+    "整组跑完仍有失败步骤时才重跑整组；设置了「停止执行」的错误不会重试。":
+        "The whole group is re-run only if some step failed; steps set to "
+        "Stop are not retried.",
     "复制为副本": "Duplicate",
     "删除执行组": "Delete group",
     "新增步骤": "Add step",
@@ -829,6 +835,9 @@ EN: dict[str, str] = {
     "读取剪贴板到变量": "Read clipboard to variable",
     "随机等待": "Random wait",
     "小节标题": "Section title",
+    "等待图片出现": "Wait for image",
+    "等待图片消失": "Wait until image is gone",
+    "读取屏幕文字": "Read screen text",
     "基础": "Basics",
 
     # 指令提示
@@ -889,6 +898,10 @@ EN: dict[str, str] = {
     "变量名，如 文本": "variable name, e.g. text",
     "最小秒,最大秒，如 1,3": "min seconds,max seconds, e.g. 1,3",
     "标题文字，如 登录步骤": "Section text, e.g. Login steps",
+    "要等的图片，如 加载完成.png": "Image to wait for, e.g. loaded.png",
+    "要等的图片，如 加载遮罩.png": "Image to wait until gone, e.g. overlay.png",
+    "变量名，如 单号；可用「识别范围」限定区域":
+        "Variable name, e.g. order id; use Region to limit the area",
     "重复次数：": "Repeat count: ",
     "点击次数": "click count",
     "双击次数": "double-click count",
@@ -1006,6 +1019,14 @@ EN: dict[str, str] = {
     "周五": "Fri",
     "周六": "Sat",
     "周日": "Sun",
+    "每天": "Daily",
+    "每周": "Weekly",
+    "工作日": "Weekdays",
+    "每 N 小时": "Every N hours",
+    "运行频率": "Repeat",
+    "起，每": "starting, every",
+    "小时": "hours",
+    "每": "Every",
     "调用组：": "Call group: ",
     "图片文件名，如 菜单.png": "Image file name, e.g. menu.png",
     "知道了": "Got it",
@@ -1269,7 +1290,8 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], .
          r"系统命令|调用执行组|条件：出现图片则执行|窗口操作|坐标点击|移动鼠标|"
          r"条件：没出现图片则执行|条件：二选一|条件：窗口存在则执行|设置变量|"
          r"复制选中文字到变量|拖拽|点击文字|等待文字出现|断言文字出现|点击控件|"
-         r"条件：变量比较则执行|HTTP 请求)：(.+)$",
+         r"条件：变量比较则执行|HTTP 请求|等待图片出现|等待图片消失|"
+         r"读取屏幕文字)：(.+)$",
          lambda m: f"{tr(m.group(1))}: {m.group(2)}"),
     )
 )

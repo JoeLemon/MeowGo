@@ -271,8 +271,11 @@ def main() -> int:
     from rpa.gui import enable_dpi_awareness
     from rpa.gui import main as gui_main
 
+    # 双击 .mgproj（文件关联 / 拖到 exe 上）时，位置参数就是项目路径
+    project = next((arg for arg in argv
+                    if str(arg).lower().endswith(".mgproj")), "")
     enable_dpi_awareness()
-    gui_main()
+    gui_main(project)
     return 0
 
 

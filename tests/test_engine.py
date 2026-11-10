@@ -207,7 +207,7 @@ def _fake_input_modules(calls, located=(100, 100), selection="选中的文字",
 
 
 def test_types_defined():
-    assert len(STEP_TYPES) == 37
+    assert len(STEP_TYPES) == 40
     for key, info in STEP_TYPES.items():
         assert len(info) == 4, key
     assert "call" in STEP_TYPES
@@ -218,8 +218,11 @@ def test_types_defined():
     for key in ("if_not_image", "if_else", "if_window", "set", "copy", "drag",
                 "click_text", "wait_text", "assert_text", "ui_click",
                 "if_var", "http", "for_each", "while_var", "break", "continue",
-                "file", "json", "regex", "date", "clipboard", "random_wait"):
+                "file", "json", "regex", "date", "clipboard", "random_wait",
+                "wait_image", "wait_gone", "ocr_read"):
         assert key in STEP_TYPES, key
+    # 类型表与 Excel 编号表必须一一对应：新增类型忘了加编号会在这里挂
+    assert set(TYPE_TO_CODE) == set(STEP_TYPES)
     for key, code in TYPE_TO_CODE.items():
         assert isinstance(code, float), key
 
@@ -301,7 +304,8 @@ def test_validate_project():
 
 def test_excel_multi_sheet_roundtrip():
     groups = [Group("登录", [Step("wait", "0.5"), Step("click", "btn.png", 2)]),
-              Group("主流程", [Step("call", "登录"), Step("cmd", "start notepad")]),
+              Group("主流程", [Step("call", "登录"), Step("cmd", "start notepad"),
+                             Step("wait_image", "加载完成.png")]),
               Group("时间/日期", [Step("time", "当前时间")])]
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "out.xlsx")
@@ -311,6 +315,9 @@ def test_excel_multi_sheet_roundtrip():
     assert loaded[0].name == "登录"
     assert loaded[1].steps[0].type == "call"
     assert loaded[1].steps[0].content == "登录"
+    # 新增类型（38 等待图片出现）也要能原样导出再导入
+    assert loaded[1].steps[2].type == "wait_image"
+    assert loaded[1].steps[2].content == "加载完成.png"
     assert loaded[2].steps[0].type == "time"
     # 非法字符被清理
     assert "/" not in loaded[2].name
@@ -1517,6 +1524,36 @@ def test_write_report_index_retention():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_report_index_stats():
+    """报告索引顶部统计：成功率 / 平均耗时 / 最常失败的步骤。"""
+    from rpa.engine import first_failed_step, write_report_index
+
+    tmp = tempfile.mkdtemp(prefix="rpa_test_index_stats_")
+    try:
+        ok_text = ("# 运行报告\n\n- 结果：finished\n- 步骤数：2，失败：0\n"
+                   "- 总耗时：2 秒\n")
+        bad_text = ("# 运行报告\n\n- 结果：error\n- 步骤数：2，失败：1\n"
+                    "- 总耗时：4 秒\n\n"
+                    "| 执行组 | 行号 | 步骤 | 类型 | 内容 | 耗时(秒) | 结果 |\n"
+                    "|---|---|---|---|---|---|---|\n"
+                    "| 主流程 | 1 | 1 | 左键单击 | 登录.png | 1 | 成功 |\n"
+                    "| 主流程 | 1 | 2 | 等待图片出现 | 加载完成.png | 3 | 失败 |\n")
+        for index, content in enumerate((ok_text, ok_text, bad_text)):
+            path = os.path.join(tmp, f"run_2024010{index}_120000.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        page = write_report_index(tmp, keep=5)
+        text = open(page, encoding="utf-8").read()
+        assert "成功率" in text and "平均耗时" in text
+        assert "67%" in text, "2/3 成功应显示 67%"
+        assert "最常失败的步骤" in text
+        assert "等待图片出现" in text
+        assert first_failed_step(bad_text) == "等待图片出现：加载完成.png"
+        assert first_failed_step(ok_text) == ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_report_index_uses_brand_tokens():
     """报告索引页必须走 MeowGo 设计令牌（暖白板），不允许再出现冷蓝色板。"""
     from rpa import theme
@@ -1549,6 +1586,7 @@ def test_report_index_uses_brand_tokens():
 def test_new_primitives_validation_and_parsing():
     """新增原语：负坐标、变量比较、HTTP、文字目标与新类型校验。"""
     from rpa.engine import (
+        StepError,
         _compare_values,
         _is_failsafe,
         _parse_http_spec,
@@ -1573,10 +1611,17 @@ def test_new_primitives_validation_and_parsing():
     assert _compare_values("abc", "!=", "abd")
     assert not _compare_values("abc", "==", "abd")
 
-    # HTTP：方法可省略（默认 GET），POST 可带请求体
+    # HTTP：方法可省略（默认 GET），POST 可带请求体，第四段是请求头
     assert _parse_http_spec("post https://a.com/x|响应|a=1") == (
-        "POST", "https://a.com/x", "响应", "a=1")
+        "POST", "https://a.com/x", "响应", "a=1", {})
     assert _parse_http_spec("https://a.com|响应")[0] == "GET"
+    method, url, var, body, headers = _parse_http_spec(
+        'PUT https://a.com/y|结果|{"id":1}|X-Token: abc;Accept: text/plain')
+    assert (method, var, body) == ("PUT", "结果", '{"id":1}')
+    assert headers == {"X-Token": "abc", "Accept": "text/plain"}
+    # 请求头写错（少了冒号）要报错
+    with pytest.raises(StepError):
+        _parse_http_spec("GET https://a.com|响应||X-Token abc")
 
     # 文字目标的区域既可以写在内容里，也可以写在步骤区域里
     name, region = parse_text_target("提交@10,-20,100,40")

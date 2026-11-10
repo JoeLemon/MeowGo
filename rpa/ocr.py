@@ -108,3 +108,22 @@ def find_text(image_bgr, text: str, lang: str = "chi_sim+eng",
             return ((entry["left"] + entry["right"]) / 2,
                     (entry["top"] + entry["bottom"]) / 2)
     return None
+
+
+def read_text(image_bgr, lang: str = "chi_sim+eng") -> str:
+    """识别整块区域并返回文本（按行拼接，去掉空行）。
+
+    用于「读取屏幕文字」步骤：不定位、不点击，只要一段文字内容。
+    """
+    from PIL import Image
+
+    pytesseract = _engine()
+    try:
+        raw = pytesseract.image_to_string(
+            Image.fromarray(image_bgr[:, :, ::-1]),
+            lang=lang, config="--psm 6")
+    except Exception as exc:  # noqa: BLE001 - 多数是 Tesseract 本体没装
+        raise OcrUnavailable(
+            f"{OCR_INSTALL_HINT}\n（引擎返回：{exc}）") from exc
+    lines = [line.strip() for line in (raw or "").splitlines()]
+    return "\n".join(line for line in lines if line)

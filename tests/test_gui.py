@@ -800,7 +800,8 @@ def test_schedule_multiple_tasks_and_history():
         result = dialog.result
         assert len(result["schedules"]) == 2, result
         assert result["schedules"][1] == {
-            "id": "b", "enabled": True, "time": "10:15", "group": "乙"}
+            "id": "b", "enabled": True, "mode": "daily", "time": "10:15",
+            "weekday": 0, "interval": 1, "group": "乙"}
         assert result["schedule"] == {"enabled": True, "time": "08:00",
                                       "group": "甲"}, "旧版单任务镜像应指向第一条"
 
@@ -813,6 +814,24 @@ def test_schedule_multiple_tasks_and_history():
         assert dialog2._selected == count
         dialog2._delete_task()
         assert len(dialog2._tasks) == count
+
+        # 频率切换：每周三 / 每 2 小时，列表摘要同步更新
+        dialog3 = ScheduleDialog(app, result, app.project.names())
+        app.update()
+        dialog3._select(0)
+        dialog3.var_mode.set("每周")
+        dialog3.var_weekday.set("周三")
+        app.update()
+        assert dialog3._tasks[0]["mode"] == "weekly"
+        assert dialog3._tasks[0]["weekday"] == 2
+        assert "周三" in dialog3._task_rows[0]["time"].cget("text")
+        dialog3.var_mode.set("每 N 小时")
+        dialog3.var_interval.set("2")
+        app.update()
+        assert dialog3._tasks[0]["mode"] == "hourly"
+        assert dialog3._tasks[0]["interval"] == 2
+        assert "每 2 小时" in dialog3._task_rows[0]["time"].cget("text")
+        dialog3.ok()
         dialog2.cancel()
 
         # 到点触发写入历史，结束后补上结论
@@ -3023,6 +3042,19 @@ def test_schedule_task_command():
         assert "/IT" in args
     assert catch_up == [name]
     assert "已创建" in dialog.lbl_task.cget("text")
+
+    # 频率参数：每周三 / 工作日 / 每 2 小时
+    dialog.var_mode.set("每周")
+    dialog.var_weekday.set("周三")
+    assert dialog._task_schedule_args() == [
+        "/SC", "WEEKLY", "/D", "WED", "/ST", "07:05"]
+    dialog.var_mode.set("工作日")
+    assert dialog._task_schedule_args() == [
+        "/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI", "/ST", "07:05"]
+    dialog.var_mode.set("每 N 小时")
+    dialog.var_interval.set("2")
+    assert dialog._task_schedule_args() == [
+        "/SC", "HOURLY", "/MO", "2", "/ST", "07:05"]
     dialog.destroy()
     mark("Windows 计划任务命令")
 

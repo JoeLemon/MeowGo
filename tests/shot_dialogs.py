@@ -58,6 +58,12 @@ def main():
                                     Step("set", "订单号={index}"))
     shot("ui_dialog_set.png", dialog3)
 
+    # 4) wait_image：等待图片出现（截图 / 预览 / 识别范围 / 超时都要在）
+    dialog4 = gui_module.StepDialog(app, app.project,
+                                    Step("wait_image", "加载完成.png",
+                                         timeout=30, on_fail="stop"))
+    shot("ui_dialog_wait_image.png", dialog4)
+
     app.destroy()
 
 

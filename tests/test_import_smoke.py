@@ -7,9 +7,10 @@ import pytest
 
 MODULES = [
     "rpa", "rpa.assets", "rpa.autostart", "rpa.dialogs", "rpa.engine",
-    "rpa.gui", "rpa.i18n", "rpa.lock", "rpa.logs", "rpa.ocr",
-    "rpa.pixel_cat", "rpa.platform_support", "rpa.recorder", "rpa.theme",
-    "rpa.tray", "rpa.uia", "rpa.uikit",
+    "rpa.file_assoc", "rpa.gui", "rpa.i18n", "rpa.launchd", "rpa.lock",
+    "rpa.logs", "rpa.ocr", "rpa.pixel_cat", "rpa.platform_support",
+    "rpa.project_io", "rpa.recorder", "rpa.schedule", "rpa.secrets",
+    "rpa.theme", "rpa.tray", "rpa.uia", "rpa.uikit", "rpa.updater",
 ]
 
 pytestmark = pytest.mark.engine

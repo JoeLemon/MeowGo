@@ -34,13 +34,47 @@ def _xml_escape(text: str) -> str:
 
 
 def task_plist(name: str, arguments: Iterable[str],
-               hour: int, minute: int) -> str:
-    """生成每天定点运行的 LaunchAgent plist 文本。"""
+               hour: int, minute: int,
+               weekdays: Iterable[int] | None = None,
+               interval_hours: int = 0) -> str:
+    """生成 LaunchAgent plist 文本。
+
+    weekdays      只在这些星期触发（launchd 约定 0 / 7 = 周日，1 = 周一）
+    interval_hours 大于 0 时改为「每 N 小时」触发（用 StartInterval）
+    """
     args = "".join(
         f"        <string>{_xml_escape(str(item))}</string>\n"
         for item in arguments)
     hour = max(0, min(23, int(hour)))
     minute = max(0, min(59, int(minute)))
+    if interval_hours and int(interval_hours) > 0:
+        schedule = ('    <key>StartInterval</key>\n'
+                    f'    <integer>{int(interval_hours) * 3600}</integer>\n')
+    else:
+        days = [max(0, min(7, int(day))) for day in (weekdays or [])]
+        if len(days) <= 1:
+            entries = [days[0] if days else None]
+        else:
+            entries = days
+        blocks = []
+        for day in entries:
+            lines = ['        <dict>']
+            if day is not None:
+                lines.append('            <key>Weekday</key>\n'
+                             f'            <integer>{day}</integer>')
+            lines.append('            <key>Hour</key>\n'
+                         f'            <integer>{hour}</integer>')
+            lines.append('            <key>Minute</key>\n'
+                         f'            <integer>{minute}</integer>')
+            lines.append('        </dict>')
+            blocks.append("\n".join(lines))
+        if len(blocks) == 1:
+            schedule = ('    <key>StartCalendarInterval</key>\n' + blocks[0]
+                        + '\n')
+        else:
+            schedule = ('    <key>StartCalendarInterval</key>\n    <array>\n'
+                        + "\n".join(blocks)
+                        + '\n    </array>\n')
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -51,10 +85,7 @@ def task_plist(name: str, arguments: Iterable[str],
         '    <key>ProgramArguments</key>\n    <array>\n'
         f'{args}'
         '    </array>\n'
-        '    <key>StartCalendarInterval</key>\n    <dict>\n'
-        f'        <key>Hour</key>\n        <integer>{hour}</integer>\n'
-        f'        <key>Minute</key>\n        <integer>{minute}</integer>\n'
-        '    </dict>\n'
+        f'{schedule}'
         '    <key>RunAtLoad</key>\n    <false/>\n'
         '</dict>\n'
         '</plist>\n')
@@ -73,13 +104,15 @@ def installed(name: str) -> bool:
 
 
 def install(name: str, arguments: Iterable[str], hour: int,
-            minute: int) -> tuple[bool, str]:
+            minute: int, weekdays: Iterable[int] | None = None,
+            interval_hours: int = 0) -> tuple[bool, str]:
     """写入并加载 LaunchAgent；返回 (是否成功, 错误信息)。"""
     path = plist_path(name)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(task_plist(name, arguments, hour, minute))
+            fh.write(task_plist(name, arguments, hour, minute, weekdays,
+                                interval_hours))
     except OSError as exc:
         return False, f"写入 LaunchAgent 失败：{exc}"
     _launchctl("unload", path)       # 覆盖同名任务前先卸载旧定义

@@ -37,8 +37,17 @@ def test_make_and_normalize_task():
     assert normalize_schedule_task({}) is None
     normalized = normalize_schedule_task(
         {"time": "25:70", "group": " 处理 ", "enabled": 0}, 2)
-    assert normalized == {"id": "task-3", "enabled": False,
-                          "time": "23:59", "group": "处理"}
+    assert normalized == {"id": "task-3", "enabled": False, "mode": "daily",
+                          "time": "23:59", "weekday": 0, "interval": 1,
+                          "group": "处理"}
+    # 旧配置没有 mode / weekday / interval：按每天 09:00 处理
+    legacy = normalize_schedule_task({"time": "07:30", "group": "早班"})
+    assert (legacy["mode"], legacy["weekday"], legacy["interval"]) == \
+        ("daily", 0, 1)
+    # 频率字段非法时夹到合法范围
+    weird = normalize_schedule_task({"time": "07:30", "mode": "hourly",
+                                     "weekday": 99, "interval": 0})
+    assert (weird["weekday"], weird["interval"]) == (6, 1)
 
 
 def test_schedule_tasks_prefers_list_and_supports_legacy():
@@ -47,8 +56,9 @@ def test_schedule_tasks_prefers_list_and_supports_legacy():
         "坏数据",
         {},
     ]})
-    assert listed == [{"id": "task-1", "enabled": True,
-                       "time": "07:00", "group": "早班"}]
+    assert listed == [{"id": "task-1", "enabled": True, "mode": "daily",
+                       "time": "07:00", "weekday": 0, "interval": 1,
+                       "group": "早班"}]
 
     legacy = schedule_tasks({"schedule": {
         "time": "18:30", "group": "晚班", "enabled": True}})
@@ -63,6 +73,46 @@ def test_next_run_rolls_to_tomorrow():
         datetime(2026, 11, 2, 9, 0, 0)
     assert schedule_next_run({"time": "08:00"}, now) == \
         datetime(2026, 11, 3, 8, 0, 0)
+
+
+def test_next_run_by_mode():
+    """每周 / 工作日 / 每 N 小时的下一次运行时间。"""
+    from rpa.schedule import schedule_task_label
+
+    # 2026-11-02 是周一
+    monday = datetime(2026, 11, 2, 8, 0, 0)
+    weekly = {"time": "09:00", "mode": "weekly", "weekday": 2}   # 周三
+    assert schedule_next_run(weekly, monday) == datetime(2026, 11, 4, 9, 0)
+    # 当天已过点：顺延一周
+    passed = {"time": "07:00", "mode": "weekly", "weekday": 0}
+    assert schedule_next_run(passed, monday) == datetime(2026, 11, 9, 7, 0)
+
+    # 工作日：周六 / 周日跳到下周一
+    saturday = datetime(2026, 11, 7, 10, 0, 0)
+    workday = {"time": "09:00", "mode": "weekday"}
+    assert schedule_next_run(workday, saturday) == datetime(2026, 11, 9, 9, 0)
+    # 工作日当天未过点：就是今天
+    assert schedule_next_run(workday, monday) == datetime(2026, 11, 2, 9, 0)
+
+    # 每 2 小时：从 09:00 起算
+    hourly = {"time": "09:00", "mode": "hourly", "interval": 2}
+    assert schedule_next_run(hourly, datetime(2026, 11, 2, 8, 0)) == \
+        datetime(2026, 11, 2, 9, 0)
+    assert schedule_next_run(hourly, datetime(2026, 11, 2, 10, 30)) == \
+        datetime(2026, 11, 2, 11, 0)
+    assert schedule_next_run(hourly, datetime(2026, 11, 2, 23, 30)) == \
+        datetime(2026, 11, 3, 1, 0)
+
+    # 列表摘要
+    saved = i18n.get_language()
+    i18n.set_language("zh")
+    try:
+        assert schedule_task_label({"time": "09:00"}) == "每天 09:00"
+        assert schedule_task_label(weekly) == "周三 09:00"
+        assert schedule_task_label(workday) == "工作日 09:00"
+        assert schedule_task_label(hourly) == "每 2 小时"
+    finally:
+        i18n.set_language(saved)
 
 
 def test_countdown_and_day_text():

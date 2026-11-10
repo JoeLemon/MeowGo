@@ -145,6 +145,12 @@ STEP_TYPES = {
     "clipboard": ("读取剪贴板到变量", "变量名，如 文本", False, ""),
     "random_wait": ("随机等待", "最小秒,最大秒，如 1,3", False, ""),
     "section": ("小节标题", "标题文字，如 登录步骤", False, ""),
+    # ---- 等待画面 ----
+    "wait_image": ("等待图片出现", "要等的图片，如 加载完成.png", False, ""),
+    "wait_gone": ("等待图片消失", "要等的图片，如 加载遮罩.png", False, ""),
+    # ---- 屏幕取字 ----
+    "ocr_read": ("读取屏幕文字", "变量名，如 单号；可用「识别范围」限定区域",
+                 False, ""),
 }
 
 # Excel 中第 1 列使用的数字编号（1-9 与旧版 cmd.xls 完全兼容）
@@ -186,41 +192,52 @@ TYPE_TO_CODE = {
     "clipboard": 35.0,
     "random_wait": 36.0,
     "section": 37.0,
+    "wait_image": 38.0,
+    "wait_gone": 39.0,
+    "ocr_read": 40.0,
 }
 CODE_TO_TYPE = {v: k for k, v in TYPE_TO_CODE.items()}
 
 IMAGE_TYPES = {"click", "dblclick", "rightclick"}
+# 只「看」不点：等图片出现 / 消失（不需要点击，但同样用模板匹配）
+WAIT_IMAGE_TYPES = {"wait_image", "wait_gone"}
 # 需要 OCR / UIA 的步骤类型
 TEXT_STEP_TYPES = {"click_text", "wait_text", "assert_text"}
+# 只做文字识别、不点也不等（把屏幕文字读进变量）
+OCR_READ_TYPES = {"ocr_read"}
 UIA_STEP_TYPES = {"ui_click"}
 # 可以填「识别范围」的步骤类型（图片 + 文字）
-REGION_STEP_TYPES = IMAGE_TYPES | TEXT_STEP_TYPES | {
-    "if_image", "if_not_image", "if_else", "drag"}
+REGION_STEP_TYPES = (IMAGE_TYPES | TEXT_STEP_TYPES | WAIT_IMAGE_TYPES
+                     | OCR_READ_TYPES
+                     | {"if_image", "if_not_image", "if_else", "drag"})
 REPEAT_TYPES = {"click", "dblclick", "rightclick", "hotkey", "call",
                 "if_image", "if_not_image", "if_else", "if_window",
                 "click_xy", "for_each", "while_var"}
 # 循环步骤（内部可以执行 break / continue）
 LOOP_TYPES = {"for_each", "while_var"}
 # 界面上「截图替换」等图片相关操作适用的步骤类型
-IMAGE_STEP_TYPES = IMAGE_TYPES | {"if_image", "if_not_image", "if_else",
-                                  "drag"}
+IMAGE_STEP_TYPES = IMAGE_TYPES | WAIT_IMAGE_TYPES | {
+    "if_image", "if_not_image", "if_else", "drag"}
 # macOS 需要「辅助功能」：模拟键鼠 / 读取窗口与控件
 MAC_ACCESSIBILITY_TYPES = (IMAGE_TYPES | TEXT_STEP_TYPES | UIA_STEP_TYPES
                            | {"drag", "scroll", "input", "hotkey",
                               "click_xy", "move_xy", "window", "if_window"})
 # macOS 需要「屏幕录制」：截图 / 找图 / 文字识别
-MAC_SCREEN_TYPES = IMAGE_STEP_TYPES | TEXT_STEP_TYPES
+MAC_SCREEN_TYPES = IMAGE_STEP_TYPES | TEXT_STEP_TYPES | OCR_READ_TYPES
 
 
 Point = namedtuple("Point", "x y")
 
+# 持久变量的占位符前缀：{持久:键} 读取，设置变量时写「持久:键=值」
+PERSIST_PREFIX = "持久:"
+
 # 条件类步骤（内容里的 | 后面是执行组）
 CONDITION_TYPES = {"if_image", "if_not_image", "if_else", "if_window"}
 # 支持「最多等 N 秒」的步骤类型（文件 wait 也用步骤 timeout 作为兜底）
-TIMEOUT_STEP_TYPES = (IMAGE_TYPES | {"drag", "cmd", "file"}
+TIMEOUT_STEP_TYPES = (IMAGE_TYPES | WAIT_IMAGE_TYPES | {"drag", "cmd", "file"}
                       | CONDITION_TYPES | TEXT_STEP_TYPES | UIA_STEP_TYPES)
 # 界面上显示「失败后处理」的步骤类型（条件类不需要）
-FAIL_ACTION_STEP_TYPES = (IMAGE_TYPES | {"drag", "cmd", "file"}
+FAIL_ACTION_STEP_TYPES = (IMAGE_TYPES | WAIT_IMAGE_TYPES | {"drag", "cmd", "file"}
                           | TEXT_STEP_TYPES | UIA_STEP_TYPES)
 
 _OFFSET_RE = re.compile(r"\+\s*(-?\d+)\s*,\s*(-?\d+)\s*$")
@@ -861,14 +878,20 @@ def _compare_values(actual: str, operator: str, expected: str) -> bool:
     return left <= right
 
 
-def _parse_http_spec(text: str) -> tuple[str, str, str, str]:
-    """解析「方法 URL|变量名[|请求体]」。"""
+def _parse_http_spec(text: str) -> tuple[str, str, str, str, dict[str, str]]:
+    """解析「方法 URL|变量名[|请求体[|键: 值;键2: 值2]]」。
+
+    返回 (方法, 地址, 变量名, 请求体, 请求头)。请求头可选，用英文分号分隔，
+    例如 ``X-Token: abc;Accept: application/json``。
+    """
     spec, sep, rest = (text or "").partition("|")
     if not sep:
         raise StepError("要写成 方法 URL|变量名，如 "
                         "GET https://example.com|响应")
-    var, _, body = rest.partition("|")
-    var = var.strip()
+    parts = rest.split("|", 2)
+    var = parts[0].strip()
+    body = parts[1] if len(parts) > 1 else ""
+    header_text = parts[2] if len(parts) > 2 else ""
     if not var:
         raise StepError("变量名不能为空")
     method, _, url = spec.strip().partition(" ")
@@ -879,7 +902,16 @@ def _parse_http_spec(text: str) -> tuple[str, str, str, str]:
     url = url.strip()
     if not url.lower().startswith(("http://", "https://")):
         raise StepError("只支持 http:// 或 https:// 地址")
-    return method, url, var, body
+    headers: dict[str, str] = {}
+    for item in header_text.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        key, colon, value = item.partition(":")
+        if not colon or not key.strip():
+            raise StepError(f"请求头要写成 键: 值，用 ; 分隔：{item}")
+        headers[key.strip()] = value.strip()
+    return method, url, var, body, headers
 
 
 def parse_text_target(text: str, region_text: str = ""):
@@ -907,6 +939,23 @@ def _read_temp_text(handle) -> str:
     if isinstance(data, bytes):
         data = data.decode(locale.getpreferredencoding(False), "replace")
     return data.strip()
+
+
+def _read_text_file(path: str) -> str:
+    """读文本文件：优先 UTF-8（含 BOM），失败再用 GB18030 兜底。
+
+    Windows 上不少导出文件是 GBK 编码，直接按 UTF-8 读会抛异常；
+    GB18030 是 GBK 的超集，能覆盖绝大多数中文旧文件。
+    """
+    last_error: Optional[UnicodeDecodeError] = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            with open(path, "r", encoding=encoding) as fh:
+                return fh.read()
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise StepError(f"文本编码无法识别（已尝试 UTF-8 / GB18030）：{path}"
+                    ) from last_error
 
 
 def _command_error_hint(text: str) -> str:
@@ -1036,14 +1085,16 @@ class Step:
             return errors
 
         text = (self.content or "").strip()
-        if self.type in IMAGE_TYPES:
+        if self.type in IMAGE_TYPES or self.type in WAIT_IMAGE_TYPES:
             if not text:
                 errors.append(f"{where}：需要填写图片文件名")
+            elif self.type in WAIT_IMAGE_TYPES and not parse_image_targets(text):
+                errors.append(f"{where}：要写成图片文件名，如 加载完成.png")
         elif self.type in ("input", "hotkey", "time", "cmd", "call", "copy",
                            "set", "click_text", "wait_text", "assert_text",
                            "ui_click", "if_var", "http", "for_each",
                            "while_var", "file", "json", "regex", "date",
-                           "clipboard", "random_wait", "section"):
+                           "clipboard", "random_wait", "section", "ocr_read"):
             if not text:
                 errors.append(f"{where}：内容不能为空")
         elif self.type in ("break", "continue") and text:
@@ -1102,6 +1153,11 @@ class Step:
                 errors.append(f"{where}：设置变量要写成 变量名=值")
             elif "{" in name or "}" in name:
                 errors.append(f"{where}：变量名里不能带 {{ 或 }}")
+            elif name.strip() == PERSIST_PREFIX.rstrip(":"):
+                errors.append(f"{where}：持久变量要写成 持久:键=值")
+            elif (name.strip().startswith(PERSIST_PREFIX)
+                  and not name.strip()[len(PERSIST_PREFIX):].strip()):
+                errors.append(f"{where}：持久变量要写成 持久:键=值")
         elif self.type == "drag" and text:
             parts = [p.strip() for p in text.split("|")]
             if len(parts) != 2 or not all(parts):
@@ -1159,11 +1215,19 @@ class Step:
         elif self.type == "file" and text:
             action = text.split(":", 1)[0].strip().lower()
             rest = text.split(":", 1)[1].strip() if ":" in text else ""
-            if action not in ("copy", "move", "delete", "mkdir", "wait"):
-                errors.append(f"{where}：文件操作只支持 copy / move / "
-                              "delete / mkdir / wait")
+            if action not in ("copy", "move", "delete", "mkdir", "wait",
+                              "write", "append", "read"):
+                errors.append(f"{where}：文件操作只支持 copy / move / delete / "
+                              "mkdir / wait / write / append / read")
             elif action in ("copy", "move") and "|" not in rest:
                 errors.append(f"{where}：复制/移动要写成 {action}:源|目标")
+            elif action in ("write", "append") and "|" not in rest:
+                errors.append(f"{where}：{action} 要写成 {action}:路径|内容")
+            elif action == "write" and not rest.split("|", 1)[0].strip():
+                errors.append(f"{where}：写文件要填写目标路径")
+            elif action == "read" and (
+                    "|" not in rest or not rest.split("|", 1)[1].strip()):
+                errors.append(f"{where}：读文件要写成 read:路径|变量名")
             elif action in ("delete", "mkdir") and not rest:
                 errors.append(f"{where}：{action} 后面要填写路径")
             elif action == "wait":
@@ -1312,20 +1376,39 @@ class Step:
 
 @dataclass
 class Group:
-    """一个可复用的执行组。"""
+    """一个可复用的执行组。
+
+    retry / retry_delay：整组跑完发现仍有失败步骤时，整组重跑几次、间隔多久。
+    致命错误（on_fail=stop / 停止）不重试。
+    """
 
     name: str = "新组"
     steps: list[Step] = field(default_factory=list)
     note: str = ""
+    retry: int = 0
+    retry_delay: float = 0.5
 
     def to_dict(self) -> dict:
         return {"name": self.name, "note": self.note,
+                "retry": int(self.retry or 0),
+                "retry_delay": float(self.retry_delay or 0.5),
                 "steps": [step.to_dict() for step in self.steps]}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Group":
+        try:
+            retry = max(0, int(data.get("retry", 0) or 0))
+        except (TypeError, ValueError):
+            retry = 0
+        try:
+            retry_delay = max(0.0, float(data.get("retry_delay", 0.5)
+                                         if data.get("retry_delay")
+                                         not in (None, "") else 0.5))
+        except (TypeError, ValueError):
+            retry_delay = 0.5
         return cls(name=str(data.get("name", "新组")),
                    note=str(data.get("note", "")),
+                   retry=retry, retry_delay=retry_delay,
                    steps=[Step.from_dict(item) for item in data.get("steps", [])])
 
 
@@ -1400,7 +1483,7 @@ def validate_project(groups: Iterable[Group], base_dir: str = "",
                 continue              # 禁用步骤：不校验、不检查图片
             for message in step.validate(row=index):
                 problems.append(f"[{group.name}] {message}")
-            if check_images and step.type in IMAGE_TYPES:
+            if check_images and step.type in (IMAGE_TYPES | WAIT_IMAGE_TYPES):
                 for name in image_names(step.content):
                     if name and not os.path.exists(
                             assets.resolve_image(name, base_dir or None)):
@@ -1451,15 +1534,15 @@ def validate_environment(groups: Iterable[Group]) -> list[str]:
         for step in group.steps:
             if not step.enabled:
                 continue
-            if step.type in IMAGE_TYPES or step.type in (
-                    "if_image", "if_not_image", "if_else"):
+            if (step.type in IMAGE_TYPES or step.type in WAIT_IMAGE_TYPES
+                    or step.type in ("if_image", "if_not_image", "if_else")):
                 needs_opencv = True
             elif step.type == "drag":
                 start = (step.content or "").split("|")[0].strip()
                 # 起点写坐标时不需要图片识别
                 if start and not _valid_xy(start):
                     needs_opencv = True
-            if step.type in TEXT_STEP_TYPES:
+            if step.type in TEXT_STEP_TYPES or step.type in OCR_READ_TYPES:
                 needs_ocr = True
             elif step.type in UIA_STEP_TYPES:
                 needs_uia = True
@@ -2182,6 +2265,11 @@ class Executor:
     data: list[dict] = field(default_factory=list)
     stats: list[dict] = field(default_factory=list)
     vars: dict[str, str] = field(default_factory=dict)
+    # 组级重试：组名 -> (重试次数, 间隔秒)；由界面 / 命令行按项目配置注入
+    group_retry: dict[str, tuple[int, float]] = field(default_factory=dict)
+    # 持久变量：跨运行保留，任意步骤里用 {持久:键} 读；写用「设置变量 持久:键=值」
+    persist: dict[str, str] = field(default_factory=dict)
+    on_persist: Optional[Callable[[str, str], None]] = None
     # 失败截图目录（空 = 不截图）；由界面 / 命令行按需设置
     shot_dir: str = ""
     # 数据驱动从第几行之后继续（0 = 从头）；由「断点续跑」设置
@@ -2227,7 +2315,9 @@ class Executor:
         self._row_no = 0
         self._step_ok = True
         self.stats = []
-        self.vars = {}
+        # 运行期变量从持久变量起头：{持久:键} 在任何步骤里都能读到
+        self.vars = {PERSIST_PREFIX + key: str(value)
+                     for key, value in self.persist.items()}
         self.row_results = []
         self._row_var_keys = set()
         self._progress_done = 0
@@ -2635,14 +2725,19 @@ class Executor:
             pyautogui.moveTo(x, y, duration=0.2)
             self._invalidate_screen()
             self._emit("info", f"鼠标移到 ({x:g}, {y:g})")
+        elif step.type in WAIT_IMAGE_TYPES:
+            self._wait_for_image(text, step,
+                                 want_present=(step.type == "wait_image"))
         elif step.type in ("click_text", "wait_text", "assert_text"):
             self._wait_text(text, step, click=(step.type == "click_text"))
         elif step.type == "ui_click":
             self._ui_click(text, step)
+        elif step.type in OCR_READ_TYPES:
+            self._read_ocr_var(text, step)
         elif step.type == "if_var":
             self._run_if_var(text, step, depth)
         elif step.type == "http":
-            self._http_request(text)
+            self._http_request(text, step)
         elif step.type == "for_each":
             self._run_range_loop(text, step, depth)
         elif step.type == "while_var":
@@ -2854,6 +2949,40 @@ class Executor:
             if not self._sleep(POLL_INTERVAL):
                 return False
 
+    def _read_ocr_var(self, text: str, step: Step) -> None:
+        """读取屏幕文字到变量：内容写变量名，区域走「识别范围」。"""
+        from . import ocr
+
+        name = (text or "").strip()
+        if not name:
+            raise StepError("读取屏幕文字：变量名不能为空")
+        if not ocr.available():
+            raise StepError(ocr.OCR_INSTALL_HINT)
+        frame, (origin_x, origin_y) = self._grab_screen()
+        if frame.size == 0:
+            raise StepError("截图失败，读不到屏幕内容")
+        region = _parse_region(getattr(step, "region", "") or "")
+        if region:
+            x0, y0, x1, y1 = _search_bounds(region, (origin_x, origin_y),
+                                            self._screen_scale, frame.shape)
+            if x1 <= x0 or y1 <= y0:
+                self._step_ok = False
+                self._emit("warn", "识别范围超出屏幕，没能读到文字")
+                return
+            crop = frame[y0:y1, x0:x1]
+        else:
+            crop = frame
+        value = ocr.read_text(crop)
+        if not value:
+            self._step_ok = False
+            self._emit("warn", f"没识别到文字（变量 {name} 未更新）")
+            return
+        self.vars[name] = value
+        self._row_var_keys.add(name)
+        preview = value.replace("\n", " / ")
+        self._emit("info", f"读到文字 → {name}：{preview[:60]}"
+                           + ("…" if len(preview) > 60 else ""))
+
     def _ui_click(self, text: str, step: Step) -> bool:
         """按 UIA 控件名称点击（内容可写「名称|控件类型」）。"""
         from . import uia
@@ -2888,34 +3017,64 @@ class Executor:
             if not self._sleep(POLL_INTERVAL):
                 return False
 
-    def _http_request(self, text: str) -> None:
-        """发 HTTP 请求，把响应正文存入变量。"""
+    def _http_request(self, text: str, step: Optional[Step] = None) -> None:
+        """发 HTTP 请求，把响应正文存入变量，状态码存到「变量.status」。
+
+        请求头可选（内容第三段之后），例如 ``X-Token: abc``；请求体以
+        ``{`` / ``[`` 开头时自动按 JSON 发送。超时取步骤的「最多等 N 秒」，
+        没填按 30 秒。4xx / 5xx 与网络错误都记为这步失败，响应正文仍会存进
+        变量（方便用「读取 JSON」取错误码）。
+        """
         from urllib.error import HTTPError, URLError
         from urllib.request import Request, urlopen
 
-        method, url, var, body = _parse_http_spec(text)
+        method, url, var, body, headers = _parse_http_spec(text)
         data = body.encode("utf-8") if body else None
         request = Request(url, data=data, method=method)
         request.add_header("User-Agent", "MeowGo/1.0")
-        if data:
-            request.add_header("Content-Type", "text/plain; charset=utf-8")
-        self._emit("info", f"HTTP {method} {url}")
+        for key, value in headers.items():
+            request.add_header(key, value)
+        if data and not request.has_header("Content-Type"):
+            looks_json = body.lstrip().startswith(("{", "["))
+            request.add_header(
+                "Content-Type", "application/json; charset=utf-8"
+                if looks_json else "text/plain; charset=utf-8")
+        timeout = (float(step.timeout)
+                   if step is not None and step.timeout and step.timeout > 0
+                   else 30.0)
+        self._emit("info", f"HTTP {method} {url}"
+                           + ("（带请求头）" if headers else ""))
+        status = 0
         try:
-            with urlopen(request, timeout=20) as response:  # noqa: S310
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310
                 raw = response.read()
-                status = getattr(response, "status", 0)
+                status = int(getattr(response, "status", 0) or 0)
         except HTTPError as exc:
+            status = int(exc.code or 0)
+            try:
+                raw = exc.read()
+            except Exception:      # noqa: BLE001 - 读错误正文失败不影响流程
+                raw = b""
+            text_body = raw.decode("utf-8", "replace")
+            self.vars[var] = text_body
+            self.vars[f"{var}.status"] = str(status)
+            self._row_var_keys.update({var, f"{var}.status"})
             self._step_ok = False
-            self._emit("error", f"HTTP {method} {url} 返回 {exc.code}")
+            self._emit("error", f"HTTP {method} {url} 返回 {status}"
+                                + (f"：{text_body[:80]}" if text_body else ""))
             return
         except (URLError, OSError, ValueError) as exc:
+            self.vars[f"{var}.status"] = "0"
+            self._row_var_keys.add(f"{var}.status")
             self._step_ok = False
             self._emit("error", f"HTTP {method} {url} 失败：{exc}")
             return
         text_body = raw.decode("utf-8", "replace")
         self.vars[var] = text_body
+        self.vars[f"{var}.status"] = str(status)
+        self._row_var_keys.update({var, f"{var}.status"})
         self._emit("info", f"响应 {status}，{len(text_body)} 字符，"
-                           f"已存入变量 {var}")
+                           f"已存入变量 {var}（状态码 {var}.status）")
 
     def _run_if_var(self, text: str, step: Step, depth: int) -> None:
         condition, _, target = text.partition("|")
@@ -2942,6 +3101,49 @@ class Executor:
                 return location
             if not self._sleep(POLL_INTERVAL):
                 return location
+
+    def _wait_for_image(self, image: str, step: Step,
+                        want_present: bool) -> bool:
+        """等待图片出现 / 消失，返回是否等到。
+
+        与条件步骤的 ``_wait_image`` 不同：这里的「最多等 N 秒」留空
+        （0）表示一直等，和「单击图片」的旧行为一致——步骤名字就是
+        「等待」，默认不设上限才符合直觉。超时后按 step.on_fail 处理：
+        stop 中止整轮执行，其余记为这步失败并继续下一步。
+        """
+        if not parse_image_targets(image):
+            raise StepError("要等待的图片不能为空")
+
+        action = "出现" if want_present else "消失"
+        deadline = (time.time() + step.timeout
+                    if step.timeout and step.timeout > 0 else None)
+        if deadline is None:
+            self._emit("info", f"等待图片{action}（不限时）：{image}")
+        else:
+            self._emit("info",
+                       f"等待图片{action}（最多 {step.timeout:g} 秒）：{image}")
+
+        started = time.time()
+        while True:
+            if not self._wait_ready():
+                return False
+            location = self._locate(image, step)
+            if (location is not None) == want_present:
+                waited = time.time() - started
+                self._emit("info", f"图片已{action}（等待 {waited:.1f} 秒）："
+                                   f"{image}")
+                return True
+            if deadline is not None and time.time() >= deadline:
+                break
+            if not self._sleep(POLL_INTERVAL):
+                return False
+
+        self._step_ok = False
+        self._emit("warn",
+                   f"等待图片{action}超时（{step.timeout:g} 秒）：{image}")
+        if step.on_fail == "stop":
+            raise StepError(f"等待图片{action}超时，按设置中止执行")
+        return False
 
     def _wait_window(self, title: str, timeout: float):
         """按 timeout 等窗口出现；timeout=0 时只找一次。"""
@@ -3116,6 +3318,22 @@ class Executor:
         if not name:
             raise StepError("设置变量要写成 变量名=值")
         value = _eval_expression(value)
+        if name.startswith(PERSIST_PREFIX):
+            # 持久变量：写进运行器外部的字典并通知调用方落盘，
+            # 之后用 {持久:键} 就能取到（下次运行仍然有效）
+            key = name[len(PERSIST_PREFIX):].strip()
+            if not key:
+                raise StepError("持久变量要写成 持久:键=值")
+            self.persist[key] = value
+            self.vars[PERSIST_PREFIX + key] = value
+            if self.on_persist is not None:
+                try:
+                    self.on_persist(key, value)
+                except Exception as exc:  # noqa: BLE001 - 存不下不该中断流程
+                    self._emit("warn", f"持久变量没能保存到配置文件：{exc}")
+            self._emit("info", f"保存持久变量 {key} = {value}"
+                               f"（下次运行仍可用）")
+            return
         self.vars[name] = value
         self._row_var_keys.add(name)
         self._emit("info", f"设置变量 {name} = {value}")
@@ -3204,6 +3422,43 @@ class Executor:
                 raise StepError("建目录要写成 mkdir:目录")
             os.makedirs(path, exist_ok=True)
             self._emit("info", f"已创建目录：{path}")
+        elif action in ("write", "append"):
+            path, sep, content = rest.partition("|")
+            path = os.path.expanduser(path.strip())
+            if not path or not sep:
+                raise StepError(f"写文件要写成 {action}:路径|内容")
+            directory = os.path.dirname(os.path.abspath(path))
+            os.makedirs(directory, exist_ok=True)
+            # 写 / 追加都自动补一个换行，方便按行累积（已有换行不重复加）
+            payload = (content if content.endswith(("\n", "\r"))
+                       else content + "\n")
+            if action == "write":
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+            else:
+                with open(path, "a", encoding="utf-8", newline="") as fh:
+                    fh.write(payload)
+            self._emit("info", f"已写入文件（{('覆盖' if action == 'write' else '追加')}"
+                               f" {len(payload)} 字符）：{path}")
+        elif action == "read":
+            path, sep, var = rest.partition("|")
+            path, var = os.path.expanduser(path.strip()), var.strip()
+            if not path or not sep or not var:
+                raise StepError("读文件要写成 read:路径|变量名")
+            if not os.path.isfile(path):
+                self._step_ok = False
+                self._emit("warn", f"要读的文件不存在：{path}")
+                return
+            text_value = _read_text_file(path)
+            self.vars[var] = text_value
+            self._row_var_keys.add(var)
+            self._emit("info", f"已读入 {len(text_value)} 字符到变量 {var}"
+                               f"：{text_value[:40]}"
+                               + ("…" if len(text_value) > 40 else ""))
         elif action == "wait":
             path, _, seconds = rest.partition("|")
             path = os.path.expanduser(path.strip())
@@ -3222,7 +3477,8 @@ class Executor:
                     raise StepError(f"等待文件超时：{path}")
             self._emit("info", f"文件已出现：{path}")
         else:
-            raise StepError("文件操作只支持 copy / move / delete / mkdir / wait")
+            raise StepError("文件操作只支持 copy / move / delete / mkdir / "
+                            "wait / write / append / read")
 
     def _run_json(self, text: str) -> None:
         """从变量里的 JSON 取字段：源变量|字段路径[|目标变量]。"""
@@ -3383,13 +3639,55 @@ class Executor:
             self._invalidate_screen()
 
     # -- 组执行 -----------------------------------------------------------
+    def _group_retry(self, name: str) -> tuple[int, float]:
+        """读组级重试配置（重试次数, 间隔秒），没配置返回 (0, 0.5)。"""
+        raw = self.group_retry.get(name)
+        if not raw:
+            return 0, 0.5
+        try:
+            retries = max(0, int(raw[0]))
+        except (TypeError, ValueError, IndexError):
+            retries = 0
+        try:
+            delay = max(0.0, float(raw[1]))
+        except (TypeError, ValueError, IndexError):
+            delay = 0.5
+        return retries, delay
+
     def _run_group(self, name: str, depth: int = 0,
                    start_index: int = 0) -> None:
+        """执行一个组；配了组级重试时，整组跑完发现有失败就重跑整组。
+
+        致命错误（on_fail=stop、停止、调用层级过深）不走重试，直接向上抛。
+        """
         steps = self.groups.get(name)
         if steps is None:
             raise StepError(f"找不到执行组：{name}")
         if depth > MAX_CALL_DEPTH:
             raise StepError(f"调用层级过深（可能循环调用）：{name}")
+        retries, delay = self._group_retry(name)
+        attempts = 1 + retries
+        for attempt in range(1, attempts + 1):
+            before = len(self.stats)
+            self._run_group_once(name, steps, depth,
+                                 start_index if attempt == 1 else 0)
+            failed = [item for item in self.stats[before:] if not item["ok"]]
+            if not failed:
+                return
+            if attempt >= attempts or self.stop_event.is_set():
+                if retries:
+                    self._emit("warn", f"执行组「{name}」重试 {retries} 次后"
+                                       f"仍有 {len(failed)} 步失败")
+                return
+            self._emit("warn", f"执行组「{name}」有 {len(failed)} 步失败，"
+                               f"整组重试（{attempt}/{retries}），"
+                               f"{delay:g} 秒后开始")
+            if not self._sleep(delay):
+                return
+
+    def _run_group_once(self, name: str, steps: list[Step], depth: int,
+                        start_index: int = 0) -> None:
+        """按顺序跑一遍组内步骤（不做重试，重试交给 _run_group）。"""
         if start_index:
             self._emit("info", f"▶ 进入执行组「{name}」"
                                f"（从第 {start_index + 1} 步开始）")
@@ -3829,6 +4127,25 @@ def list_run_reports(directory: str) -> list[dict]:
     return reports
 
 
+def first_failed_step(text: str) -> str:
+    """从报告表格里找出第一个失败的步骤（「类型：内容」），找不到返回空串。"""
+    headers, rows = parse_report_table(text)
+    if not headers or "结果" not in headers:
+        return ""
+    result_index = headers.index("结果")
+    type_index = headers.index("类型") if "类型" in headers else -1
+    content_index = headers.index("内容") if "内容" in headers else -1
+    for row in rows:
+        if len(row) <= result_index or "失败" not in row[result_index]:
+            continue
+        kind = row[type_index].strip() if 0 <= type_index < len(row) else ""
+        content = (row[content_index].strip()
+                   if 0 <= content_index < len(row) else "")
+        text_value = f"{kind}：{content}" if kind and content else (kind or content)
+        return text_value[:40]
+    return ""
+
+
 def write_report_index(directory: str, keep: int = 100) -> str:
     """生成 reports/index.html，并只保留最近 keep 份报告。
 
@@ -3851,6 +4168,7 @@ def write_report_index(directory: str, keep: int = 100) -> str:
 
     rows = []
     referenced_shots = set()
+    stats = {"total": len(paths), "ok": 0, "seconds": 0.0, "failed": {}}
     for path in paths:
         try:
             with open(path, encoding="utf-8") as fh:
@@ -3867,6 +4185,13 @@ def write_report_index(directory: str, keep: int = 100) -> str:
                  "stopped": "已停止"}.get(result, result or "未知")
         css = {"finished": "ok", "error": "bad",
                "stopped": "warn"}.get(result, "")
+        if result == "finished":
+            stats["ok"] += 1
+        stats["seconds"] += float(meta["seconds"] or 0)
+        if result == "error":
+            step_name = first_failed_step(text)
+            if step_name:
+                stats["failed"][step_name] = stats["failed"].get(step_name, 0) + 1
         stamp = time.strftime("%Y-%m-%d %H:%M",
                               time.localtime(os.path.getmtime(path)))
         rows.append(
@@ -3895,6 +4220,26 @@ def write_report_index(directory: str, keep: int = 100) -> str:
 
     body = "\n".join(rows) if rows else (
         "<tr><td colspan=\"6\" class=\"empty\">还没有运行报告</td></tr>")
+    total = stats["total"]
+    rate = f"{stats['ok'] * 100 / total:.0f}%" if total else "—"
+    average = f"{stats['seconds'] / total:.1f}" if total else "—"
+    if stats["failed"]:
+        top_step, top_times = max(stats["failed"].items(),
+                                  key=lambda item: item[1])
+        top_text = f"{top_step}（{top_times} 次）"
+    else:
+        top_text = "—"
+    summary = (
+        '<div class="cards">'
+        f'<div class="card"><span class="k">成功率</span>'
+        f'<span class="v">{rate}</span>'
+        f'<span class="n">成功 {stats["ok"]} / {total} 次</span></div>'
+        f'<div class="card"><span class="k">平均耗时</span>'
+        f'<span class="v">{average}</span>'
+        '<span class="n">秒 / 次</span></div>'
+        f'<div class="card wide"><span class="k">最常失败的步骤</span>'
+        f'<span class="v small">{html.escape(top_text)}</span></div>'
+        '</div>')
     # 报告页是产品界面的一部分：色值、圆角、字号一律取自 rpa/theme.py 的
     # 设计令牌（浅色暖白板），与桌面端保持同一套视觉规范，不再另维护配色。
     p = theme.LIGHT_PALETTE
@@ -3934,12 +4279,24 @@ def write_report_index(directory: str, keep: int = 100) -> str:
   .pill.bad {{ background: {p['MARK_FAILED']}; color: {p['DANGER_TEXT']}; }}
   .pill.warn {{ background: {p['MARK_RUNNING']}; color: {p['WARNING_TEXT']}; }}
   .empty {{ color: {p['TEXT_WEAK']}; text-align: center; padding: 40px 0; }}
+  .cards {{ display: flex; gap: 12px; margin: 0 0 16px; flex-wrap: wrap; }}
+  .card {{ flex: 1 1 200px; display: flex; flex-direction: column; gap: 2px;
+           background: {p['CARD']}; border: 1px solid {p['BORDER']};
+           border-radius: {theme.RADIUS_M}px; padding: 12px 16px;
+           box-shadow: 0 1px 2px rgba(8, 8, 6, 0.04); }}
+  .card.wide {{ flex: 1 1 320px; }}
+  .card .k {{ font-size: 12px; color: {p['MUTED']}; }}
+  .card .v {{ font-size: 22px; font-weight: 700;
+              font-variant-numeric: tabular-nums; }}
+  .card .v.small {{ font-size: 14px; font-weight: 600; }}
+  .card .n {{ font-size: 12px; color: {p['TEXT_WEAK']}; }}
 </style>
 </head>
 <body>
 <main>
   <div class="head"><h1>MeowGo</h1><span class="dot">·</span></div>
   <p class="muted">运行报告 · 最近 {keep} 次 · 自动刷新 · 点击「查看报告」打开详情</p>
+{summary}
   <div class="table-wrap">
     <table>
       <thead><tr><th>时间</th><th>结果</th><th>步骤</th><th>失败</th>
