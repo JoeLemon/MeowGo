@@ -207,7 +207,7 @@ def _fake_input_modules(calls, located=(100, 100), selection="选中的文字",
 
 
 def test_types_defined():
-    assert len(STEP_TYPES) == 40
+    assert len(STEP_TYPES) == 42
     for key, info in STEP_TYPES.items():
         assert len(info) == 4, key
     assert "call" in STEP_TYPES

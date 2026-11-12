@@ -838,6 +838,7 @@ EN: dict[str, str] = {
     "等待图片出现": "Wait for image",
     "等待图片消失": "Wait until image is gone",
     "读取屏幕文字": "Read screen text",
+    "执行脚本": "Run script",
     "基础": "Basics",
 
     # 指令提示
@@ -902,6 +903,10 @@ EN: dict[str, str] = {
     "要等的图片，如 加载遮罩.png": "Image to wait until gone, e.g. overlay.png",
     "变量名，如 单号；可用「识别范围」限定区域":
         "Variable name, e.g. order id; use Region to limit the area",
+    "环境:脚本|参数，如 python:tools/导出.py|--day|7 =>结果":
+        "env:script|args, e.g. python:tools/export.py|--day|7 =>result",
+    "标题|正文，如 今日提交|{提交清单}":
+        "title|body, e.g. Today's commits|{commit_list}",
     "重复次数：": "Repeat count: ",
     "点击次数": "click count",
     "双击次数": "double-click count",
@@ -911,6 +916,7 @@ EN: dict[str, str] = {
         "Enter a WeCom or DingTalk bot URL to send a notification after each run; "
         "leave blank to disable. Completion notifications are shared by all tasks.",
     "完成通知": "Completion notification",
+    "系统通知": "System notification",
     "展开 / 收起指令类型": "Expand / collapse step types",
     "展开 / 收起选项": "Show / hide options",
     "没有匹配的指令类型": "No matching step types",

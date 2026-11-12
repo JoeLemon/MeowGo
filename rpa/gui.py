@@ -30,9 +30,11 @@ from . import (
     i18n,
     launchd,
     logs,
+    notify,
     platform_support,
     project_io,
     report_dialogs,
+    script_runner,
     secrets,
     theme,
     tray,
@@ -319,6 +321,7 @@ TYPE_ICONS = {
     "regex": "search", "date": "calendar", "clipboard": "copy",
     "random_wait": "clock", "section": "note",
     "wait_image": "eye", "wait_gone": "eye", "ocr_read": "text",
+    "script": "terminal", "notify": "meow",
 }
 
 # 条件步骤里「图片 | 组名」两段式的类型（对话框用图形化双输入框）
@@ -350,6 +353,7 @@ TYPE_COLORS = {
     "file": MUTED, "json": INFO, "regex": INFO, "date": INFO,
     "clipboard": MUTED, "random_wait": WARNING, "section": TEXT_WEAK,
     "wait_image": WARNING, "wait_gone": WARNING, "ocr_read": INFO,
+    "script": SUCCESS, "notify": INFO,
 }
 TYPE_ICON_COLOR = MUTED
 # 深色下把类型图标提亮一档，避免深底看不清（_apply_theme 时整组替换）
@@ -383,6 +387,8 @@ TYPE_COLORS_DARK.update({
     "wait_image": DARK_PALETTE["WARNING"],
     "wait_gone": DARK_PALETTE["WARNING"],
     "ocr_read": DARK_PALETTE["INFO"],
+    "script": DARK_PALETTE["SUCCESS"],
+    "notify": DARK_PALETTE["INFO"],
 })
 
 # 步骤搜索框的占位文字（失焦为空时显示，不计入过滤条件）
@@ -4730,7 +4736,12 @@ class App(tk.Tk):
         dialog.wait()
 
     def _notify_finish(self, result: str) -> None:
-        """运行结束通知：声音 + webhook（企业微信/钉钉等机器人地址）+ 托盘气泡。"""
+        """运行结束通知：声音 + 托盘气泡 / 系统通知 + webhook。
+
+        窗口藏在托盘时优先用气泡（点气泡能直接打开窗口）；其它情况
+        （窗口可见、macOS 菜单栏、没有托盘）改发系统通知，避免用户
+        切到别的应用后错过结果。
+        """
         if self.settings.get("sound"):
             try:
                 import winsound
@@ -4738,21 +4749,26 @@ class App(tk.Tk):
                 winsound.MessageBeep(winsound.MB_ICONASTERISK)
             except Exception:  # noqa: BLE001
                 pass
-        # 窗口藏在托盘时：用气泡告知运行结论，点气泡打开窗口
-        if self.tray and not self._tray_window_visible:
-            title = {"finished": "执行完成", "stopped": "已停止",
-                     "error": "执行出错"}.get(result, "运行结束")
-            try:
-                report = self.executor.report()
-                text = (f"{report['steps']} 步，失败 {report['failed']}，"
-                        f"耗时 {report['seconds']:g} 秒")
-            except Exception:  # noqa: BLE001 — 报告失败不影响气泡
-                text = "点击打开 MeowGo 查看详情"
+        title = {"finished": "执行完成", "stopped": "已停止",
+                 "error": "执行出错"}.get(result, "运行结束")
+        report = None
+        try:
+            report = self.executor.report()
+            text = (f"{report['steps']} 步，失败 {report['failed']}，"
+                    f"耗时 {report['seconds']:g} 秒")
+        except Exception:  # noqa: BLE001 — 报告失败不影响通知
+            text = "点击打开 MeowGo 查看详情"
+        balloon = bool(self.tray and not self._tray_window_visible)
+        if balloon:
             self.tray.notify(title, text, on_click=self._tray_show_window)
+        elif self.settings.get("system_notify", True):
+            # Windows Toast 要启动 PowerShell，放后台线程避免卡住界面
+            threading.Thread(
+                target=lambda: notify.send(f"{APP_TITLE} · {title}", text),
+                daemon=True).start()
         url = (self.settings.get("webhook") or "").strip()
-        if not url:
+        if not url or report is None:
             return
-        report = self.executor.report()
         text = (f"MeowGo 运行结束：{result}，"
                 f"{report['steps']} 步，失败 {report['failed']}，"
                 f"耗时 {report['seconds']:g} 秒")
@@ -5978,6 +5994,17 @@ class StepDialog(BaseDialog):
         if key == "ui_click":
             text += ("\n左侧填写控件名称，可用「名称|控件类型」限定，"
                      "如 确定|Button。\n控件识别依赖 uiautomation 组件。")
+        if key == "script":
+            text += ("\n左侧按「环境:脚本|参数」填写，如 "
+                     "python:tools/导出.py|--day|7。"
+                     "\n多个参数用 | 分隔，末尾加 =>变量名 可保存标准输出。"
+                     "\n可用环境：" + "、".join(script_runner.env_names())
+                     + "\n自定义环境（可指定解释器 / 环境变量）："
+                     + script_runner.custom_env_path())
+        if key == "notify":
+            text += ("\n左侧按「标题|正文」填写，正文可为空并支持 {变量}，"
+                     "\n如 今日提交|{提交清单}。"
+                     "\n发送到 Windows Toast / macOS 通知中心 / Linux notify-send。")
         if key == "http":
             text += ("\n要写成 方法 地址|变量名[|请求体]，如 "
                      "GET https://example.com|响应。\n响应内容会存入指定变量。")
@@ -6482,6 +6509,9 @@ class ScheduleDialog(BaseDialog):
         self.var_interval = tk.StringVar(
             value=str(current.get("interval", 1) or 1))
         self.var_sound = tk.BooleanVar(value=bool(settings.get("sound")))
+        # 系统通知：运行结束后用操作系统通知中心提醒（默认开启）
+        self.var_system_notify = tk.BooleanVar(
+            value=bool(settings.get("system_notify", True)))
         self.var_webhook = tk.StringVar(value=settings.get("webhook", ""))
 
         body = tk.Frame(self, bg=CARD)
@@ -6746,6 +6776,13 @@ class ScheduleDialog(BaseDialog):
                      bg=CARD).pack(side="left")
         tk.Label(sound_box, text="播放提示音", bg=CARD, fg=TEXT,
                  font=FONT_NOTE).pack(side="left", padx=(app.s(6), 0))
+        # 系统通知与提示音放在同一行，避免整个对话框的固定行号顺移
+        uikit.Switch(
+            sound_box, self.var_system_notify, scale=app.scale, bg=CARD,
+            tooltip="运行结束后弹出系统通知（窗口隐藏或使用计划任务时也能收到）"
+        ).pack(side="left", padx=(app.s(18), 0))
+        tk.Label(sound_box, text="系统通知", bg=CARD, fg=TEXT,
+                 font=FONT_NOTE).pack(side="left", padx=(app.s(6), 0))
 
         row_label("Webhook", 6)
         row_hook = tk.Frame(right, bg=CARD)
@@ -7005,6 +7042,7 @@ class ScheduleDialog(BaseDialog):
             "schedules": schedules,
             "schedule": legacy,
             "sound": bool(self.var_sound.get()),
+            "system_notify": bool(self.var_system_notify.get()),
             "webhook": self.var_webhook.get().strip(),
         }
         self.destroy()

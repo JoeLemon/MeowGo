@@ -219,6 +219,18 @@ def _run_headless(args) -> int:
         except (OSError, ValueError) as exc:
             print(f"警告：结果写入失败：{exc}")
 
+    # 结束通知：无头运行（计划任务 / 命令行）看不到界面，用系统通知告知结果；
+    # --no-notify 可关闭，设置里的「系统通知」开关同样生效。
+    if not args.no_notify and bool(state.get("system_notify", True)):
+        from rpa import notify
+
+        title = {"finished": "执行完成", "stopped": "已停止",
+                 "error": "执行出错"}.get(result, "运行结束")
+        body = (f"{args.run or '全部执行组'}：{report['steps']} 步，"
+                f"失败 {report['failed']}，耗时 {report['seconds']:g} 秒")
+        print("系统通知已发送" if notify.send(f"MeowGo · {title}", body)
+              else "系统通知发送失败（当前系统可能不支持）")
+
     print(f"运行结束：{result}（{report['steps']} 步，"
           f"失败 {report['failed']}，{report['seconds']:g} 秒）")
     lock.release()
@@ -231,7 +243,7 @@ def main() -> int:
     # 带任何无头参数（含 -h/--help）都走命令行分支，否则启动界面
     headless = any(flag in argv for flag in
                    ("--run", "--all", "--list", "--loop", "--data",
-                    "--from-row", "--report", "-h", "--help"))
+                    "--from-row", "--report", "--no-notify", "-h", "--help"))
     if headless:
         import argparse
 
@@ -252,6 +264,8 @@ def main() -> int:
                                  "（默认 reports/）")
         parser.add_argument("--list", action="store_true",
                             help="只列出状态文件里的执行组")
+        parser.add_argument("--no-notify", action="store_true",
+                            help="运行结束后不发送系统通知")
         args = parser.parse_args(argv)
         if not args.run and not args.all and not args.list:
             parser.error("无头模式需要 --run 组名 / --all / --list 之一")

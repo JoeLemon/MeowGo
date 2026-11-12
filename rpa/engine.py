@@ -19,7 +19,7 @@ import threading
 import time
 from collections import namedtuple
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 from . import assets, platform_support, theme
 
@@ -151,6 +151,12 @@ STEP_TYPES = {
     # ---- 屏幕取字 ----
     "ocr_read": ("读取屏幕文字", "变量名，如 单号；可用「识别范围」限定区域",
                  False, ""),
+    # ---- 脚本 ----
+    "script": ("执行脚本",
+               "环境:脚本|参数，如 python:tools/导出.py|--day|7 =>结果",
+               False, ""),
+    # ---- 结果通知 ----
+    "notify": ("系统通知", "标题|正文，如 今日提交|{提交清单}", False, ""),
 }
 
 # Excel 中第 1 列使用的数字编号（1-9 与旧版 cmd.xls 完全兼容）
@@ -195,6 +201,8 @@ TYPE_TO_CODE = {
     "wait_image": 38.0,
     "wait_gone": 39.0,
     "ocr_read": 40.0,
+    "script": 41.0,
+    "notify": 42.0,
 }
 CODE_TO_TYPE = {v: k for k, v in TYPE_TO_CODE.items()}
 
@@ -228,16 +236,30 @@ MAC_SCREEN_TYPES = IMAGE_STEP_TYPES | TEXT_STEP_TYPES | OCR_READ_TYPES
 
 Point = namedtuple("Point", "x y")
 
+
+class ProcessResult(NamedTuple):
+    """外部进程（系统命令 / 脚本）的执行结果。"""
+
+    returncode: int = 0
+    output: str = ""
+    error: str = ""
+    timed_out: bool = False
+    stopped: bool = False
+    start_error: str = ""      # 非空表示进程没启动起来
+
+
 # 持久变量的占位符前缀：{持久:键} 读取，设置变量时写「持久:键=值」
 PERSIST_PREFIX = "持久:"
 
 # 条件类步骤（内容里的 | 后面是执行组）
 CONDITION_TYPES = {"if_image", "if_not_image", "if_else", "if_window"}
 # 支持「最多等 N 秒」的步骤类型（文件 wait 也用步骤 timeout 作为兜底）
-TIMEOUT_STEP_TYPES = (IMAGE_TYPES | WAIT_IMAGE_TYPES | {"drag", "cmd", "file"}
+TIMEOUT_STEP_TYPES = (IMAGE_TYPES | WAIT_IMAGE_TYPES
+                      | {"drag", "cmd", "file", "script"}
                       | CONDITION_TYPES | TEXT_STEP_TYPES | UIA_STEP_TYPES)
 # 界面上显示「失败后处理」的步骤类型（条件类不需要）
-FAIL_ACTION_STEP_TYPES = (IMAGE_TYPES | WAIT_IMAGE_TYPES | {"drag", "cmd", "file"}
+FAIL_ACTION_STEP_TYPES = (IMAGE_TYPES | WAIT_IMAGE_TYPES
+                          | {"drag", "cmd", "file", "script"}
                           | TEXT_STEP_TYPES | UIA_STEP_TYPES)
 
 _OFFSET_RE = re.compile(r"\+\s*(-?\d+)\s*,\s*(-?\d+)\s*$")
@@ -927,7 +949,11 @@ def parse_text_target(text: str, region_text: str = ""):
 
 
 def _read_temp_text(handle) -> str:
-    """读取子进程输出临时文件。Windows 中文环境下 cmd 输出多为 GBK。"""
+    """读取子进程输出临时文件。
+
+    先按 UTF-8 严格解码（脚本步骤固定输出 UTF-8），失败再退回系统
+    默认编码——Windows 中文环境下 cmd 的输出多为 GBK。
+    """
     import locale
 
     try:
@@ -937,7 +963,10 @@ def _read_temp_text(handle) -> str:
     finally:
         handle.close()
     if isinstance(data, bytes):
-        data = data.decode(locale.getpreferredencoding(False), "replace")
+        try:
+            data = data.decode("utf-8")
+        except UnicodeDecodeError:
+            data = data.decode(locale.getpreferredencoding(False), "replace")
     return data.strip()
 
 
@@ -1094,7 +1123,8 @@ class Step:
                            "set", "click_text", "wait_text", "assert_text",
                            "ui_click", "if_var", "http", "for_each",
                            "while_var", "file", "json", "regex", "date",
-                           "clipboard", "random_wait", "section", "ocr_read"):
+                           "clipboard", "random_wait", "section", "ocr_read",
+                           "script", "notify"):
             if not text:
                 errors.append(f"{where}：内容不能为空")
         elif self.type in ("break", "continue") and text:
@@ -1269,6 +1299,18 @@ class Step:
         elif self.type == "date" and text:
             if "|" not in text or not text.split("|", 1)[0].strip():
                 errors.append(f"{where}：日期格式化要写成 变量名|格式")
+        elif self.type == "script" and text:
+            # 只校验写法与环境名；脚本文件由运行时检查（可能由前面的步骤生成）
+            from . import script_runner
+
+            problem = script_runner.check_spec(text)
+            if problem:
+                errors.append(f"{where}：{problem}")
+        elif self.type == "notify" and text:
+            title = text.split("|", 1)[0]
+            if not title.strip():
+                errors.append(f"{where}：系统通知要写成 标题|正文，"
+                              "标题不能为空")
         elif self.type == "random_wait" and text:
             parts = [p.strip() for p in text.split(",")]
             if len(parts) != 2:
@@ -2690,6 +2732,10 @@ class Executor:
             self._emit("info", f"粘贴时间：{now}")
         elif step.type == "cmd":
             self._run_cmd(text, step)
+        elif step.type == "script":
+            self._run_script(text, step)
+        elif step.type == "notify":
+            self._run_notify(text)
         elif step.type == "if_image":
             self._run_if_image(text, step, depth)
         elif step.type == "if_not_image":
@@ -2796,17 +2842,25 @@ class Executor:
         except Exception:      # noqa: BLE001
             pass
 
-    def _run_cmd(self, text: str, step: Optional[Step] = None) -> None:
-        """执行系统命令，并按返回码判断这步是否成功。
+    def _run_external(self, command, step: Optional[Step], *,
+                      shell: bool, cwd: Optional[str] = None,
+                      env: Optional[dict[str, str]] = None,
+                      ) -> "ProcessResult":
+        """启动外部进程并等待结束，统一处理停止与超时。
 
-        用 Popen 轮询而不是 subprocess.run：命令执行期间也能响应「停止」，
+        用 Popen 轮询而不是 subprocess.run：执行期间也能响应「停止」，
         并且支持步骤级超时（step.timeout，0 = 不限）。子进程输出写到临时
         文件，避免管道写满导致死锁。
+        启动失败不抛异常，而是放在返回值的 start_error 里，让调用方
+        按「这步失败」处理，而不是中止整个流程。
         """
         import tempfile
 
-        self._emit("info", f"执行命令：{text}")
-        kwargs: dict[str, Any] = {"shell": True, "stdin": subprocess.DEVNULL}
+        kwargs: dict[str, Any] = {"shell": shell, "stdin": subprocess.DEVNULL}
+        if cwd:
+            kwargs["cwd"] = cwd
+        if env is not None:
+            kwargs["env"] = env
         if os.name == "nt":
             kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NO_WINDOW", 0)
@@ -2816,14 +2870,12 @@ class Executor:
         out_file = tempfile.TemporaryFile()
         err_file = tempfile.TemporaryFile()
         try:
-            proc = subprocess.Popen(text, stdout=out_file,
+            proc = subprocess.Popen(command, stdout=out_file,
                                     stderr=err_file, **kwargs)
         except Exception as exc:  # noqa: BLE001
             out_file.close()
             err_file.close()
-            self._step_ok = False
-            self._emit("error", f"命令执行失败：{exc}")
-            return
+            return ProcessResult(start_error=str(exc))
 
         timeout = float(getattr(step, "timeout", 0) or 0)
         deadline = time.time() + timeout if timeout > 0 else None
@@ -2833,9 +2885,7 @@ class Executor:
                 self._kill_process(proc)
                 out_file.close()
                 err_file.close()
-                self._step_ok = False
-                self._emit("warn", "命令已终止（收到停止请求）")
-                return
+                return ProcessResult(stopped=True)
             if deadline is not None and time.time() >= deadline:
                 timed_out = True
                 self._kill_process(proc)
@@ -2844,20 +2894,116 @@ class Executor:
 
         output = _read_temp_text(out_file)
         error = _read_temp_text(err_file)
-        if output:
-            self._emit("info", output[:500])
-        if timed_out:
+        return ProcessResult(returncode=int(proc.returncode or 0),
+                             output=output, error=error,
+                             timed_out=timed_out)
+
+    def _run_cmd(self, text: str, step: Optional[Step] = None) -> None:
+        """执行系统命令，并按返回码判断这步是否成功。"""
+        self._emit("info", f"执行命令：{text}")
+        result = self._run_external(text, step, shell=True)
+        if result.start_error:
+            self._step_ok = False
+            self._emit("error", f"命令执行失败：{result.start_error}")
+            return
+        if result.stopped:
+            self._step_ok = False
+            self._emit("warn", "命令已终止（收到停止请求）")
+            return
+        if result.output:
+            self._emit("info", result.output[:500])
+        if result.timed_out:
+            timeout = float(getattr(step, "timeout", 0) or 0)
             self._step_ok = False
             self._emit("error", f"命令执行超时（{timeout:g} 秒），已强制结束")
             if getattr(step, "on_fail", "skip") == "stop":
                 raise StepError(f"命令执行超时（{timeout:g} 秒），按设置中止执行")
             return
-        if proc.returncode:
+        if result.returncode:
             self._step_ok = False
-            self._emit("error", f"命令返回 {proc.returncode}："
-                                f"{(error or output)[:300]}"
+            self._emit("error", f"命令返回 {result.returncode}："
+                                f"{(result.error or result.output)[:300]}"
                                 f"{_command_error_hint(text)}")
         self._sleep(0.2)
+
+    def _run_script(self, text: str, step: Optional[Step] = None) -> None:
+        """执行脚本：环境:脚本|参数 =>变量。
+
+        环境由 script_runner 统一解析（内置 python / powershell / cmd /
+        bash / node / auto，程序目录 script_envs.json 可登记自定义环境）。
+        退出码非 0 记为这步失败；输出（前 500 字）写进运行日志，
+        写了 ``=>变量名`` 时还会把完整标准输出存进变量。
+        """
+        from . import script_runner
+
+        try:
+            spec = script_runner.parse_spec(text)
+        except ValueError as exc:
+            self._step_ok = False
+            self._emit("error", f"脚本写法有误：{exc}")
+            if getattr(step, "on_fail", "skip") == "stop":
+                raise StepError(str(exc)) from None
+            return
+        try:
+            command, cwd, env, shell = script_runner.build_command(
+                spec, self.base_dir)
+        except ValueError as exc:
+            # 脚本不存在 / 解释器缺失：记为这步失败，默认继续下一步
+            self._step_ok = False
+            self._emit("error", f"脚本无法执行：{exc}")
+            if getattr(step, "on_fail", "skip") == "stop":
+                raise StepError(str(exc)) from None
+            return
+
+        self._emit("info", f"执行脚本（{spec.env}）：{spec.script}")
+        result = self._run_external(command, step, shell=shell,
+                                    cwd=cwd, env=env)
+        if result.start_error:
+            self._step_ok = False
+            self._emit("error", f"脚本启动失败：{result.start_error}")
+            return
+        if result.stopped:
+            self._step_ok = False
+            self._emit("warn", "脚本已终止（收到停止请求）")
+            return
+        if result.output:
+            self._emit("info", result.output[:500])
+        if spec.var:
+            value = result.output.strip()
+            self.vars[spec.var] = value
+            self._row_var_keys.add(spec.var)
+            self._emit("info", f"脚本输出已存入变量 {spec.var}："
+                               f"{value[:80]}" + ("…" if len(value) > 80 else ""))
+        if result.timed_out:
+            timeout = float(getattr(step, "timeout", 0) or 0)
+            self._step_ok = False
+            self._emit("error", f"脚本执行超时（{timeout:g} 秒），已强制结束")
+            if getattr(step, "on_fail", "skip") == "stop":
+                raise StepError(f"脚本执行超时（{timeout:g} 秒），按设置中止执行")
+            return
+        if result.returncode:
+            self._step_ok = False
+            self._emit("error", f"脚本返回 {result.returncode}："
+                                f"{(result.error or result.output)[:300]}")
+        self._sleep(0.2)
+
+    def _run_notify(self, text: str) -> None:
+        """发送系统通知：标题|正文（正文可为空，支持 {变量} 占位符）。"""
+        from . import notify
+
+        title, _, body = text.partition("|")
+        title, body = title.strip(), body.strip()
+        if not title:
+            self._step_ok = False
+            self._emit("error", "系统通知要写成 标题|正文，标题不能为空")
+            return
+        self._emit("info", f"发送系统通知：{title}")
+        if notify.send(title, body):
+            self._emit("info", "系统通知已发送")
+        else:
+            # 通知失败只记为这步失败，继续执行后续步骤（可配合重试次数）
+            self._step_ok = False
+            self._emit("warn", "系统通知发送失败（当前系统可能不支持通知）")
 
     @staticmethod
     def _kill_process(proc) -> None:

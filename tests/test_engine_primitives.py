@@ -394,6 +394,33 @@ def test_ocr_read_step(monkeypatch):
     assert ex3.run("main") == "error"
 
 
+def test_notify_step_sends_rendered_content(monkeypatch):
+    """系统通知：正文支持变量；标题为空要拦下，发送失败记为失败但继续。"""
+    from rpa import notify
+
+    sent = []
+    monkeypatch.setattr(
+        notify, "send",
+        lambda title, message="": sent.append((title, message)) or True)
+    assert not Step("notify", "今日提交|{提交清单}").validate()
+    assert not Step("notify", "只有标题").validate()
+    assert Step("notify", "").validate()
+    assert Step("notify", "|正文").validate()
+
+    ex = _executor({"main": [Step("set", "清单=1. 修复\n2. 优化"),
+                             Step("notify", "今日提交|{清单}")]})
+    assert ex.run("main") == "finished"
+    assert sent == [("今日提交", "1. 修复\n2. 优化")]
+
+    # 通知发不出去：只标记这一步失败，后续步骤照常执行
+    monkeypatch.setattr(notify, "send", lambda *args, **kwargs: False)
+    ex2 = _executor({"main": [Step("notify", "失败通知|正文"),
+                              Step("set", "后续=跑了")]})
+    assert ex2.run("main") == "finished"
+    assert ex2.stats[0]["ok"] is False
+    assert ex2.vars["后续"] == "跑了"
+
+
 def test_group_retry_reruns_whole_group(monkeypatch):
     """组级重试：整组跑完有失败步骤就再跑一遍整组。"""
     state = {"attempt": 0}
