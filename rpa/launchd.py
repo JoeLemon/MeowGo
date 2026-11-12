@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 from datetime import datetime, timedelta
-from typing import Iterable
+from typing import Iterable, Optional
 
 LABEL_PREFIX = "com.meowgo.task."
 
@@ -51,7 +51,8 @@ def task_plist(name: str, arguments: Iterable[str],
         schedule = ('    <key>StartInterval</key>\n'
                     f'    <integer>{int(interval_hours) * 3600}</integer>\n')
     else:
-        days = [max(0, min(7, int(day))) for day in (weekdays or [])]
+        days: list[Optional[int]] = [
+            max(0, min(7, int(day))) for day in (weekdays or [])]
         if len(days) <= 1:
             entries = [days[0] if days else None]
         else:

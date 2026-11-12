@@ -333,6 +333,52 @@ def image_names(text: str) -> list[str]:
     return [target.name for target in parse_image_targets(text)]
 
 
+def image_references(groups: Iterable["Group"]) -> list[tuple[str, str, int]]:
+    """流程里真正引用到的图片：[(文件名, 组名, 第几步), …]（步号从 1 起）。
+
+    「清理未引用图片」和「导出可分享包」都靠它，
+    少算一张就会删掉正在用的图、或者打出缺图的包。所以要覆盖全部写法：
+    候选图（;）、@区域、#第几个、+偏移，以及拖拽的起点 / 终点两张图。
+    """
+    refs: list[tuple[str, str, int]] = []
+    for group in groups:
+        for index, step in enumerate(group.steps, start=1):
+            if not step.enabled or step.type not in IMAGE_STEP_TYPES:
+                continue
+            head, _, tail = (step.content or "").strip().partition("|")
+            if head and not _valid_xy(head):
+                refs.extend((name, group.name, index)
+                            for name in image_names(head))
+            # 拖拽的第二段也是图片（写坐标时不是）
+            if step.type == "drag" and tail and not _valid_xy(tail):
+                refs.extend((name, group.name, index)
+                            for name in image_names(tail))
+    return refs
+
+
+def referenced_images(groups: Iterable["Group"]) -> set[str]:
+    """流程里引用到的图片文件名集合（去重）。"""
+    return {name for name, _group, _index in image_references(groups)}
+
+
+def split_command_content(text: str) -> tuple[str, str, str]:
+    """把「动作:参数1|参数2」拆成三段（file / window 共用）。
+
+    参数里再出现 `|` 时都归到第三段，因此 join 回去与原文一致，
+    不会把用户写的内容截断。
+    """
+    head, _, rest = (text or "").strip().partition("|")
+    action, _, first = head.partition(":")
+    return action.strip(), first.strip(), rest.strip()
+
+
+def join_command_content(action: str, first: str, second: str = "") -> str:
+    """把三段拼回「动作:参数1|参数2」；第二段为空时不写竖线。"""
+    head = f"{(action or '').strip()}:{(first or '').strip()}"
+    tail = (second or "").strip()
+    return head + ("|" + tail if tail else "")
+
+
 def _parse_region(text: str) -> Optional[tuple[int, int, int, int]]:
     """把 "x,y,宽,高" 解析成整数四元组；格式不对返回 None。"""
     if not text:
@@ -531,6 +577,28 @@ def _match_point(base_x: float, base_y: float, scale: float,
                  base_y + (y + height / 2) / scale)
 
 
+def match_miss_hint(score: float, threshold: float,
+                    x: float, y: float) -> str:
+    """「未找到」的诊断文案：差多少、在哪、下一步做什么。
+
+    只有「差一点」和「完全不是这个东西」两种情况，但处理方式相反：
+    前者调低相似度即可，后者必须重新截图。不告诉用户差多少，
+    他就只能来问开发者。
+    """
+    lines = [f"最接近的一次：相似度 {score:.2f}（阈值 {threshold:.2f}）",
+             f"位置 ({x:.0f}, {y:.0f})"]
+    # 0.1 是缩放匹配的容差（见 _scale_confidence）：差距在这个范围内，
+    # 调低相似度就能命中，重截图属于白费力气。
+    if threshold - score <= 0.1:
+        lines.append("建议：只差一点，可在「运行设置 → 图像匹配相似度」"
+                     "下调一档后重试")
+    elif score >= 0.6:
+        lines.append("建议：目标内容可能已变化，请重新截图并「检测图片」确认")
+    else:
+        lines.append("建议：屏幕上没有相似内容，确认目标窗口已打开且未被遮挡")
+    return "\n".join(lines)
+
+
 def capture_screen():
     """采集一帧整个虚拟桌面，返回 (BGR ndarray, (left, top), scale)。
 
@@ -597,7 +665,8 @@ def find_images(text: str, base_dir: str = "",
     origin = (0, 0)
     for target in parse_image_targets(text):
         path = assets.resolve_image(target.name, base_dir or None)
-        item = {"name": target.name, "missing": False, "points": []}
+        item = {"name": target.name, "missing": False, "points": [],
+                "best": None}
         if not os.path.exists(path):
             item["missing"] = True
             result.append(item)
@@ -641,17 +710,26 @@ def find_images(text: str, base_dir: str = "",
         if grayscale:
             search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
             template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-        boxes = _match_at_scale(search, template, confidence, 1.0)
+        # 没命中时也把「最接近的一次」带回去：界面据此告诉用户差多少，
+        # 而不是只给一句「未找到匹配图像」
+        stats: dict = {"score": -1.0, "box": None, "factor": None}
+        boxes = _match_at_scale(search, template, confidence, 1.0, stats)
         if not boxes:
             scaled_confidence = _scale_confidence(confidence)
             factor = _discover_scale(search, template, scaled_confidence)
             if factor is not None:
                 boxes = _match_at_scale(search, template,
-                                        scaled_confidence, factor)
+                                        scaled_confidence, factor, stats)
         item["points"] = [
             (point.x, point.y)
             for point in (_match_point(base_x, base_y, scale, box)
                           for box in boxes)]
+        if stats.get("box") is not None:
+            best_point = _match_point(base_x, base_y, scale,
+                                      (stats["score"], *stats["box"]))
+            item["best"] = {"score": float(stats["score"]),
+                            "x": best_point.x,
+                            "y": best_point.y}
         result.append(item)
     return result
 
@@ -706,8 +784,14 @@ def _resize_template(template: Any, factor: float) -> Any:
 
 def _match_template_boxes(
         search: Any, template: Any,
-        confidence: float) -> list[tuple[float, int, int, int, int]]:
-    """单尺度匹配，返回 (分数, x, y, w, h) 列表（未去重）。"""
+        confidence: float,
+        stats: Optional[dict] = None) -> list[tuple[float, int, int, int, int]]:
+    """单尺度匹配，返回 (分数, x, y, w, h) 列表（未去重）。
+
+    stats 传入字典时，会把「本轮最高分与其位置」写进去（即使没过阈值）。
+    这是给失败诊断用的：用户需要知道是「差一点」还是「完全不是这个东西」，
+    而这两者的处理方式相反（调低相似度 / 重新截图）。
+    """
     import cv2
     import numpy as np
 
@@ -717,6 +801,15 @@ def _match_template_boxes(
         return []
     result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
     result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    if stats is not None:
+        flat = result.reshape(-1)
+        if flat.size:
+            index = int(np.argmax(flat))
+            score = float(flat[index])
+            if score > float(stats.get("score", -1.0)):
+                py, px = divmod(index, result.shape[1])
+                stats["score"] = score
+                stats["box"] = (int(px), int(py), width, height)
     ys, xs = np.where(result >= float(confidence))
     if len(xs) == 0:
         return []
@@ -744,9 +837,14 @@ def _dedupe_boxes(
 
 
 def _match_at_scale(search: Any, template: Any, confidence: float,
-                    factor: float) -> list[tuple[float, int, int, int, int]]:
+                    factor: float,
+                    stats: Optional[dict] = None
+                    ) -> list[tuple[float, int, int, int, int]]:
     scaled = _resize_template(template, factor)
-    return _dedupe_boxes(_match_template_boxes(search, scaled, confidence))
+    boxes = _match_template_boxes(search, scaled, confidence, stats)
+    if stats is not None and stats.get("box") is not None:
+        stats["factor"] = factor
+    return _dedupe_boxes(boxes)
 
 
 def _discover_scale(search: Any, template: Any, confidence: float,
@@ -2338,6 +2436,8 @@ class Executor:
         default_factory=dict)
     # 本场运行已经提示过缩放命中的图片
     _scale_notices: set[tuple[str, float]] = field(default_factory=set)
+    # 最近一次「找不到」的最接近匹配（相似度 / 位置），供超时提示诊断用
+    _last_miss: Optional[dict] = None
     # 锁屏检测（节流）
     _session_locked: bool = False
     _session_checked_at: float = 0.0
@@ -2368,6 +2468,7 @@ class Executor:
         self._screen_scale = 1.0
         self._scale_notices.clear()
         self._scale_sweep_at.clear()
+        self._last_miss = None
         self._session_locked = False
         self._session_checked_at = 0.0
         self._session_warned = False
@@ -2448,6 +2549,8 @@ class Executor:
         if not targets:
             raise StepError("图片名不能为空")
 
+        # 每轮重新收集：诊断只描述「这一次」看到了什么
+        self._last_miss = None
         missing = []
         for target in targets:
             path = assets.resolve_image(target.name, self.base_dir or None)
@@ -2597,11 +2700,14 @@ class Executor:
                 return None
             return _match_point(base_x, base_y, scale, boxes[index])
 
+        # 失败时用户需要知道「差多少」：这里记录本轮最高分与其位置
+        stats: dict = {"score": -1.0, "box": None, "factor": None}
+
         # 1. 上次验证成功的比例优先（DPI 通常整场运行都不变）
         if hint is not None:
             conf = (self.confidence if abs(hint - 1.0) < 1e-6
                     else scaled_confidence)
-            point = pick(_match_at_scale(search, template, conf, hint))
+            point = pick(_match_at_scale(search, template, conf, hint, stats))
             if point is not None:
                 self._note_scale(path, hint)
                 return point
@@ -2611,7 +2717,7 @@ class Executor:
         # 2. 原尺寸（旧行为；也覆盖用户把缩放改回去的情况）
         if hint != 1.0:
             point = pick(_match_at_scale(search, template, self.confidence,
-                                         1.0))
+                                         1.0, stats))
             if point is not None:
                 return point
 
@@ -2622,11 +2728,37 @@ class Executor:
             if factor is not None:
                 self._scale_hints[key] = factor
                 point = pick(_match_at_scale(search, template,
-                                             scaled_confidence, factor))
+                                             scaled_confidence, factor, stats))
                 if point is not None:
                     self._note_scale(path, factor)
                     return point
+        self._note_miss(path, stats, base_x, base_y, scale, self.confidence)
         return None
+
+    def _note_miss(self, path: str, stats: dict, base_x: float, base_y: float,
+                   scale: float, confidence: float) -> None:
+        """记下本轮最接近的一次匹配，供超时提示用（保留分最高的那个）。"""
+        box = stats.get("box")
+        score = float(stats.get("score", -1.0))
+        if box is None or score < 0:
+            return
+        if self._last_miss is not None and self._last_miss["score"] >= score:
+            return
+        point = _match_point(base_x, base_y, scale, (score, *box))
+        self._last_miss = {"name": os.path.basename(path),
+                           "score": score,
+                           "threshold": float(confidence),
+                           "x": point.x,
+                           "y": point.y,
+                           "factor": stats.get("factor")}
+
+    def _miss_detail(self) -> str:
+        """把「未找到」变成可判断的诊断：差多少、在哪、下一步做什么。"""
+        miss = self._last_miss
+        if not miss:
+            return ""
+        return match_miss_hint(miss["score"], miss["threshold"],
+                               miss["x"], miss["y"])
 
     def _click(self, image: str, clicks: int, button: str, repeat: float,
                timeout: float = 0, on_fail: str = "skip",
@@ -2654,9 +2786,15 @@ class Executor:
             else:
                 if deadline is not None and time.time() >= deadline:
                     self._step_ok = False
-                    self._emit("warn", f"等待图片 {image} 超时（{timeout:g} 秒）")
+                    detail = self._miss_detail()
+                    message = f"等待图片 {image} 超时（{timeout:g} 秒）"
+                    if detail:
+                        message += "\n" + detail
+                    self._emit("warn", message)
                     if on_fail == "stop":
-                        raise StepError(f"等待图片 {image} 超时，按设置中止执行")
+                        raise StepError(
+                            f"等待图片 {image} 超时，按设置中止执行"
+                            + ("\n" + detail if detail else ""))
                     return False        # skip：这步算失败，继续往下
                 self._emit("warn", f"未找到图片 {image}，重试中…")
             if not self._sleep(POLL_INTERVAL):
@@ -3285,10 +3423,14 @@ class Executor:
                 return False
 
         self._step_ok = False
-        self._emit("warn",
-                   f"等待图片{action}超时（{step.timeout:g} 秒）：{image}")
+        detail = self._miss_detail() if want_present else ""
+        message = f"等待图片{action}超时（{step.timeout:g} 秒）：{image}"
+        if detail:
+            message += "\n" + detail
+        self._emit("warn", message)
         if step.on_fail == "stop":
-            raise StepError(f"等待图片{action}超时，按设置中止执行")
+            raise StepError(f"等待图片{action}超时，按设置中止执行"
+                            + ("\n" + detail if detail else ""))
         return False
 
     def _wait_window(self, title: str, timeout: float):
@@ -4314,7 +4456,8 @@ def write_report_index(directory: str, keep: int = 100) -> str:
 
     rows = []
     referenced_shots = set()
-    stats = {"total": len(paths), "ok": 0, "seconds": 0.0, "failed": {}}
+    stats: dict[str, Any] = {"total": len(paths), "ok": 0,
+                              "seconds": 0.0, "failed": {}}
     for path in paths:
         try:
             with open(path, encoding="utf-8") as fh:

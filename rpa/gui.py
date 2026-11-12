@@ -36,12 +36,13 @@ from . import (
     report_dialogs,
     script_runner,
     secrets,
+    step_help,
     theme,
     tray,
     uikit,
     updater,
 )
-from .dialogs import BaseDialog, GroupDialog, ShortcutsDialog
+from .dialogs import BaseDialog, GroupDialog, HelpDialog, ShortcutsDialog
 from .engine import (
     CONDITION_TYPES,
     FAIL_ACTION_STEP_TYPES,
@@ -59,9 +60,13 @@ from .engine import (
     estimate_steps,
     export_excel,
     find_images,
+    image_references,
     import_excel,
+    join_command_content,
+    match_miss_hint,
     opencv_available,
     parse_region,
+    split_command_content,
     validate_environment,
     validate_project,
     window_title,
@@ -921,8 +926,11 @@ class App(tk.Tk):
                 pass
             else:
                 self.project = project
-                self.image_dir = image_dir_path(
-                    meta.get("image_dir") or self.image_dir)
+                # 图片目录可能是相对项目文件的（发过来的项目包），
+                # 找不到就退回当前目录，别让整个项目直接没图可用
+                self.image_dir = (project_io.resolve_image_dir(
+                    str(meta.get("image_dir") or ""), saved_project)
+                    or self.image_dir)
                 self.project.image_dir = self.image_dir
                 self.project_path = saved_project
         self.group_index = 0          # 当前编辑的组
@@ -1363,6 +1371,13 @@ class App(tk.Tk):
             MI("最近项目…", "folder", self.open_recent_projects,
                project_io.project_name(self.project_path)
                if self.project_path else ""),
+            "-",
+            MI("导出可分享包…", "export", self.export_share_package,
+               "流程 + 用到的图片，打包发给同事"),
+            MI("导入可分享包…", "import", self.import_share_package),
+            MI("重新指定图片目录…", "folder_open",
+               self.choose_image_dir,
+               os.path.basename(self.image_dir)),
             "-",
             MI("导入 Excel（单个组）…", "import",
                lambda: self.import_excel(single=True), "第一个工作表"),
@@ -2044,6 +2059,7 @@ class App(tk.Tk):
         self.bind(f"<{mod}-Return>", lambda e: self.add_step())
         self.bind("<F5>", lambda e: self.run_group())
         self.bind("<F2>", lambda e: self.edit_step())
+        self.bind("<F1>", lambda e: self.show_help_for_selected_step())
         self.bind("<Delete>", self._on_delete_key)
         self.bind(f"<{mod}-z>", lambda e: self.undo())
         self.bind(f"<{mod}-y>", lambda e: self.redo())
@@ -2461,10 +2477,20 @@ class App(tk.Tk):
             return False
         self._push_undo("打开项目")
         self.project = project
-        self.image_dir = image_dir_path(
-            meta.get("image_dir") or self.image_dir)
-        self.project.image_dir = self.image_dir
         self.project_path = os.path.abspath(path)
+        resolved = project_io.resolve_image_dir(
+            str(meta.get("image_dir") or ""), self.project_path)
+        if resolved:
+            self.image_dir = resolved
+        else:
+            self.image_dir = image_dir_path(self.image_dir)
+            recorded = str(meta.get("image_dir") or "")
+            if recorded:
+                self._log("warn",
+                          "项目里的图片目录不存在："
+                          f"{recorded}（已沿用当前图片目录；"
+                          "如有图片步骤报缺失，请用「文件 → 重新指定图片目录…」）")
+        self.project.image_dir = self.image_dir
         if remember:
             project_io.remember_project(self.settings, self.project_path)
         self.settings["project_path"] = self.project_path
@@ -2507,6 +2533,72 @@ class App(tk.Tk):
         choice = dialog.wait()
         if choice:
             self.load_project_file(choice, remember=False)
+
+    def choose_image_dir(self) -> None:
+        """重新指定图片目录（换机器、或项目包解压到别处时用）。"""
+        path = filedialog.askdirectory(parent=self, title="选择图片目录",
+                                       initialdir=self.image_dir)
+        if not path:
+            return
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("指定失败", str(exc), parent=self)
+            return
+        self.image_dir = image_dir_path(path)
+        self.project.image_dir = self.image_dir
+        self._save_state()
+        self._log("info", f"图片目录已切换：{self.image_dir}")
+        self._set_status(f"图片目录：{os.path.basename(self.image_dir)}")
+
+    def export_share_package(self) -> None:
+        """把当前流程和它用到的图片打成一个 .mgzip，直接发给同事。"""
+        initial = project_io.project_name(self.project_path) or "MeowGo 流程"
+        path = filedialog.asksaveasfilename(
+            parent=self, title="导出可分享包",
+            defaultextension=project_io.SHARE_EXT,
+            initialfile=initial,
+            filetypes=list(project_io.SHARE_FILE_TYPES))
+        if not path:
+            return
+        try:
+            info = project_io.export_package(path, self.project,
+                                             self.image_dir)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self)
+            return
+        message = f"已打包 {info['images']} 张图片：{info['path']}"
+        if info["missing"]:
+            message += ("\n以下图片没找到，包里没有它们："
+                        + "、".join(info["missing"]))
+        self._log("warn" if info["missing"] else "info", message)
+        self._set_status(f"已导出可分享包：{os.path.basename(info['path'])}")
+        if messagebox.askyesno("导出完成",
+                               message + "\n\n是否打开所在文件夹？",
+                               parent=self):
+            platform_support.open_path(os.path.dirname(info["path"]))
+
+    def import_share_package(self) -> None:
+        """解压 .mgzip 并打开其中的流程（图片跟着包一起走）。"""
+        path = filedialog.askopenfilename(
+            parent=self, title="导入可分享包",
+            filetypes=list(project_io.SHARE_FILE_TYPES))
+        if not path:
+            return
+        if not messagebox.askyesno(
+                "导入可分享包",
+                "导入会用包里的流程替换当前流程（可用 Ctrl+Z 撤销）。\n继续？",
+                parent=self):
+            return
+        try:
+            info = project_io.import_package(path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("导入失败", str(exc), parent=self)
+            return
+        self.load_project_file(info["path"])
+        self._log("info", f"已导入可分享包：{info['dir']}"
+                          f"（{info['images']} 张图片）")
+        self._set_status(f"已导入：{os.path.basename(info['dir'])}")
 
     def _autosave_tick(self) -> None:
         if self._dirty:
@@ -3538,6 +3630,9 @@ class App(tk.Tk):
                 uikit.MenuItem("新增步骤…", "add", self.add_step,
                                "Ctrl+Enter", accent=True),
                 uikit.MenuItem("编辑步骤…", "pencil", self.edit_step, "F2",
+                               enabled=has),
+                uikit.MenuItem("这一步怎么写…", "question",
+                               self.show_help_for_selected_step, "F1",
                                enabled=has),
                 uikit.MenuItem("复制步骤", "copy", self.duplicate_step,
                                enabled=has),
@@ -5218,51 +5313,22 @@ class App(tk.Tk):
         """右下角「?」/ 帮助菜单：弹出快捷键速查卡。"""
         ShortcutsDialog(self).wait()
 
-    def show_help(self) -> None:
-        lines = [i18n.tr("【概述】"),
-                 i18n.tr("左侧管理执行组，右侧编辑组内步骤，点击「运行组」即可执行。"),
-                 i18n.tr("所有执行组均自动保存，无需手动维护项目文件。"),
-                 i18n.tr("执行组可通过「调用执行组」指令被其他执行组复用。"),
-                 "",
-                 i18n.tr("【操作要点】"),
-                 i18n.tr("· 执行组操作：在左侧执行组上右键，可新建、重命名、复制、删除或排序。"),
-                 i18n.tr("· 运行指定执行组：在该执行组上右键，选择「运行这个组」。"),
-                 i18n.tr("· 步骤列表：双击单元格可编辑内容、类型、重复次数与备注。"),
-                 i18n.tr("· 右键菜单提供新增、编辑、复制、删除、截图及上下移动等完整操作。"),
-                 i18n.tr("· 图像类步骤可点击「截图」框选屏幕区域，并自动保存至图像目录。"),
-                 i18n.tr("· 复用编排：在组内新增「调用执行组」，内容填写目标执行组名称。"),
-                 "",
-                 i18n.tr("【指令类型】")]
-        separators = ":" if i18n.get_language() == "en" else "："
-        for index, (key, (name, hint, need_repeat, repeat_hint)) in enumerate(
-                STEP_TYPES.items(), start=1):
-            lines.append(f"{index}. {i18n.tr(name)}{separators} {i18n.tr(hint)}")
-            if repeat_hint:
-                lines.append(f"     {i18n.tr('重复次数：')}{i18n.tr(repeat_hint)}")
-        lines += ["", i18n.tr("【快捷键】"),
-                  i18n.tr("Ctrl+G 新建执行组　Ctrl+Enter 新增步骤　"
-                          "Ctrl+E 启用/禁用步骤　F2 编辑步骤　Delete 删除步骤"),
-                  i18n.tr("F5 运行当前组（全局）　F9 停止（全局，任何时候均有效）"),
-                  "",
-                  i18n.tr("【安全】将鼠标快速移至屏幕左上角，可立即中断执行。")]
+    def show_help(self, focus_type: str = "") -> None:
+        """帮助：可搜索的指令说明面板（可选定位到某个类型）。"""
+        HelpDialog(self, focus_type).wait()
 
-        win = tk.Toplevel(self)
-        win.title("使用说明")
-        win.configure(bg=CARD)
-        win.transient(self)
-        win.after_idle(lambda: uikit.style_window(win, self.dark))
-        text = tk.Text(win, width=64, height=27, wrap="word", relief="flat",
-                       bg=CARD, fg=TEXT, font=FONT_NOTE,
-                       padx=self.s(14), pady=self.s(12))
-        text.pack(fill="both", expand=True)
-        text.insert("1.0", "\n".join(lines))
-        text.configure(state="disabled")
-        uikit.RoundButton(win, "知道了", "check", win.destroy, kind="accent",
-                          scale=self.scale, bg=CARD).pack(pady=(0, self.s(12)))
-        win.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 3
-        self.place_window(win, x, y, win.winfo_width(), win.winfo_height())
+    def show_help_for_selected_step(self) -> None:
+        """F1：看当前选中这一步的类型怎么写。"""
+        rows = self._selected_steps()
+        group = self._current_group()
+        if not rows or group is None:
+            self.show_help()
+            return
+        index = rows[0]
+        if index >= len(group.steps):
+            self.show_help()
+            return
+        self.show_help(group.steps[index].type)
 
     def show_about(self) -> None:
         message = (
@@ -5575,6 +5641,8 @@ class StepDialog(BaseDialog):
             font_size=FONT_SIZE_NOTE, tooltip="选择没出现图片时要执行的执行组")
         self.btn_pick_group2.grid(row=2, column=2, padx=(parent.s(4), 0),
                                   pady=(parent.s(4), 0))
+        # 文件 / 窗口两类是「动作:参数|参数」的写法，单独给一条图形化输入行
+        self._build_segment(content)
 
         self.hint = tk.Label(self, text="", bg=CARD, fg=MUTED,
                              wraplength=parent.s(470) - parent.s(48),
@@ -5827,7 +5895,11 @@ class StepDialog(BaseDialog):
         if not self.winfo_exists():
             return
         self.update_idletasks()
-        width = max(self.app.s(470), self.winfo_width())
+        # 分段编辑行是「动作 + 两格参数」并排，窄窗口会把路径挤成十几个字，
+        # 所以这一类步骤给更宽的基准宽度。
+        floor = self.app.s(560) if self.segment_box.winfo_manager() \
+            else self.app.s(470)
+        width = max(floor, self.winfo_width())
         self.geometry(f"{width}x{self.winfo_reqheight()}")
 
     def _toggle_advanced(self) -> None:
@@ -5889,7 +5961,19 @@ class StepDialog(BaseDialog):
                 if missing and not points:
                     message = "找不到图片文件：" + "、".join(missing)
                 elif not points:
-                    message = "当前屏幕未找到匹配图像（请确认目标窗口已打开、图片未过期）"
+                    message = "当前屏幕未找到匹配图像"
+                    best = None
+                    for item in items:
+                        candidate = item.get("best")
+                        if candidate and (best is None
+                                          or candidate["score"] > best["score"]):
+                            best = candidate
+                    if best:
+                        message += ("\n" + match_miss_hint(
+                            best["score"], confidence,
+                            best["x"], best["y"]))
+                    else:
+                        message += "\n（请确认目标窗口已打开、图片未过期）"
                 elif len(points) == 1:
                     message = "找到 1 处匹配 ✓"
                     warn = False
@@ -5922,10 +6006,17 @@ class StepDialog(BaseDialog):
     # -- 辅助 -------------------------------------------------------------
     @staticmethod
     def _type_options() -> list[tuple[str, str, str]]:
-        """指令类型下拉项：(内部值, 显示名, 分组)。"""
-        return [(key, info[0],
-                 "执行组" if key in TYPE_GROUP_EXEC else "基础")
-                for key, info in STEP_TYPES.items()]
+        """指令类型下拉项：(内部值, 显示名, 分组)。
+
+        按「操作屏幕 / 等待与识别 / 流程控制 / 数据与系统」分组，
+        42 项平铺在一起找起来太费劲；同组内保持原有顺序。
+        """
+        order = {name: index
+                 for index, name in enumerate(step_help.CATEGORIES)}
+        items = [(key, info[0], step_help.category(key))
+                 for key, info in STEP_TYPES.items()]
+        items.sort(key=lambda item: order[item[2]])
+        return items
 
     def _type_key(self) -> str:
         text = self.var_type.get().strip()
@@ -6071,6 +6162,15 @@ class StepDialog(BaseDialog):
         for widget in (self.label_group2, self.group2_entry,
                        self.btn_pick_group2):
             widget.grid() if is_else else widget.grid_remove()
+        # 文件 / 窗口：显示分段输入行，并把当前内容拆进去
+        if key in step_help.COMMAND_FIELDS:
+            self._show_segment(key)
+            self.segment_box.pack(fill="x", after=(self.action_row
+                                                  if has_actions
+                                                  else self.entry))
+        else:
+            self._seg_type = ""
+            self.segment_box.pack_forget()
         # 等待策略：图片 / 拖拽 / 条件 / 命令 / 文字 / 控件 / 文件等待
         has_timeout = key in TIMEOUT_STEP_TYPES
         for widget in self._adv_timeout:
@@ -6125,6 +6225,162 @@ class StepDialog(BaseDialog):
         # 构造阶段（尚未映射）不排队，避免用错误的初始宽度算高度。
         if self.winfo_ismapped():
             self.after_idle(self._autosize)
+
+    # -- 分段编辑（file / window）-------------------------------------------
+    def _build_segment(self, content: tk.Frame) -> None:
+        """构建「动作 + 两段参数」的输入行（只对 file / window 使用）。
+
+        保持 var_content 为唯一真值：字段改动 → 拼回内容框；
+        内容框被手改 → 拆回字段。两边都有防抖标记，不会互相触发。
+        """
+        s = self.app.s
+        self.var_seg_action = tk.StringVar()
+        self.var_seg_first = tk.StringVar()
+        self.var_seg_second = tk.StringVar()
+        self._seg_syncing = False
+        self._seg_type = ""
+        self.segment_box: tk.Frame = tk.Frame(content, bg=CARD)
+        self.segment_box.columnconfigure(1, weight=1)
+        self.segment_box.columnconfigure(3, weight=1)
+        self.sep_seg = tk.Frame(self.segment_box, bg=BORDER, height=1)
+        self.sep_seg.grid(row=0, column=0, columnspan=5, sticky="ew",
+                          pady=(s(8), s(4)))
+        self.seg_action: Optional[uikit.ReadonlySelect] = None
+        self.seg_first = uikit.TextField(
+            self.segment_box, textvariable=self.var_seg_first, width=8,
+            scale=self.app.scale, bg=CARD, font_size=FONT_SIZE_NOTE)
+        self.seg_first.grid(row=1, column=1, sticky="ew", padx=(s(6), 0))
+        self.lbl_seg_sep = tk.Label(self.segment_box, text="|", bg=CARD,
+                                    fg=MUTED, font=FONT_MONO)
+        self.lbl_seg_sep.grid(row=1, column=2, padx=s(4))
+        self.seg_second = uikit.TextField(
+            self.segment_box, textvariable=self.var_seg_second, width=8,
+            scale=self.app.scale, bg=CARD, font_size=FONT_SIZE_NOTE)
+        self.seg_second.grid(row=1, column=3, sticky="ew")
+        self.btn_seg_browse = uikit.RoundButton(
+            self.segment_box, "", "folder_open", self._browse_segment,
+            kind="outline", scale=self.app.scale, bg=CARD,
+            height=CONTROL_SM, pad=s(6), icon_size=ICON_MD,
+            tooltip="选一个文件 / 目录填进第一格")
+        self.btn_seg_browse.grid(row=1, column=4, padx=(s(4), 0))
+        self.seg_labels = tk.Label(self.segment_box, text="", bg=CARD,
+                                   fg=MUTED, font=FONT_CAPTION, anchor="w")
+        self.seg_labels.grid(row=2, column=0, columnspan=5, sticky="ew",
+                             pady=(s(2), 0))
+        self.var_seg_action.trace_add("write",
+                                      lambda *_: self._on_seg_action())
+        self.var_seg_first.trace_add("write",
+                                     lambda *_: self._compose_segment())
+        self.var_seg_second.trace_add("write",
+                                      lambda *_: self._compose_segment())
+        self.var_content.trace_add("write",
+                                   lambda *_: self._parse_segment())
+
+    def _seg_actions(self) -> dict[str, tuple[str, str]]:
+        return step_help.COMMAND_FIELDS.get(self._type_key(), {})
+
+    def _show_segment(self, key: str) -> None:
+        """按类型切换动作表：file 与 window 的动作不一样，换类型要重建下拉。"""
+        actions = step_help.COMMAND_FIELDS[key]
+        if self._seg_type != key:
+            self._seg_type = key
+            if self.seg_action is not None:
+                self.seg_action.destroy()
+            self.seg_action = uikit.ReadonlySelect(
+                self.segment_box, values=list(actions),
+                variable=self.var_seg_action, command=self._on_seg_action,
+                scale=self.app.scale, bg=CARD, font_size=FONT_SIZE_NOTE,
+                width=7)
+            self.seg_action.grid(row=1, column=0, sticky="w")
+            action, first, second = split_command_content(
+                self.var_content.get())
+            if action not in actions:
+                action = next(iter(actions))
+            self._seg_syncing = True
+            try:
+                self.seg_action.set(action)
+                self.var_seg_first.set(first)
+                self.var_seg_second.set(second)
+            finally:
+                self._seg_syncing = False
+            self._on_seg_action()
+        self._compose_segment()
+
+    def _on_seg_action(self, *_args) -> None:
+        """动作变了：换两格标签、决定第二格要不要显示。"""
+        actions = self._seg_actions()
+        action = self.var_seg_action.get().strip()
+        first_label, second_label = actions.get(action, ("", ""))
+        self.seg_labels.configure(
+            text="　".join(text for text in (
+                f"{i18n.tr(first_label)} →" if first_label else "",
+                i18n.tr(second_label)) if text))
+        if second_label:
+            self.seg_second.grid()
+            self.lbl_seg_sep.grid()
+        else:
+            self.seg_second.grid_remove()
+            self.lbl_seg_sep.grid_remove()
+            if self.var_seg_second.get():
+                # 第二格已隐藏就清空，否则 `delete` 会带着上一动作残留的 `a|b`
+                saved = self._seg_syncing
+                self._seg_syncing = True
+                try:
+                    self.var_seg_second.set("")
+                finally:
+                    self._seg_syncing = saved
+        self._compose_segment()
+
+    def _compose_segment(self, *_args) -> None:
+        """字段 → 内容框。"""
+        if self._seg_syncing or not self.segment_box.winfo_manager():
+            return
+        if self._type_key() not in step_help.COMMAND_FIELDS:
+            return
+        text = join_command_content(self.var_seg_action.get(),
+                                    self.var_seg_first.get(),
+                                    self.var_seg_second.get())
+        if text != self.var_content.get():
+            self._seg_syncing = True
+            try:
+                self.var_content.set(text)
+            finally:
+                self._seg_syncing = False
+
+    def _parse_segment(self, *_args) -> None:
+        """内容框 → 字段（用户直接改内容 / 切换类型时反向同步）。"""
+        if self._seg_syncing or not self.segment_box.winfo_manager():
+            return
+        actions = self._seg_actions()
+        if not actions:
+            return
+        action, first, second = split_command_content(self.var_content.get())
+        if action not in actions:
+            return                      # 还在输入动作名，不打断
+        self._seg_syncing = True
+        try:
+            if self.var_seg_action.get() != action:
+                if self.seg_action is not None:
+                    self.seg_action.set(action)
+                else:
+                    self.var_seg_action.set(action)
+            self.var_seg_first.set(first)
+            self.var_seg_second.set(second)
+            # 正在内容框里打字：只刷新标签，不把拼好的内容写回去，
+            # 否则用户刚敲完动作名就被自动补上一个冒号。
+            self._on_seg_action()
+        finally:
+            self._seg_syncing = False
+
+    def _browse_segment(self) -> None:
+        """给第一格挑文件 / 目录。"""
+        action = self.var_seg_action.get().strip()
+        if self._type_key() == "file" and action == "mkdir":
+            path = filedialog.askdirectory(parent=self, title="选择目录")
+        else:
+            path = filedialog.askopenfilename(parent=self, title="选择文件")
+        if path:
+            self.var_seg_first.set(path)
 
     # -- 按键录入 -----------------------------------------------------------
     def _show_hint(self, text: str, warn: bool = False) -> None:
@@ -7852,17 +8108,15 @@ class ImageManagerDialog(BaseDialog):
 
     # -- 数据 ---------------------------------------------------------------
     def _references(self) -> dict[str, list[str]]:
-        """{图片文件名: [组名·第N步, ...]}"""
+        """{图片文件名: [组名·第N步, ...]}
+
+        用引擎的引用清单：候选图（;）、@区域、#第几个、+偏移、拖拽两张图
+        都算引用。少算一张就会把正在用的图判成「未引用」删掉。
+        """
         refs: dict[str, list[str]] = {}
-        for group in self.project.groups:
-            for index, step in enumerate(group.steps, start=1):
-                names = []
-                if step.type in IMAGE_STEP_TYPES:
-                    names.append(step.content.split("|")[0].strip())
-                for name in names:
-                    if name:
-                        refs.setdefault(os.path.basename(name), []).append(
-                            f"{group.name} · 第{index}步")
+        for name, group_name, index in image_references(self.project.groups):
+            refs.setdefault(os.path.basename(name), []).append(
+                f"{group_name} · 第{index}步")
         return refs
 
     def _reload(self) -> None:

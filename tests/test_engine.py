@@ -1041,7 +1041,12 @@ def test_missing_opencv_reports_actionable_hint():
 
     with _fake_input_modules([], located=(100, 100), images=("x.png",)) as io:
         old = engine.opencv_available
+        # 这条用例断言的是「依赖缺失时的提示」，与本机权限状态无关：
+        # macOS 上没授予辅助功能 / 屏幕录制时，纯坐标流程同样会被提示，
+        # 不桩掉就会在任意未授权的 mac 上失败。
+        old_perm = platform_support.missing_permissions
         engine.opencv_available = lambda: False
+        platform_support.missing_permissions = lambda: []
         try:
             ex = Executor()
             ex.base_dir = io.base_dir
@@ -1067,6 +1072,7 @@ def test_missing_opencv_reports_actionable_hint():
                               Step("drag", "1,2|3,4")])]) == []
         finally:
             engine.opencv_available = old
+            platform_support.missing_permissions = old_perm
 
 
 def test_blank_image_detection():

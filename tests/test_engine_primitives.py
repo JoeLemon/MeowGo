@@ -237,9 +237,15 @@ def test_new_primitive_field_validation():
 
 def test_wait_image_types_registered():
     """等待图片出现 / 消失：编号、集合归属与界面字段都按图片步骤处理。"""
-    from rpa.engine import (FAIL_ACTION_STEP_TYPES, IMAGE_STEP_TYPES,
-                            REGION_STEP_TYPES, STEP_TYPES, TIMEOUT_STEP_TYPES,
-                            TYPE_TO_CODE, WAIT_IMAGE_TYPES)
+    from rpa.engine import (
+        FAIL_ACTION_STEP_TYPES,
+        IMAGE_STEP_TYPES,
+        REGION_STEP_TYPES,
+        STEP_TYPES,
+        TIMEOUT_STEP_TYPES,
+        TYPE_TO_CODE,
+        WAIT_IMAGE_TYPES,
+    )
 
     assert STEP_TYPES["wait_image"][0] == "等待图片出现"
     assert STEP_TYPES["wait_gone"][0] == "等待图片消失"
@@ -476,3 +482,107 @@ def test_persistent_variables_survive_runs():
 
     # 持久变量名不能为空
     assert Step("set", "持久:=值").validate()
+
+
+def test_match_miss_hint_branches():
+    """找图失败要说清「差多少」，并给出方向相反的两类建议。"""
+    from rpa.engine import match_miss_hint
+
+    close = match_miss_hint(0.88, 0.90, 812.4, 436.6)
+    assert "0.88" in close and "0.90" in close
+    assert "(812, 437)" in close            # 位置四舍五入到整数
+    assert "下调一档" in close
+
+    changed = match_miss_hint(0.72, 0.90, 10, 20)
+    assert "重新截图" in changed
+
+    absent = match_miss_hint(0.12, 0.90, 10, 20)
+    assert "没有相似内容" in absent
+
+
+def test_locate_records_best_miss(monkeypatch):
+    """找不到图时留下「最接近的一次」，供超时提示与「检测图片」用。"""
+    import numpy as np
+
+    from rpa import engine
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "a.png"), "wb"):
+            pass                        # 只为让 os.path.exists 成立
+
+        def fake_match(search, template, confidence, factor, stats=None):
+            stats["score"] = 0.83
+            stats["box"] = (10, 20, 30, 40)
+            return []
+
+        monkeypatch.setattr(engine, "_match_at_scale", fake_match)
+        monkeypatch.setattr(engine, "_discover_scale", lambda *a, **k: None)
+        monkeypatch.setattr(Executor, "_load_template",
+                            lambda self, path: np.zeros((10, 10, 3), np.uint8))
+        monkeypatch.setattr(Executor, "_grab_screen",
+                            lambda self: (np.zeros((100, 100, 3), np.uint8),
+                                          (0, 0)))
+
+        ex = Executor(base_dir=tmp)
+        ex._screen_scale = 1.0
+        assert ex._locate("a.png") is None
+        # 框 (10,20,30,40) 的中心 → (25, 40)
+        assert ex._last_miss["score"] == 0.83
+        assert (round(ex._last_miss["x"]),
+                round(ex._last_miss["y"])) == (25, 40)
+
+        detail = ex._miss_detail()
+        assert "0.83" in detail and "(25, 40)" in detail
+        assert "下调一档" in detail
+
+        # 重置运行状态时清空，避免上一轮的结论串到下一轮
+        ex.reset()
+        assert ex._last_miss is None
+        assert ex._miss_detail() == ""
+
+
+def test_click_timeout_reports_best_match(monkeypatch):
+    """点击超时：日志里除了「超时」还要给出最接近的相似度与建议。"""
+    logs: list[str] = []
+
+    def fake_locate(self, image, step=None):
+        self._last_miss = {"name": image, "score": 0.84, "threshold": 0.9,
+                           "x": 100, "y": 200, "factor": 1.0}
+        return None
+
+    monkeypatch.setattr(Executor, "_locate", fake_locate)
+    ex = _executor({"main": [Step("click", "按钮.png", timeout=0.1)]},
+                   log=lambda level, msg: logs.append(msg))
+    assert ex.run("main") == "finished"
+    text = "\n".join(logs)
+    assert "超时" in text
+    assert "0.84" in text and "0.90" in text
+    assert "下调一档" in text
+
+
+def test_referenced_images_covers_all_writings():
+    """引用清单要覆盖候选图 / 区域 / 第几个 / 拖拽两张图。
+
+    图片管家「清理未引用图片」和「导出可分享包」都用它：
+    少算一张就会删掉正在用的图，或者打出缺图的包。
+    """
+    from rpa.engine import referenced_images
+
+    groups = [Group("组", [
+        Step("click", "按钮.png@10,20,300,200"),
+        Step("wait_image", "加载.png;备用.png#2"),
+        Step("drag", "起点.png|终点.png"),
+        Step("click_xy", "1,2"),
+        Step("if_else", "弹窗.png|关闭|跳过"),
+    ])]
+    assert referenced_images(groups) == {
+        "按钮.png", "加载.png", "备用.png", "起点.png", "终点.png", "弹窗.png"}
+
+
+def test_referenced_images_skips_disabled_and_coordinates():
+    from rpa.engine import referenced_images
+
+    disabled = Step("click", "停用.png")
+    disabled.enabled = False
+    groups = [Group("组", [disabled, Step("drag", "1,2|3,4")])]
+    assert referenced_images(groups) == set()

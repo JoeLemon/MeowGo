@@ -79,6 +79,21 @@ EN: dict[str, str] = {
     "打开运行报告目录": "Open report folder",
     "恢复配置备份…": "Restore configuration backup…",
     "打开图片目录": "Open image folder",
+    "导出可分享包…": "Export shareable package…",
+    "导入可分享包…": "Import shareable package…",
+    "重新指定图片目录…": "Change image folder…",
+    "流程 + 用到的图片，打包发给同事":
+        "Workflow plus its images, packed for a colleague",
+    "导出可分享包": "Export shareable package",
+    "导入可分享包": "Import shareable package",
+    "指定失败": "Could not use that folder",
+    "导出完成": "Export finished",
+    "导入会用包里的流程替换当前流程（可用 Ctrl+Z 撤销）。":
+        "Importing replaces the current workflow (Ctrl+Z undoes it).",
+    "继续？": "Continue?",
+    "搜索": "Search",
+    "选择文件": "Choose file",
+    "选择目录": "Choose folder",
     "新建执行组": "New group",
     "恢复预置执行组…": "Restore preset groups…",
     "补回缺失模板": "Restore missing templates",
@@ -1180,6 +1195,19 @@ EN: dict[str, str] = {
         "Debug: variable {name} set to {value}",
     "运行到这一步": "Run to this step",
     "到它才单步确认": "Confirm step-by-step once reached",
+    # 找图失败诊断（engine.match_miss_hint）
+    "建议：只差一点，可在「运行设置 → 图像匹配相似度」下调一档后重试":
+        "Suggestion: it is very close — lower Image match confidence one step "
+        "and retry",
+    "建议：目标内容可能已变化，请重新截图并「检测图片」确认":
+        "Suggestion: the target may have changed — take a new screenshot and "
+        "use Check image",
+    "建议：屏幕上没有相似内容，确认目标窗口已打开且未被遮挡":
+        "Suggestion: nothing similar on screen — make sure the target window "
+        "is open and unobstructed",
+    "当前屏幕未找到匹配图像": "No matching image on the current screen",
+    "（请确认目标窗口已打开、图片未过期）":
+        " (make sure the target window is open and the image is up to date)",
 }
 
 
@@ -1299,6 +1327,10 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], .
          r"条件：变量比较则执行|HTTP 请求|等待图片出现|等待图片消失|"
          r"读取屏幕文字)：(.+)$",
          lambda m: f"{tr(m.group(1))}: {m.group(2)}"),
+        # 找图失败诊断（engine.match_miss_hint，日志与「检测图片」共用）
+        (r"^最接近的一次：相似度 ([\d.]+)（阈值 ([\d.]+)）$",
+         r"Closest match: \1 (threshold \2)"),
+        (r"^位置 \((-?\d+), (-?\d+)\)$", r"Position (\1, \2)"),
     )
 )
 

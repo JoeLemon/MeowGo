@@ -12,7 +12,6 @@ from typing import Optional
 
 from . import i18n
 
-
 # 运行频率：每天 / 每周某天 / 工作日 / 每 N 小时
 MODES = ("daily", "weekly", "weekday", "hourly")
 # 周一 = 0，与 datetime.weekday() 一致
@@ -26,7 +25,7 @@ def _valid_mode(value: object) -> str:
 
 def _valid_weekday(value: object) -> int:
     try:
-        day = int(value)                      # type: ignore[arg-type]
+        day = int(str(value))
     except (TypeError, ValueError):
         return 0
     return min(6, max(0, day))

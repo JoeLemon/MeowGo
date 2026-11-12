@@ -161,3 +161,183 @@ def test_app_builds_with_listbox_log(tmp_path, monkeypatch):
         assert reloaded.names() == ["主流程", "收尾"]
     finally:
         app.destroy()
+
+
+def test_type_options_are_grouped():
+    """类型下拉按四类分组，且不丢类型：42 项一个不少。"""
+    from rpa import step_help
+    from rpa.engine import STEP_TYPES
+
+    options = gui.StepDialog._type_options()
+    assert len(options) == len(STEP_TYPES) == 42
+    groups = [group for _key, _label, group in options]
+    assert set(groups) == set(step_help.CATEGORIES)
+    # 同组必须连续，否则下拉里会出现「分组标题反复出现」
+    seen: list[str] = []
+    for group in groups:
+        if not seen or seen[-1] != group:
+            seen.append(group)
+    assert len(seen) == len(set(seen))
+
+
+def test_step_help_covers_every_type():
+    """帮助文案不能漏类型：没写说明的只能是「只需填提示」的简单类型。"""
+    from rpa import step_help
+    from rpa.engine import STEP_TYPES
+
+    missing = [key for key in STEP_TYPES if not step_help.usage(key)]
+    # 允许留空的只有纯值类型（等待秒数 / 留空指令）
+    assert set(missing) <= {"wait", "break", "continue", "section"}, missing
+
+
+def test_help_dialog_renders_and_filters(tmp_path, monkeypatch):
+    """帮助面板：能建、能搜、能定位到指定类型。"""
+    from rpa import dialogs
+
+    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(gui, "REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(gui, "SHOTS_DIR", str(tmp_path / "reports" / "shots"))
+    monkeypatch.setattr(gui, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setenv("MEOWGO_NO_ONBOARD", "1")
+    monkeypatch.setenv("MEOWGO_NO_PERMISSION_PROMPT", "1")
+    # 对话框正常会 grab 焦点 + 淡入，测试里跳过
+    monkeypatch.setattr(dialogs.BaseDialog, "center", lambda self, **kw: None)
+
+    app = gui.App()
+    dialog = None
+    try:
+        dialog = dialogs.HelpDialog(app, "file")
+        app.update()
+        assert dialog.tree.exists("file")
+        body = dialog.text.get("1.0", "end")
+        assert "write:路径|内容" in body, "应显示 file 的写法"
+        assert "文件操作" in body
+
+        # 搜索：只留命中的类型
+        dialog.var_search.set("正则")
+        app.update()
+        assert dialog.tree.exists("regex")
+        assert not dialog.tree.exists("click")
+
+        # 清空搜索后恢复全部，并把正文切到通用规则
+        dialog.var_search.set("")
+        app.update()
+        dialog.select_type(dialog.COMMON_KEY)
+        app.update()
+        assert "变量怎么用" in dialog.text.get("1.0", "end")
+    finally:
+        if dialog is not None:
+            dialog.destroy()
+        app.destroy()
+
+
+def test_f1_help_focuses_selected_step_type(tmp_path, monkeypatch):
+    """F1 / 右键「这一步怎么写」要定位到当前选中行的类型。"""
+    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(gui, "REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(gui, "SHOTS_DIR", str(tmp_path / "reports" / "shots"))
+    monkeypatch.setattr(gui, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setenv("MEOWGO_NO_ONBOARD", "1")
+    monkeypatch.setenv("MEOWGO_NO_PERMISSION_PROMPT", "1")
+
+    app = gui.App()
+    seen: dict = {}
+    try:
+        app.project = gui.Project(
+            groups=[gui.Group("主", [gui.Step("http", "GET https://x|结果")])])
+        app.group_index = 0
+        monkeypatch.setattr(app, "show_help",
+                            lambda focus_type="": seen.setdefault(
+                                "type", focus_type))
+        monkeypatch.setattr(app, "_selected_steps", lambda: [0])
+        app.show_help_for_selected_step()
+        assert seen["type"] == "http"
+
+        # 没有选中行时退化成通用帮助
+        monkeypatch.setattr(app, "_selected_steps", lambda: [])
+        seen.clear()
+        app.show_help_for_selected_step()
+        assert seen["type"] == ""
+    finally:
+        app.destroy()
+
+
+def test_step_dialog_segment_editor(tmp_path, monkeypatch):
+    """file / window 的分段编辑：内容框与三段字段双向同步，保存结果不变。"""
+    from rpa import dialogs
+
+    monkeypatch.setattr(gui, "SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(gui, "REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(gui, "SHOTS_DIR", str(tmp_path / "reports" / "shots"))
+    monkeypatch.setattr(gui, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setenv("MEOWGO_NO_ONBOARD", "1")
+    monkeypatch.setenv("MEOWGO_NO_PERMISSION_PROMPT", "1")
+    monkeypatch.setattr(dialogs.BaseDialog, "center", lambda self, **kw: None)
+
+    app = gui.App()
+    dialog = None
+    window_dialog = None
+    try:
+        dialog = gui.StepDialog(
+            app, app.project, gui.Step("file", "copy:/a/x.txt|/b/y.txt"))
+        app.update()
+        # 打开时把已有内容拆成三段
+        assert dialog.var_seg_action.get() == "copy"
+        assert dialog.var_seg_first.get() == "/a/x.txt"
+        assert dialog.var_seg_second.get() == "/b/y.txt"
+
+        # 改字段 → 内容框跟着拼
+        dialog.var_seg_first.set("/c/z.txt")
+        app.update()
+        assert dialog.var_content.get() == "copy:/c/z.txt|/b/y.txt"
+
+        # 直接改内容框 → 字段跟着拆
+        dialog.var_content.set("write:/tmp/out.txt|hello")
+        app.update()
+        assert dialog.var_seg_action.get() == "write"
+        assert dialog.var_seg_first.get() == "/tmp/out.txt"
+        assert dialog.var_seg_second.get() == "hello"
+
+        # 单段动作：第二格隐藏，内容里不留多余的竖线
+        dialog.var_seg_action.set("delete")
+        app.update()
+        assert not dialog.seg_second.winfo_manager()
+        dialog.var_seg_first.set("/tmp/x")
+        app.update()
+        assert dialog.var_content.get() == "delete:/tmp/x"
+
+        # 在内容框里打字时不要被拼回去：敲个动作名不该被自动补冒号
+        dialog.var_content.set("copy")
+        app.update()
+        assert dialog.var_content.get() == "copy"
+        assert dialog.var_seg_action.get() == "copy"
+        assert dialog.var_seg_first.get() == ""
+
+        # 动作名还没打完：原样保留，不打断输入
+        dialog.var_content.set("del")
+        app.update()
+        assert dialog.var_content.get() == "del"
+
+        dialog.var_content.set("delete:/tmp/x")
+        app.update()
+        assert dialog.var_seg_action.get() == "delete"
+
+        dialog.ok()
+        assert dialog.result.type == "file"
+        assert dialog.result.content == "delete:/tmp/x"
+        dialog = None
+
+        # window 用另一套动作表
+        window_dialog = gui.StepDialog(
+            app, app.project, gui.Step("window", "activate:记事本"))
+        app.update()
+        assert window_dialog.var_seg_action.get() == "activate"
+        assert window_dialog.var_seg_first.get() == "记事本"
+        window_dialog.ok()
+        assert window_dialog.result.content == "activate:记事本"
+        window_dialog = None
+    finally:
+        for widget in (dialog, window_dialog):
+            if widget is not None:
+                widget.destroy()
+        app.destroy()

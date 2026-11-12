@@ -9,7 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
-from . import platform_support, uikit
+from . import i18n, platform_support, step_help, uikit
+from .engine import STEP_TYPES
 from .theme import CONTROL_MD, FONT_CAPTION, FONT_MONO, FONT_NOTE, FONT_SIZE_BODY, LIGHT_PALETTE
 
 if TYPE_CHECKING:  # 仅供类型标注，避免与 gui 产生循环导入
@@ -275,3 +276,172 @@ class ShortcutsDialog(BaseDialog):
         self.destroy()
 
 
+
+class HelpDialog(BaseDialog):
+    """使用说明：左边挑指令类型，右边看写法和示例。
+
+    内容来自 ``rpa.step_help``（与 README 的语法表同源），支持搜索；
+    在步骤列表按 F1 会直接定位到当前这一行的类型，不用再去翻文档。
+    """
+
+    COMMON_KEY = "__common__"
+
+    def __init__(self, parent: App, focus_type: str = ""):
+        super().__init__(parent, "使用说明", width=780, height=580)
+        self.resizable(True, True)
+        self.minsize(parent.s(640), parent.s(440))
+        self.columnconfigure(0, weight=0, minsize=parent.s(250))
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)
+        self._current = ""
+
+        top = tk.Frame(self, bg=CARD)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew",
+                 padx=parent.s(14), pady=(parent.s(12), parent.s(6)))
+        top.columnconfigure(1, weight=1)
+        tk.Label(top, text="搜索", bg=CARD, fg=MUTED,
+                 font=FONT_CAPTION).grid(row=0, column=0,
+                                         padx=(0, parent.s(8)))
+        self.var_search = tk.StringVar()
+        self.entry = uikit.TextField(top, textvariable=self.var_search,
+                                     scale=parent.scale, bg=CARD,
+                                     font_size=FONT_SIZE_BODY)
+        self.entry.grid(row=0, column=1, sticky="ew")
+        self.var_search.trace_add("write", lambda *_: self._reload())
+
+        left = tk.Frame(self, bg=CARD)
+        left.grid(row=1, column=0, sticky="nsew",
+                  padx=(parent.s(14), parent.s(8)), pady=(0, parent.s(8)))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(left, columns=("label",), show="tree",
+                                 selectmode="browse")
+        self.tree.column("#0", width=parent.s(220))
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll = uikit.SlimScrollbar(left, orient="vertical",
+                                     command=self.tree.yview,
+                                     scale=parent.scale, bg=CARD)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        body = tk.Frame(self, bg=CARD)
+        body.grid(row=1, column=1, sticky="nsew",
+                  padx=(0, parent.s(14)), pady=(0, parent.s(8)))
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        self.text = tk.Text(body, wrap="word", bg=CARD, fg=TEXT,
+                            relief="flat", borderwidth=0,
+                            highlightthickness=0, font=FONT_NOTE,
+                            padx=parent.s(6), pady=parent.s(4),
+                            spacing1=parent.s(2), spacing3=parent.s(3))
+        self.text.grid(row=0, column=0, sticky="nsew")
+        text_scroll = uikit.SlimScrollbar(body, orient="vertical",
+                                          command=self.text.yview,
+                                          scale=parent.scale, bg=CARD)
+        text_scroll.grid(row=0, column=1, sticky="ns")
+        self.text.configure(yscrollcommand=text_scroll.set)
+        self.text.tag_configure("h1", font=FONT_NOTE, foreground=TEXT,
+                                spacing3=parent.s(6))
+        self.text.tag_configure("h2", font=FONT_CAPTION, foreground=MUTED,
+                                spacing1=parent.s(8), spacing3=parent.s(2))
+        self.text.configure(state="disabled")
+
+        self.footer(2, "关闭", "check", self.ok, cancel_text="")
+        self._reload()
+        if focus_type:
+            self.select_type(focus_type)
+        else:
+            self.select_type(self.COMMON_KEY)
+        self.center()
+
+    # -- 列表 ---------------------------------------------------------------
+    def _entries(self) -> list[tuple[str, str]]:
+        """(key, 显示名)，含开头的「通用规则」。"""
+        items = [(self.COMMON_KEY, "通用规则（先看这个）")]
+        items.extend((key, info[0]) for key, info in STEP_TYPES.items())
+        return items
+
+    def _matches(self, key: str, label: str, needle: str) -> bool:
+        if not needle:
+            return True
+        haystack = [label, i18n.tr(label)]
+        if key == self.COMMON_KEY:
+            for title, lines in step_help.COMMON:
+                haystack.append(title)
+                haystack.extend(lines)
+        else:
+            info = STEP_TYPES[key]
+            haystack.extend([info[0], info[1], str(info[3])])
+            haystack.extend(step_help.usage(key))
+        return any(needle in text for text in haystack if text)
+
+    def _reload(self) -> None:
+        needle = self.var_search.get().strip()
+        self.tree.delete(*self.tree.get_children())
+        parents: dict[str, str] = {}
+        for key, label in self._entries():
+            if not self._matches(key, label, needle):
+                continue
+            group = ("通用" if key == self.COMMON_KEY
+                     else step_help.category(key))
+            parent = parents.get(group)
+            if parent is None:
+                parent = self.tree.insert("", "end", text=group, open=True,
+                                          iid=f"@{group}")
+                parents[group] = parent
+            self.tree.insert(parent, "end", text=i18n.tr(label), iid=key)
+        if self._current and self.tree.exists(self._current):
+            self.tree.selection_set(self._current)
+            self.tree.see(self._current)
+
+    def select_type(self, key: str) -> None:
+        """选中某个类型（F1 与外部调用都走这里）。"""
+        if not self.tree.exists(key):
+            key = self.COMMON_KEY
+        self.tree.selection_set(key)
+        self.tree.see(key)
+        self._render(key)
+
+    def _on_select(self, _event=None) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            return
+        key = selection[0]
+        if key.startswith("@"):        # 点到了分组标题
+            return
+        self._render(key)
+
+    # -- 正文 ---------------------------------------------------------------
+    def _write(self, text: str, tag: str = "body") -> None:
+        self.text.insert("end", i18n.tr(text) + "\n", tag)
+
+    def _render(self, key: str) -> None:
+        self._current = key
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        if key == self.COMMON_KEY:
+            self._write("通用规则", "h1")
+            for title, lines in step_help.COMMON:
+                self._write(title, "h2")
+                for line in lines:
+                    self._write(line)
+        else:
+            label, hint, need_repeat, repeat_hint = STEP_TYPES[key]
+            self._write(label, "h1")
+            self._write(hint)
+            if need_repeat and repeat_hint:
+                self._write(f"重复次数：{repeat_hint}")
+            entries = step_help.usage(key)
+            if entries:
+                self._write("怎么写", "h2")
+                for line in entries:
+                    self._write(line)
+            else:
+                self._write("这一类只需要填上面提示的内容。")
+        self.text.configure(state="disabled")
+        self.text.yview_moveto(0)
+
+    def ok(self) -> None:
+        self.result = self._current
+        self.destroy()
